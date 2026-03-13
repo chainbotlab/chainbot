@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/chainbot"]
+resolver = "3"
