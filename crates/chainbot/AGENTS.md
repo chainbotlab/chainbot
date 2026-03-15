@@ -8,3 +8,4 @@
 ## Members
 - `Cargo.toml`: Package manifest for the `chainbot` workspace member.
 - `src/`: Binary entrypoint and crate source files.
+- `tests/`: Integration tests for versioned contracts, root loading, scheduler execution semantics, runtime-state persistence, and runtime host boundaries.
