@@ -1,0 +1,5 @@
+api_version = "1.0.0"
+trigger_id = "external-trigger-e2e"
+kind = "external_plugin"
+source = "trigger-e2e-plugin"
+enabled = true

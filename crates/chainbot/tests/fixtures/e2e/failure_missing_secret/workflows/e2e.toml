@@ -1,0 +1,88 @@
+api_version = "1.0.0"
+workflow_id = "wf-e2e"
+name = "wf-e2e"
+
+[runtime.workflow_defaults]
+symbol = "BTCUSDT"
+secret_token_ref = "secret://ops/slack/webhook#api_token"
+
+[[triggers]]
+api_version = "1.0.0"
+trigger_id = "manual-inline"
+kind = "builtin"
+source = "manual"
+enabled = true
+
+[[nodes]]
+api_version = "1.0.0"
+node_id = "builtin-start"
+kind = "builtin"
+plugin_id = "builtin.identity"
+operation = "run"
+depends_on = []
+
+[[nodes.inputs]]
+target = "symbol"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "symbol"
+
+[[nodes]]
+api_version = "1.0.0"
+node_id = "script-node"
+kind = "builtin"
+plugin_id = "builtin.script"
+operation = "python:scripts/e2e_worker.py"
+depends_on = ["builtin-start"]
+
+[[nodes.inputs]]
+target = "symbol"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "symbol"
+
+[[nodes.inputs]]
+target = "token"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "secret_token_ref"
+
+[[nodes]]
+api_version = "1.0.0"
+node_id = "external-node"
+kind = "builtin"
+plugin_id = "builtin.external_node"
+operation = "node-e2e-plugin"
+depends_on = ["script-node"]
+
+[[nodes.inputs]]
+target = "symbol"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "symbol"
+
+[[nodes.inputs]]
+target = "token"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "secret_token_ref"
+
+[[nodes]]
+api_version = "1.0.0"
+node_id = "builtin-finish"
+kind = "builtin"
+plugin_id = "builtin.identity"
+operation = "run"
+depends_on = ["external-node"]
+
+[[nodes.inputs]]
+target = "decision"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "decision"

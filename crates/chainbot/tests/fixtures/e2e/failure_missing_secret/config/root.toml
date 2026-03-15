@@ -1,0 +1,3 @@
+schema_version = "1.0.0"
+profile = "e2e-failure-missing-secret"
+secret_refs = ["secret://ops/slack/webhook#api_token"]

@@ -1,0 +1,6 @@
+api_version = "1.0.0"
+plugin_id = "trigger-e2e-plugin"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.emit.run_request"]
+executable = "bin/external_trigger.sh"
