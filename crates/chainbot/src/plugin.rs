@@ -4,6 +4,7 @@
 [POS]:    Plugin boundary module for V2 manifest compatibility and safe external-node host execution.
 [UPDATE]: 2026-03-16 - Add versioned plugin manifest contract and parser.
 [UPDATE]: 2026-03-16 - Add external node plugin host, manifest guards, and execution contract validation.
+[UPDATE]: 2026-03-17 - Apply default-deny process environment with explicit allowlist for external plugin hosts.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +26,8 @@ pub const PLUGIN_KIND_EXTERNAL_NODE: &str = "external_node";
 pub const PLUGIN_KIND_EXTERNAL_TRIGGER: &str = "external_trigger";
 pub const PLUGIN_KIND_NODE_ALIAS: &str = "node";
 pub const PLUGIN_KIND_TRIGGER_ALIAS: &str = "trigger";
+pub const PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
+    &["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginKind {
@@ -177,10 +180,14 @@ impl ExternalNodePluginHost {
             }
         })?;
 
-        let mut child = Command::new(&executable)
+        let mut command = Command::new(&executable);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_plugin_host_environment(&mut command);
+
+        let mut child = command
             .spawn()
             .map_err(|source| ContractError::NodePluginSpawnFailed {
                 plugin_id: manifest.plugin_id.clone(),
@@ -317,6 +324,15 @@ impl ExternalNodePluginHost {
         }
 
         Ok(canonical_candidate)
+    }
+}
+
+pub(crate) fn configure_plugin_host_environment(command: &mut Command) {
+    command.env_clear();
+    for key in PLUGIN_HOST_ENV_ALLOWLIST {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
     }
 }
 

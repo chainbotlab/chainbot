@@ -5,13 +5,14 @@
 [UPDATE]: 2026-03-16 - Add protocol-versioned worker envelope contracts.
 [UPDATE]: 2026-03-16 - Add subprocess worker host for Python and JavaScript runtimes.
 [UPDATE]: 2026-03-16 - Harden timeout cancellation cleanup so timed-out workers are always reaped or fail explicitly.
+[UPDATE]: 2026-03-17 - Treat non-zero exits and success=false envelopes as typed worker execution failures.
 */
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -93,9 +94,18 @@ pub enum WorkerHostError {
         max_bytes: usize,
         actual_bytes: usize,
     },
+    NonZeroExit {
+        runtime: ScriptRuntime,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
     EmptyResponse,
     MalformedResponse(serde_json::Error),
     InvalidEnvelope(ContractError),
+    ReportedFailure {
+        runtime: ScriptRuntime,
+        detail: String,
+    },
 }
 
 #[derive(Debug)]
@@ -243,7 +253,7 @@ impl WorkerHost {
                 source,
             });
 
-        wait_result?;
+        let exit_status = wait_result?;
         request_write_result?;
         let stdout_capture = stdout_capture_result?;
         let stderr_capture = stderr_capture_result?;
@@ -264,6 +274,14 @@ impl WorkerHost {
             });
         }
 
+        if !exit_status.success() {
+            return Err(WorkerHostError::NonZeroExit {
+                runtime: process.runtime,
+                exit_code: exit_status.code(),
+                stderr: format_stream_output(&stderr_capture.bytes),
+            });
+        }
+
         if stdout_capture.bytes.is_empty() {
             return Err(WorkerHostError::EmptyResponse);
         }
@@ -281,6 +299,13 @@ impl WorkerHost {
                     actual: response.request_id,
                 },
             ));
+        }
+
+        if !response.success {
+            return Err(WorkerHostError::ReportedFailure {
+                runtime: process.runtime,
+                detail: format_worker_failure_detail(&response.output),
+            });
         }
 
         Ok(response)
@@ -361,6 +386,30 @@ impl Display for WorkerHostError {
                 f,
                 "worker {stream} exceeded limit: {actual_bytes} bytes > {max_bytes} bytes"
             ),
+            Self::NonZeroExit {
+                runtime,
+                exit_code,
+                stderr,
+            } => {
+                let code = exit_code
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "terminated by signal".to_owned());
+                if stderr.is_empty() {
+                    write!(
+                        f,
+                        "{} worker exited unsuccessfully with status {code}",
+                        runtime.as_str()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{} worker exited unsuccessfully with status {}: {}",
+                        runtime.as_str(),
+                        code,
+                        stderr
+                    )
+                }
+            }
             Self::EmptyResponse => {
                 write!(
                     f,
@@ -376,6 +425,9 @@ impl Display for WorkerHostError {
                     f,
                     "worker response envelope failed protocol validation: {source}"
                 )
+            }
+            Self::ReportedFailure { runtime, detail } => {
+                write!(f, "{} worker reported failure: {detail}", runtime.as_str())
             }
         }
     }
@@ -396,8 +448,35 @@ impl std::error::Error for WorkerHostError {
             Self::MissingPipe { .. }
             | Self::Timeout { .. }
             | Self::OversizedOutput { .. }
-            | Self::EmptyResponse => None,
+            | Self::NonZeroExit { .. }
+            | Self::EmptyResponse
+            | Self::ReportedFailure { .. } => None,
         }
+    }
+}
+
+fn format_stream_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_owned()
+}
+
+fn format_worker_failure_detail(output: &serde_json::Value) -> String {
+    if let Some(message) = output.get("error").and_then(serde_json::Value::as_str) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+
+    if let Some(message) = output.get("message").and_then(serde_json::Value::as_str) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+
+    match serde_json::to_string(output) {
+        Ok(value) => format!("success=false with output={value}"),
+        Err(_) => "success=false".to_owned(),
     }
 }
 
@@ -436,11 +515,11 @@ fn wait_for_child_or_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
     runtime: ScriptRuntime,
-) -> Result<(), WorkerHostError> {
+) -> Result<ExitStatus, WorkerHostError> {
     let started_at = Instant::now();
     loop {
         match child.try_wait().map_err(WorkerHostError::Wait)? {
-            Some(_) => return Ok(()),
+            Some(status) => return Ok(status),
             None => {
                 if started_at.elapsed() >= timeout {
                     match child.kill() {

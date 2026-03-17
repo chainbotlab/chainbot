@@ -4,6 +4,7 @@
 [POS]:    Integration test boundary for task-6 trigger plane contracts.
 [UPDATE]: 2026-03-16 - Add deterministic trigger-plane acceptance tests.
 [UPDATE]: 2026-03-16 - Cover unknown trigger kinds and restart-safe coordination rebuild.
+[UPDATE]: 2026-03-17 - Add default-deny host environment isolation regression for external trigger plugins.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::config::RootLayout;
 use chainbot::errors::ContractError;
-use chainbot::plugin::PluginManifest;
+use chainbot::plugin::{PluginManifest, PLUGIN_HOST_ENV_ALLOWLIST};
 use chainbot::state::{StateLayout, TriggerEventRecord};
 use chainbot::trigger::{
     TriggerDefinition, TriggerEmission, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy,
@@ -582,6 +583,51 @@ fn trigger_coordination_rebuilds_from_file_records_after_restart() {
     assert!(reopened_requests.is_empty());
 }
 
+#[test]
+fn trigger_plugin_host_uses_default_deny_environment() {
+    let probe_key = select_non_allowlisted_host_env_key();
+    let (state_layout, plugin_root) = unique_layout("trigger-plugin-default-deny-env");
+    let marker_path = plugin_root.join("env-leak.marker");
+    let executable = plugin_root.join("plugin-env-probe.sh");
+    write_trigger_env_probe_script(&executable, &probe_key, &marker_path);
+
+    let definitions = vec![trigger_definition(
+        "trigger-external",
+        "external_plugin",
+        "plugin-env-probe",
+    )];
+    let manifests = vec![plugin_manifest(
+        "plugin-env-probe",
+        "1.0.0",
+        "trigger",
+        "plugin-env-probe.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let mut plane = TriggerPlane::open(
+        state_layout,
+        definitions,
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-env-probe"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+        1_710_100_060_000,
+    )
+    .expect("trigger plane should open under default-deny trigger plugin host env");
+
+    let requests = plane
+        .collect_run_requests(1_710_100_060_010)
+        .expect("external trigger plugin should execute under default-deny env");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !marker_path.exists(),
+        "trigger plugin inherited unexpected host environment variable {probe_key}"
+    );
+}
+
 fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefinition {
     TriggerDefinition {
         api_version: "1.0.0".to_string(),
@@ -695,4 +741,39 @@ fn write_executable_script(path: &Path, json_payload: &str) {
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).expect("script fixture should become executable");
     }
+}
+
+fn write_trigger_env_probe_script(path: &Path, probe_key: &str, marker_path: &Path) {
+    let script = format!(
+        "#!/bin/sh\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\ncat <<'JSON'\n{{\"api_version\":\"1.0.0\",\"events\":[{{\"event_id\":\"event-env\",\"workflow_id\":\"wf-env\",\"occurred_at_ms\":1710100060000,\"source\":\"env-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
+        marker_path.display()
+    );
+    fs::write(path, script).expect("script fixture should be writable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("script fixture metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("script fixture should become executable");
+    }
+}
+
+fn select_non_allowlisted_host_env_key() -> String {
+    let mut candidates = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_string_lossy().to_string();
+            if value.is_empty() || PLUGIN_HOST_ENV_ALLOWLIST.contains(&key.as_str()) {
+                return None;
+            }
+            Some(key)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .next()
+        .expect("test process should expose at least one non-allowlisted environment variable")
 }

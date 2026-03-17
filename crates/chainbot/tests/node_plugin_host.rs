@@ -3,6 +3,7 @@
 [OUTPUT]: Deterministic integration coverage for node plugin manifest validation, roundtrip execution, and capability restrictions.
 [POS]:    Integration test boundary for external node plugin host contracts.
 [UPDATE]: 2026-03-16 - Add external node plugin host validation and execution contract tests.
+[UPDATE]: 2026-03-17 - Add regression coverage for default-deny plugin host environment isolation.
 */
 
 use std::collections::BTreeMap;
@@ -12,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::errors::ContractError;
 use chainbot::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PLUGIN_KIND_EXTERNAL_NODE,
+    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PLUGIN_HOST_ENV_ALLOWLIST,
+    PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
 
@@ -121,6 +123,28 @@ fn node_plugin_capability_restrictions() {
     assert!(!marker_path.exists());
 }
 
+#[test]
+fn node_plugin_host_uses_default_deny_environment() {
+    let probe_key = select_non_allowlisted_host_env_key();
+    let root = unique_test_root("node-plugin-default-deny-env");
+    let plugins_root = root.join("plugins");
+    let marker_path = root.join("env-leak.marker");
+    let executable = plugins_root.join("bin").join("node_env_probe.sh");
+    write_env_probe_script(&executable, &probe_key, &marker_path);
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let manifest = external_node_manifest("node-env-probe", "bin/node_env_probe.sh");
+    let request = valid_request("node-env-probe", "node-4");
+
+    host.execute(&manifest, &request)
+        .expect("external node plugin should still execute under default-deny env");
+
+    assert!(
+        !marker_path.exists(),
+        "plugin inherited unexpected host environment variable {probe_key}"
+    );
+}
+
 fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
     PluginManifest {
         api_version: "1.0.0".to_owned(),
@@ -171,6 +195,46 @@ fn write_plugin_script(path: &Path, json_output: &str, marker: Option<&Path>) {
         fs::set_permissions(path, permissions)
             .expect("plugin script permissions should be set executable");
     }
+}
+
+fn write_env_probe_script(path: &Path, probe_key: &str, marker_path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("plugin script parent directory should be creatable");
+    }
+
+    let script = format!(
+        "#!/bin/sh\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\ncat >/dev/null\nprintf '%s' '{{\"contract_version\":\"1.0.0\",\"success\":true,\"output\":{{\"decision\":\"hold\"}}}}'\n",
+        marker_path.display()
+    );
+    fs::write(path, script).expect("plugin env-probe fixture should be writable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("plugin script metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+            .expect("plugin script permissions should be set executable");
+    }
+}
+
+fn select_non_allowlisted_host_env_key() -> String {
+    let mut candidates = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_string_lossy().to_string();
+            if value.is_empty() || PLUGIN_HOST_ENV_ALLOWLIST.contains(&key.as_str()) {
+                return None;
+            }
+            Some(key)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .next()
+        .expect("test process should expose at least one non-allowlisted environment variable")
 }
 
 fn unique_test_root(prefix: &str) -> PathBuf {
