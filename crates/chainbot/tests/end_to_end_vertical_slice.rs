@@ -4,6 +4,7 @@
 [POS]:    Integration test boundary for task-11 end-to-end run/serve/list-runs behavior.
 [UPDATE]: 2026-03-16 - Add end_to_end_vertical_slice and end_to_end_vertical_slice_failure_modes tests.
 [UPDATE]: 2026-03-16 - Keep staged trigger-record fixtures aligned with persisted coordination metadata.
+[UPDATE]: 2026-03-17 - Add runtime failure regression proving plugin stderr and run_failed logs redact resolved secrets.
 */
 
 use std::fs;
@@ -96,6 +97,34 @@ fn end_to_end_vertical_slice_failure_modes() {
         .and_then(serde_json::Value::as_str)
         .expect("run summary should contain status");
     assert_eq!(status, render_status(RunStatus::Failed));
+}
+
+#[test]
+fn end_to_end_vertical_slice_failure_modes_redact_plugin_error_details() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-failure-secret-redaction");
+    let secret_value = read_e2e_secret_value(&root);
+
+    fs::write(
+        root.join("plugins").join("bin").join("external_node.sh"),
+        "#!/bin/sh\ncat >&2\nexit 42\n",
+    )
+    .expect("plugin fixture should be writable");
+    make_executable(&root.join("plugins").join("bin").join("external_node.sh"));
+
+    let run_output = run_chainbot(["run", "--root"], &root, true);
+    assert!(!run_output.status.success());
+
+    let stderr = String::from_utf8(run_output.stderr).expect("stderr should decode as UTF-8");
+    assert!(stderr.contains("failed"));
+    assert!(!stderr.contains(&secret_value));
+
+    let persisted_logs = collect_text_files(&root.join("state").join("workflow-logs"));
+    assert!(persisted_logs.contains("run_finished"));
+    assert!(!persisted_logs.contains(&secret_value));
 }
 
 #[test]
@@ -397,6 +426,21 @@ fn count_json_files(path: &Path) -> usize {
     }
 
     count
+}
+
+fn read_e2e_secret_value(root: &Path) -> String {
+    let payload = fs::read_to_string(
+        root.join("secrets")
+            .join("ops")
+            .join("slack")
+            .join("webhook.gpg"),
+    )
+    .expect("fixture secret payload should be readable");
+    payload
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("api_token="))
+        .expect("fixture secret payload should contain api_token entry")
+        .to_owned()
 }
 
 fn write_json_file<T>(path: &Path, value: &T)

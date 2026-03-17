@@ -3,6 +3,7 @@
 [OUTPUT]: Integration coverage for protocol negotiation, script roundtrip, timeout, malformed output, and bounded stream limits.
 [POS]:    Integration test boundary for subprocess worker-host behavior.
 [UPDATE]: 2026-03-16 - Add worker host protocol and subprocess safety tests.
+[UPDATE]: 2026-03-17 - Add regressions for success=false and non-zero worker failure semantics.
 */
 
 use std::env;
@@ -141,6 +142,78 @@ fn python_and_javascript_worker_roundtrip() {
 }
 
 #[test]
+fn worker_failure_channels_are_typed_errors() {
+    let Some(python_interpreter) = resolve_interpreter(&["python3", "python"]) else {
+        return;
+    };
+
+    let host = WorkerHost::new(WorkerHostLimits {
+        timeout: Duration::from_secs(1),
+        max_stdout_bytes: 64 * 1024,
+        max_stderr_bytes: 64 * 1024,
+    });
+
+    let script_path = unique_tmp_python_script("worker-failure-channels");
+    let script = r#"import json
+import sys
+
+request = json.loads(sys.stdin.read())
+mode = request.get("payload", {}).get("mode")
+
+if mode == "success_false":
+    response = {
+        "protocol_version": request.get("protocol_version"),
+        "request_id": request.get("request_id"),
+        "success": False,
+        "output": {"error": "worker reported explicit failure"},
+    }
+    sys.stdout.write(json.dumps(response))
+    sys.stdout.flush()
+    raise SystemExit(0)
+
+response = {
+    "protocol_version": request.get("protocol_version"),
+    "request_id": request.get("request_id"),
+    "success": True,
+    "output": {"runtime": "python"},
+}
+sys.stdout.write(json.dumps(response))
+sys.stdout.flush()
+sys.stderr.write("worker exiting with code 7\\n")
+sys.stderr.flush()
+raise SystemExit(7)
+"#;
+    write_executable_python_script(&script_path, script);
+
+    let process = WorkerProcessSpec::new(ScriptRuntime::Python, python_interpreter, script_path);
+
+    let reported_failure_request = base_request(serde_json::json!({"mode": "success_false"}));
+    let reported_failure_error = host
+        .execute(&process, &reported_failure_request)
+        .expect_err("success=false response must be treated as worker failure");
+    assert!(matches!(
+        reported_failure_error,
+        WorkerHostError::ReportedFailure {
+            runtime: ScriptRuntime::Python,
+            detail,
+        } if detail.contains("explicit failure")
+    ));
+
+    let nonzero_exit_request = base_request(serde_json::json!({"mode": "nonzero_exit"}));
+    let nonzero_exit_error = host
+        .execute(&process, &nonzero_exit_request)
+        .expect_err("non-zero worker exit must be treated as worker failure");
+    assert!(matches!(
+        nonzero_exit_error,
+        WorkerHostError::NonZeroExit {
+            runtime: ScriptRuntime::Python,
+            exit_code: Some(7),
+            stderr,
+        } if stderr.contains("exiting with code 7")
+    ));
+}
+
+#[test]
 fn worker_timeout_and_oversized_output() {
     let Some(python_interpreter) = resolve_interpreter(&["python3", "python"]) else {
         return;
@@ -275,6 +348,31 @@ fn unique_tmp_file(prefix: &str) -> PathBuf {
         .join("target")
         .join("test-roots")
         .join(format!("{prefix}-{}.tmp", unique_suffix()))
+}
+
+fn unique_tmp_python_script(prefix: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-roots")
+        .join(format!("{prefix}-{}.py", unique_suffix()))
+}
+
+fn write_executable_python_script(path: &Path, script: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("temporary script directory should be creatable");
+    }
+    fs::write(path, script).expect("temporary worker script should be writable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("temporary worker script metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+            .expect("temporary worker script should be executable");
+    }
 }
 
 fn wait_for_pid_file(path: &Path) -> Option<u32> {

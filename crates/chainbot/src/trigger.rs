@@ -6,6 +6,7 @@
 [UPDATE]: 2026-03-16 - Add trigger plane runtime with builtin + external trigger plugin dispatch.
 [UPDATE]: 2026-03-16 - Add restart-safe accepted-event suppression and executable revalidation.
 [UPDATE]: 2026-03-16 - Restore fail-fast trigger kind validation and rebuild coordination from durable trigger records.
+[UPDATE]: 2026-03-17 - Apply default-deny process environment for external trigger plugin execution.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,7 +18,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{assert_supported_major, ContractError};
-use crate::plugin::{PluginKind, PluginManifest};
+use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifest};
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
     FileStateError, StateLayout, TriggerEventRecord,
@@ -553,15 +554,18 @@ impl ExternalTriggerPlugin {
     fn emit(&self, trigger_id: &str) -> Result<Vec<TriggerEmission>, ContractError> {
         validate_existing_executable(&self.plugin_id, &self.executable_path)?;
 
-        let output = Command::new(&self.executable_path)
-            .arg("--trigger-id")
-            .arg(trigger_id)
-            .output()
-            .map_err(|source| ContractError::TriggerPluginSpawnFailed {
-                plugin_id: self.plugin_id.clone(),
-                path: self.executable_path.clone(),
-                source,
-            })?;
+        let mut command = Command::new(&self.executable_path);
+        command.arg("--trigger-id").arg(trigger_id);
+        configure_plugin_host_environment(&mut command);
+
+        let output =
+            command
+                .output()
+                .map_err(|source| ContractError::TriggerPluginSpawnFailed {
+                    plugin_id: self.plugin_id.clone(),
+                    path: self.executable_path.clone(),
+                    source,
+                })?;
 
         if !output.status.success() {
             return Err(ContractError::TriggerPluginProcessFailed {

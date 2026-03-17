@@ -7,6 +7,7 @@
 [UPDATE]: 2026-03-16 - Wire bounded vertical-slice execution for run and serve with trigger, plugin, script, and secret runtime paths.
 [UPDATE]: 2026-03-16 - Make restart recovery explicit and keep serve reload policy restart-only.
 [UPDATE]: 2026-03-16 - Drain each accepted serve snapshot deterministically and honor builtin trigger aliases.
+[UPDATE]: 2026-03-17 - Redact runtime plugin/script failure details after secret resolution before log persistence and CLI propagation.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,7 +28,8 @@ use crate::plugin::{
     NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
 };
 use crate::secrets::{
-    GpgSecretDecryptor, PlaintextSecretDecryptor, SecretProvider, SecretReference,
+    redact_text, GpgSecretDecryptor, PlaintextSecretDecryptor, SecretProvider, SecretReference,
+    SecretValue,
 };
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
@@ -104,6 +106,12 @@ struct RuntimePluginContext {
 struct ScriptNodeSpec {
     runtime: ScriptRuntime,
     script_relative_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedNodeInputs {
+    values: BTreeMap<String, serde_json::Value>,
+    resolved_secrets: Vec<SecretValue>,
 }
 
 #[derive(Debug)]
@@ -741,23 +749,30 @@ fn execute_external_node_plugin(
         });
     }
 
-    let resolved_inputs = resolve_node_inputs(
+    let ResolvedNodeInputs {
+        values: resolved_inputs,
+        resolved_secrets,
+    } = resolve_node_inputs(
         &context.root_layout.secrets_dir,
         context.secret_mode,
         &request.inputs,
     )?;
     let host = ExternalNodePluginHost::new(context.root_layout.plugins_dir.clone());
-    let response = host.execute(
-        manifest,
-        &ExternalNodePluginRequest {
-            contract_version: NODE_PLUGIN_CONTRACT_VERSION.to_owned(),
-            plugin_id: plugin_id.to_owned(),
-            node_id: request.node_id.clone(),
-            operation: "execute".to_owned(),
-            requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
-            input: resolved_inputs,
-        },
-    )?;
+    let response = host
+        .execute(
+            manifest,
+            &ExternalNodePluginRequest {
+                contract_version: NODE_PLUGIN_CONTRACT_VERSION.to_owned(),
+                plugin_id: plugin_id.to_owned(),
+                node_id: request.node_id.clone(),
+                operation: "execute".to_owned(),
+                requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+                input: resolved_inputs,
+            },
+        )
+        .map_err(|source| ContractError::CliUsage {
+            message: redact_text(&source.to_string(), &resolved_secrets),
+        })?;
 
     Ok(BuiltinNodeResult {
         outputs: response.output.clone(),
@@ -790,7 +805,10 @@ fn execute_script_node(
         .root_layout
         .root
         .join(&script_spec.script_relative_path);
-    let resolved_inputs = resolve_node_inputs(
+    let ResolvedNodeInputs {
+        values: resolved_inputs,
+        resolved_secrets,
+    } = resolve_node_inputs(
         &context.root_layout.secrets_dir,
         context.secret_mode,
         &request.inputs,
@@ -811,8 +829,10 @@ fn execute_script_node(
         )
         .map_err(|source| ContractError::CliUsage {
             message: format!(
-                "script worker failed for workflow {} node {}: {source}",
-                request.workflow_id, request.node_id
+                "script worker failed for workflow {} node {}: {}",
+                request.workflow_id,
+                request.node_id,
+                redact_text(&source.to_string(), &resolved_secrets)
             ),
         })?;
 
@@ -866,19 +886,25 @@ fn resolve_node_inputs(
     secrets_root: &Path,
     mode: SecretDecryptMode,
     values: &BTreeMap<String, serde_json::Value>,
-) -> Result<BTreeMap<String, serde_json::Value>, ContractError> {
-    let mut resolved = BTreeMap::new();
+) -> Result<ResolvedNodeInputs, ContractError> {
+    let mut resolved_values = BTreeMap::new();
+    let mut resolved_secrets = Vec::new();
     for (key, value) in values {
-        let resolved_value = resolve_value_with_secrets(secrets_root, mode, value)?;
-        resolved.insert(key.clone(), resolved_value);
+        let resolved_value =
+            resolve_value_with_secrets(secrets_root, mode, value, &mut resolved_secrets)?;
+        resolved_values.insert(key.clone(), resolved_value);
     }
-    Ok(resolved)
+    Ok(ResolvedNodeInputs {
+        values: resolved_values,
+        resolved_secrets,
+    })
 }
 
 fn resolve_value_with_secrets(
     secrets_root: &Path,
     mode: SecretDecryptMode,
     value: &serde_json::Value,
+    resolved_secrets: &mut Vec<SecretValue>,
 ) -> Result<serde_json::Value, ContractError> {
     match value {
         serde_json::Value::String(raw) if raw.starts_with("secret://") => {
@@ -893,12 +919,18 @@ fn resolve_value_with_secrets(
                         .resolve_reference(&reference)?
                 }
             };
+            resolved_secrets.push(secret_value.clone());
             Ok(serde_json::Value::String(secret_value.expose().to_owned()))
         }
         serde_json::Value::Array(items) => {
             let mut resolved = Vec::with_capacity(items.len());
             for item in items {
-                resolved.push(resolve_value_with_secrets(secrets_root, mode, item)?);
+                resolved.push(resolve_value_with_secrets(
+                    secrets_root,
+                    mode,
+                    item,
+                    resolved_secrets,
+                )?);
             }
             Ok(serde_json::Value::Array(resolved))
         }
@@ -907,7 +939,7 @@ fn resolve_value_with_secrets(
             for (key, item) in map {
                 resolved.insert(
                     key.clone(),
-                    resolve_value_with_secrets(secrets_root, mode, item)?,
+                    resolve_value_with_secrets(secrets_root, mode, item, resolved_secrets)?,
                 );
             }
             Ok(serde_json::Value::Object(resolved))
