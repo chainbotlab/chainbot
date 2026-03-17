@@ -4,9 +4,9 @@
 
 ## Project Metadata
 - Current Phase: Implementation
-- Last Updated: 2026-03-16
+- Last Updated: 2026-03-17
 - Workspace Layout: `crates/`
-- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`
+- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`
 
 ## Documentation Topology
 ```text
@@ -28,6 +28,7 @@ crates/
 | Doc | Type | Status | Summary |
 |-----|------|--------|---------|
 | `docs/design/CHAINBOT_WORKSPACE_DESIGN.md` | design | active | Defines the root workspace layout and repository boundaries. |
+| `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` | design | active | Defines the ChainBot root TOML layout, workflow/node fields, trigger kinds, and plugin linkage. |
 | `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md` | implementation | active | Records bootstrap steps and validation expectations. |
 | `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md` | implementation | active | Records the MVP artifact rename, evidence cleanup, and release-version alignment. |
 
