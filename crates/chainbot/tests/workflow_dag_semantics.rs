@@ -1,9 +1,12 @@
-/*
-[INPUT]:  Workflow fixtures with node dependencies, runtime variable layers, and subflow mappings.
-[OUTPUT]: Integration coverage for DAG validation, precedence determinism, and subflow boundary contracts.
-[POS]:    Integration test boundary for workflow semantic contracts prior to scheduler execution.
-[UPDATE]: 2026-03-16 - Add DAG, precedence, subflow-boundary, and invalid-fixture workflow tests.
-*/
+//! [INPUT]
+//! Workflow fixtures with node dependencies, runtime variable layers, and subflow mappings.
+//!
+//! [OUTPUT]
+//! Verifies DAG validation, namespace precedence, and subflow boundary enforcement.
+//!
+//! [ROLE]
+//! Covers workflow semantic rules before execution-plane scheduling begins.
+
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

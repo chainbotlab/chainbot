@@ -1,10 +1,12 @@
-/*
-[INPUT]:  Process startup context and command line arguments.
-[OUTPUT]: Executes the CLI command surface and returns explicit success or failure exit codes.
-[POS]:    Binary entrypoint for chainbot CLI execution.
-[UPDATE]: 2026-03-16 - Wire validate command execution and error exit path.
-[UPDATE]: 2026-03-16 - Route help/stdout output and user-facing CLI exit codes.
-*/
+//! [INPUT]
+//! Process startup state and command-line arguments.
+//!
+//! [OUTPUT]
+//! Invokes the CLI runtime and terminates the process with stable user-facing exit codes.
+//!
+//! [ROLE]
+//! Serves as the binary entrypoint for the `chainbot` executable.
+
 fn main() -> std::process::ExitCode {
     match chainbot::cli::run_from_env() {
         Ok(output) => {

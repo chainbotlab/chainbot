@@ -1,12 +1,15 @@
-/*
-[INPUT]:  Workflow package manifests, node dependency declarations, and namespace/subflow mappings.
-[OUTPUT]: Typed DAG validation, namespace-safe runtime variable contracts, deterministic precedence resolution, and when-condition evaluation helpers.
-[POS]:    Workflow semantic boundary that freezes package-based graph and variable contracts while exposing scheduler-safe evaluators.
-[UPDATE]: 2026-03-16 - Add versioned workflow definition contract.
-[UPDATE]: 2026-03-16 - Add DAG validation, typed depends_mode/when, runtime variable namespaces, and subflow import/export contracts.
-[UPDATE]: 2026-03-16 - Add deterministic when evaluation and runtime namespace materialization helpers for execution-plane scheduling.
-[UPDATE]: 2026-03-18 - Parse v2.1 workflow package manifests with nested headers and package-root-relative resources.
-*/
+//! [INPUT]
+//! Workflow package manifests, node dependency declarations, package-root resources, and runtime namespace and subflow mappings.
+//!
+//! [OUTPUT]
+//! Defines validated workflow contracts, DAG and namespace semantics, and deterministic helpers used by the execution plane.
+//!
+//! [ROLE]
+//! Owns the workflow semantic model that execution and validation depend on.
+//!
+//! [INVARIANTS]
+//! Workflow graph validation, namespace precedence, and subflow boundary rules stay deterministic for identical inputs.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

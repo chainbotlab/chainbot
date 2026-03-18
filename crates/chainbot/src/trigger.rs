@@ -1,14 +1,15 @@
-/*
-[INPUT]:  Trigger package definitions, builtin trigger emissions, and external trigger plugin manifests/executables.
-[OUTPUT]: Normalized run requests with dedup/cooldown coordination and durable trigger event records.
-[POS]:    Trigger-plane boundary that validates trigger package contracts and plugin host policy without executing DAG nodes.
-[UPDATE]: 2026-03-16 - Add versioned trigger definition contract.
-[UPDATE]: 2026-03-16 - Add trigger plane runtime with builtin + external trigger plugin dispatch.
-[UPDATE]: 2026-03-16 - Add restart-safe accepted-event suppression and executable revalidation.
-[UPDATE]: 2026-03-16 - Restore fail-fast trigger kind validation and rebuild coordination from durable trigger records.
-[UPDATE]: 2026-03-17 - Apply default-deny process environment for external trigger plugin execution.
-[UPDATE]: 2026-03-18 - Add v2.1 trigger package fields for workflow binding, plugin references, and payload input mapping.
-*/
+//! [INPUT]
+//! Trigger package definitions, workflow bindings, state coordination, builtin trigger events, and external trigger plugin manifests.
+//!
+//! [OUTPUT]
+//! Validates trigger packages, normalizes accepted events into run requests, and dispatches builtin or external trigger sources.
+//!
+//! [ROLE]
+//! Implements the trigger plane that feeds workflow execution without owning DAG node dispatch.
+//!
+//! [INVARIANTS]
+//! Accepted-event suppression stays restart-safe, and trigger validation fails before any workflow run request is emitted.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;

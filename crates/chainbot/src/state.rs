@@ -1,15 +1,15 @@
-/*
-[INPUT]:  Root state directory, SQLite coordination leases/tokens, and run/log/trigger payloads.
-[OUTPUT]: Minimal SQLite coordination boundary plus crash-safe file-backed runtime state queries and durable artifacts.
-[POS]:    Runtime state module for V2 coordination and durable run artifacts.
-[UPDATE]: 2026-03-16 - Add schema-versioned run record summary type.
-[UPDATE]: 2026-03-16 - Add minimal SQLite coordination store and file-backed runtime state layout.
-[UPDATE]: 2026-03-16 - Add deterministic run-summary listing for CLI queries.
-[UPDATE]: 2026-03-16 - Expose deterministic path-component sanitizer for cross-plane state naming.
-[UPDATE]: 2026-03-16 - Harden restart recovery for leases, append-only logs, trigger records, and incomplete runs.
- [UPDATE]: 2026-03-16 - Rebuild trigger coordination from durable records to keep restart boundaries consistent.
- [UPDATE]: 2026-03-18 - Add serve lease snapshot inspection for CLI status queries.
-*/
+//! [INPUT]
+//! State-root filesystem paths, SQLite lease coordination, and runtime run, log, and trigger payloads.
+//!
+//! [OUTPUT]
+//! Persists deterministic run summaries, append-only runtime artifacts, and serve-coordination records with restart recovery support.
+//!
+//! [ROLE]
+//! Owns durable runtime state and coordination for the ChainBot execution lifecycle.
+//!
+//! [INVARIANTS]
+//! Persisted run and trigger artifacts remain append-only, and state paths stay deterministic across restarts.
+
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};

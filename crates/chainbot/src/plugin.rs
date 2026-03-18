@@ -1,12 +1,12 @@
-/*
-[INPUT]:  Plugin manifest definitions, node-plugin invocation payloads, and plugin host root path.
-[OUTPUT]: Validated manifest contracts plus external-node plugin execution results with typed failures.
-[POS]:    Plugin boundary module for V2.1 manifest compatibility and safe external-node host execution.
-[UPDATE]: 2026-03-16 - Add versioned plugin manifest contract and parser.
-[UPDATE]: 2026-03-16 - Add external node plugin host, manifest guards, and execution contract validation.
-[UPDATE]: 2026-03-17 - Apply default-deny process environment with explicit allowlist for external plugin hosts.
-[UPDATE]: 2026-03-18 - Resolve executable paths relative to plugin manifest files for v2.1 package layout.
-*/
+//! [INPUT]
+//! Shared plugin manifests, node-plugin invocation payloads, filesystem roots, and subprocess execution policy.
+//!
+//! [OUTPUT]
+//! Loads validated plugin manifests and executes external node plugins under protocol and environment guards.
+//!
+//! [ROLE]
+//! Defines the shared-plugin contract and external node host boundary.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

@@ -1,17 +1,12 @@
-/*
-[INPUT]:  Process arguments, environment-resolved definition roots, and runtime state boundaries.
-[OUTPUT]: Parsed CLI command surface, runtime execution side effects, and stable user-facing failures.
-[POS]:    CLI boundary for command routing, root resolution, and user-visible execution errors.
-[UPDATE]: 2026-03-16 - Add validate command with --root support.
-[UPDATE]: 2026-03-16 - Expand command surface with help, list-runs, run, and serve.
-[UPDATE]: 2026-03-16 - Wire bounded vertical-slice execution for run and serve with trigger, plugin, script, and secret runtime paths.
-[UPDATE]: 2026-03-16 - Make restart recovery explicit and keep serve reload policy restart-only.
-[UPDATE]: 2026-03-16 - Drain each accepted serve snapshot deterministically and honor builtin trigger aliases.
-[UPDATE]: 2026-03-17 - Redact runtime plugin/script failure details after secret resolution before log persistence and CLI propagation.
- [UPDATE]: 2026-03-18 - Resolve runtime roots through effective root-config path overrides before loading state and definitions.
- [UPDATE]: 2026-03-18 - Add skill-oriented help and status command with persisted runtime snapshots.
- [UPDATE]: 2026-03-18 - Add trigger enable/disable CLI operations with persisted config mutations.
-*/
+//! [INPUT]
+//! Process arguments, environment-resolved ChainBot roots, and runtime services from config, state, trigger, executor, worker, and secrets modules.
+//!
+//! [OUTPUT]
+//! Parses commands, executes help, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
+//!
+//! [ROLE]
+//! Owns the user-facing command boundary for the `chainbot` binary.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

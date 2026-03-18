@@ -1,9 +1,12 @@
-/*
-[INPUT]:  Workflow fixtures, normalized run requests, builtin node registry handlers, and scheduler-ready DAG edges.
-[OUTPUT]: Integration coverage for Rust-owned scheduler waves, depends_mode/when semantics, and typed builtin registry dispatch failures.
-[POS]:    Integration test boundary for task-7 execution plane and builtin-node dispatch contracts.
-[UPDATE]: 2026-03-16 - Add scheduler parallel-ready, conditional dependency, and builtin registry dispatch tests.
-*/
+//! [INPUT]
+//! Workflow fixtures, normalized run requests, builtin node handlers, and scheduler-ready DAG edges.
+//!
+//! [OUTPUT]
+//! Verifies scheduler orchestration, dependency semantics, conditional execution, and builtin node dispatch failures.
+//!
+//! [ROLE]
+//! Covers the execution scheduler boundary as an integration test.
+
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

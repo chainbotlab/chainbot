@@ -1,9 +1,12 @@
-/*
-[INPUT]:  JSON fixtures for config/plugin/worker and direct secret reference literals.
-[OUTPUT]: Regression coverage for version-acceptance and future-major rejection behavior.
-[POS]:    Integration test boundary for V2 contract freeze.
-[UPDATE]: 2026-03-16 - Add contract-version acceptance and rejection tests.
-*/
+//! [INPUT]
+//! Serialized config, plugin, and worker fixtures plus direct secret reference literals.
+//!
+//! [OUTPUT]
+//! Verifies acceptance of supported versions and rejection of unsupported future majors across frozen contracts.
+//!
+//! [ROLE]
+//! Guards the crate's versioned contract compatibility boundary.
+
 
 use chainbot::config::ConfigRoot;
 use chainbot::errors::ContractError;

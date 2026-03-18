@@ -1,9 +1,12 @@
-/*
-[INPUT]:  Pass-style secret fixture paths, fake decryptors, and runtime-state persistence targets.
-[OUTPUT]: Integration coverage for runtime secret resolution and redaction/persistence guarantees.
-[POS]:    Integration test boundary for task-10 secret-provider runtime contracts.
-[UPDATE]: 2026-03-16 - Add pass-style secret resolution and redaction persistence tests.
-*/
+//! [INPUT]
+//! Pass-style secret fixtures, decryptor doubles, and runtime-state persistence targets.
+//!
+//! [OUTPUT]
+//! Verifies secret resolution, decrypt-failure redaction, and non-persistence guarantees for secret material.
+//!
+//! [ROLE]
+//! Covers the runtime secrets boundary as an integration test.
+
 
 use std::fs;
 use std::path::{Path, PathBuf};

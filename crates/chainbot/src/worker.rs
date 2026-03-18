@@ -1,12 +1,15 @@
-/*
-[INPUT]:  Worker envelope contracts, script runtime process specs, and host safety limits.
-[OUTPUT]: Validated worker envelopes and bounded subprocess execution results.
-[POS]:    Worker protocol + subprocess runtime boundary for script node execution.
-[UPDATE]: 2026-03-16 - Add protocol-versioned worker envelope contracts.
-[UPDATE]: 2026-03-16 - Add subprocess worker host for Python and JavaScript runtimes.
-[UPDATE]: 2026-03-16 - Harden timeout cancellation cleanup so timed-out workers are always reaped or fail explicitly.
-[UPDATE]: 2026-03-17 - Treat non-zero exits and success=false envelopes as typed worker execution failures.
-*/
+//! [INPUT]
+//! Worker request and response envelopes, subprocess runtime specifications, and host safety limits.
+//!
+//! [OUTPUT]
+//! Defines versioned worker protocol types and executes Python or JavaScript workers with bounded subprocess cleanup.
+//!
+//! [ROLE]
+//! Provides the script-worker protocol and host boundary for external runtime nodes.
+//!
+//! [INVARIANTS]
+//! Timed-out workers are always reaped or reported as explicit failures, and protocol version checks happen before payload handling.
+
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};

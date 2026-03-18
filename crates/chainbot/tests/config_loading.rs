@@ -1,9 +1,12 @@
-/*
-[INPUT]:  Temporary fixture roots and TOML definitions for root validation.
-[OUTPUT]: Integration coverage for root layout resolution and TOML loader behavior.
-[POS]:    Integration test boundary for task-2 root layout and loader contracts.
-[UPDATE]: 2026-03-16 - Add root layout, TOML validation, and invalid TOML tests.
-*/
+//! [INPUT]
+//! Temporary fixture roots, environment overrides, and TOML package definitions.
+//!
+//! [OUTPUT]
+//! Verifies root-layout resolution and package-loader behavior for valid, missing, and invalid manifests.
+//!
+//! [ROLE]
+//! Covers the configuration loading boundary as an integration test.
+
 
 use std::fs;
 use std::path::{Path, PathBuf};

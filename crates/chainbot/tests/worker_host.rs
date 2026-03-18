@@ -1,10 +1,12 @@
-/*
-[INPUT]:  Worker host process specs, protocol envelopes, and fixture worker scripts.
-[OUTPUT]: Integration coverage for protocol negotiation, script roundtrip, timeout, malformed output, and bounded stream limits.
-[POS]:    Integration test boundary for subprocess worker-host behavior.
-[UPDATE]: 2026-03-16 - Add worker host protocol and subprocess safety tests.
-[UPDATE]: 2026-03-17 - Add regressions for success=false and non-zero worker failure semantics.
-*/
+//! [INPUT]
+//! Worker host process specs, protocol envelopes, fixture worker scripts, and host safety limits.
+//!
+//! [OUTPUT]
+//! Verifies subprocess worker-host protocol handling, failure semantics, and cleanup behavior.
+//!
+//! [ROLE]
+//! Covers the script worker-host boundary as an integration test.
+
 
 use std::env;
 use std::fs;

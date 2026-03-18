@@ -1,11 +1,12 @@
-/*
-[INPUT]:  CLI binary invocations plus fixture roots under target/test-roots/basic.
-[OUTPUT]: Integration coverage for help output, success cases, and stable user-facing CLI failures.
-[POS]:    Integration test boundary for task-5 CLI surface and exit behavior.
-[UPDATE]: 2026-03-16 - Add end-to-end CLI command surface coverage.
-[UPDATE]: 2026-03-16 - Serialize shared basic-root fixture setup within the CLI surface test binary.
-[UPDATE]: 2026-03-18 - Cover trigger help and persisted trigger enable/disable CLI mutations.
-*/
+//! [INPUT]
+//! CLI binary invocations, temporary fixture roots, and persisted trigger package state under test roots.
+//!
+//! [OUTPUT]
+//! Verifies command help, exit behavior, and persisted trigger enable or disable CLI mutations.
+//!
+//! [ROLE]
+//! Covers the user-facing CLI surface as an integration boundary.
+
 
 use std::fs;
 use std::path::{Path, PathBuf};

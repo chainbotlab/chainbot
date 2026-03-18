@@ -1,11 +1,12 @@
-/*
-[INPUT]:  Trigger definitions, plugin manifests, synthetic trigger emissions, and temporary state roots.
-[OUTPUT]: Integration coverage for trigger plugin manifest checks, dedup/cooldown behavior, run-request normalization, and file-backed trigger records.
-[POS]:    Integration test boundary for task-6 trigger plane contracts.
-[UPDATE]: 2026-03-16 - Add deterministic trigger-plane acceptance tests.
-[UPDATE]: 2026-03-16 - Cover unknown trigger kinds and restart-safe coordination rebuild.
-[UPDATE]: 2026-03-17 - Add default-deny host environment isolation regression for external trigger plugins.
-*/
+//! [INPUT]
+//! Trigger definitions, plugin manifests, synthetic trigger emissions, and temporary state roots.
+//!
+//! [OUTPUT]
+//! Verifies trigger validation, accepted-event coordination, and external trigger host isolation.
+//!
+//! [ROLE]
+//! Covers the trigger-plane boundary as an integration test.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

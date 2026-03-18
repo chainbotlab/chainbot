@@ -1,10 +1,12 @@
-/*
-[INPUT]:  Secret references, pass-style encrypted files, and runtime redaction targets.
-[OUTPUT]: Parsed secret references plus late runtime secret resolution and redaction helpers.
-[POS]:    Secrets boundary for pass-style runtime decryption without durable plaintext persistence.
-[UPDATE]: 2026-03-16 - Add secret reference syntax parser and serializer.
-[UPDATE]: 2026-03-16 - Add pass-style secret provider, decryptor seam, and redaction helpers.
-*/
+//! [INPUT]
+//! Secret reference strings, pass-style secret stores, decryptor callbacks, and runtime text that may contain sensitive values.
+//!
+//! [OUTPUT]
+//! Parses secret references, resolves secret values on demand, and redacts sensitive material from logs and errors.
+//!
+//! [ROLE]
+//! Encapsulates runtime secret access so plaintext does not become durable state.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};

@@ -1,10 +1,12 @@
-/*
-[INPUT]:  Temporary root layouts, SQLite coordination state, and file-backed runtime records.
-[OUTPUT]: Integration coverage for minimal coordination migrations, lease exclusivity, and crash-safe file recovery.
-[POS]:    Integration test boundary for task-3 runtime state persistence contracts.
-[UPDATE]: 2026-03-16 - Add SQLite coordination and file-backed runtime state persistence tests.
-[UPDATE]: 2026-03-16 - Keep trigger-record fixtures aligned with persisted coordination metadata.
-*/
+//! [INPUT]
+//! Temporary root layouts, SQLite coordination state, and file-backed runtime records.
+//!
+//! [OUTPUT]
+//! Verifies leases, append-only runtime artifacts, deterministic listing, and crash recovery behavior.
+//!
+//! [ROLE]
+//! Covers the durable runtime-state boundary as an integration test.
+
 
 use std::collections::BTreeSet;
 use std::fs;

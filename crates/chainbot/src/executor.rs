@@ -1,11 +1,12 @@
-/*
-[INPUT]:  Node definition contracts, normalized run requests, workflow definitions, and builtin-node handlers.
-[OUTPUT]: Rust-owned scheduler and execution-plane results with explicit node states, subflow boundaries, and builtin-dispatch contracts.
-[POS]:    Execution boundary that keeps scheduling authority in Rust while isolating builtin dispatch from plugin/script engines.
-[UPDATE]: 2026-03-16 - Add versioned node definition contract.
-[UPDATE]: 2026-03-16 - Add typed depends_mode, namespace bindings, when condition, and subflow contract fields.
-[UPDATE]: 2026-03-16 - Add scheduler state machine, execution plane, and builtin node registry dispatch contracts.
-*/
+//! [INPUT]
+//! Workflow definitions, normalized run requests, state persistence, secret resolution, plugin hosts, worker hosts, and builtin node handlers.
+//!
+//! [OUTPUT]
+//! Plans node execution waves, dispatches builtin and external work, and returns structured run results with scheduler state transitions.
+//!
+//! [ROLE]
+//! Keeps orchestration authority in Rust for the workflow execution plane.
+
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

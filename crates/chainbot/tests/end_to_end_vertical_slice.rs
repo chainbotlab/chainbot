@@ -1,11 +1,12 @@
-/*
-[INPUT]:  Full e2e fixture roots, CLI command invocations, and persisted state artifacts.
-[OUTPUT]: Deterministic success and failure-mode evidence for the runnable MVP vertical slice.
-[POS]:    Integration test boundary for task-11 end-to-end run/serve/list-runs behavior.
-[UPDATE]: 2026-03-16 - Add end_to_end_vertical_slice and end_to_end_vertical_slice_failure_modes tests.
-[UPDATE]: 2026-03-16 - Keep staged trigger-record fixtures aligned with persisted coordination metadata.
-[UPDATE]: 2026-03-17 - Add runtime failure regression proving plugin stderr and run_failed logs redact resolved secrets.
-*/
+//! [INPUT]
+//! Full end-to-end fixture roots, CLI command invocations, and persisted runtime artifacts.
+//!
+//! [OUTPUT]
+//! Verifies runnable validate, run, serve, and list-runs flows plus bounded failure-mode behavior.
+//!
+//! [ROLE]
+//! Exercises the crate's vertical slice across config, trigger, execution, worker, secret, and state boundaries.
+
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,16 +1,12 @@
-/*
-[INPUT]:  Version strings, contract definitions, DAG topology checks, namespace references, scheduler dispatch failures, worker protocol envelopes, and CLI-facing failure states.
-[OUTPUT]: Typed contract validation errors plus stable user-facing CLI errors and exit codes.
-[POS]:    Shared error contract for versioned V2 module boundaries and CLI presentation.
-[UPDATE]: 2026-03-16 - Add typed errors for contract and secret syntax validation.
-[UPDATE]: 2026-03-16 - Add typed workflow DAG, dependency, namespace, and subflow validation errors.
-[UPDATE]: 2026-03-16 - Add stable CLI-facing errors and explicit exit-code mapping.
-[UPDATE]: 2026-03-16 - Add runtime secret-provider error variants with redacted decryption failures.
-[UPDATE]: 2026-03-16 - Add trigger plane plugin-host and event-normalization validation errors.
-[UPDATE]: 2026-03-16 - Add worker request/response envelope request_id mismatch error.
-[UPDATE]: 2026-03-16 - Add node plugin host manifest, protocol, and process failure variants.
-[UPDATE]: 2026-03-16 - Keep scheduler and builtin registry failures typed for execution-plane dispatch and subflow recursion boundaries.
-*/
+//! [INPUT]
+//! Version parsing, contract validation failures, DAG and namespace checks, runtime host failures, and CLI presentation requirements.
+//!
+//! [OUTPUT]
+//! Defines typed contract and runtime errors plus stable CLI-facing exit-code mapping.
+//!
+//! [ROLE]
+//! Centralizes failure taxonomy shared across the crate's validation, execution, and command surfaces.
+
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};

@@ -1,12 +1,12 @@
-/*
-[INPUT]:  Root path environment resolution, package manifests on disk, and JSON contract fixtures.
-[OUTPUT]: Explicit root layout paths plus validated v2.1 definition bundles with package roots.
-[POS]:    Config boundary module for root layout and definition loading.
-[UPDATE]: 2026-03-16 - Add explicit root resolver and TOML loaders.
- [UPDATE]: 2026-03-18 - Load workflow and trigger package manifests from package `config.toml` files and plugin manifests from `plugins/manifests`.
- [UPDATE]: 2026-03-18 - Add persisted trigger enable/disable mutation support for CLI operations.
- [UPDATE]: 2026-03-18 - Resolve roots from CHAINBOT_CONFIG_DIR before falling back to HOME/.chainbot.
-*/
+//! [INPUT]
+//! Environment-derived root paths, on-disk package manifests, plugin manifests, and serialized contract payloads.
+//!
+//! [OUTPUT]
+//! Resolves canonical root layouts and loads validated root, workflow, trigger, plugin, and worker definition bundles with package-root context.
+//!
+//! [ROLE]
+//! Defines the configuration and package-loading boundary for ChainBot runtime state on disk.
+
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;

@@ -1,10 +1,12 @@
-/*
-[INPUT]:  External node plugin manifests, host root fixtures, and executable plugin scripts.
-[OUTPUT]: Deterministic integration coverage for node plugin manifest validation, roundtrip execution, and capability restrictions.
-[POS]:    Integration test boundary for external node plugin host contracts.
-[UPDATE]: 2026-03-16 - Add external node plugin host validation and execution contract tests.
-[UPDATE]: 2026-03-17 - Add regression coverage for default-deny plugin host environment isolation.
-*/
+//! [INPUT]
+//! External node plugin manifests, host-root fixtures, executable plugin scripts, and environment policy inputs.
+//!
+//! [OUTPUT]
+//! Verifies plugin manifest validation, execution roundtrips, and default-deny host-environment isolation.
+//!
+//! [ROLE]
+//! Covers the external node plugin host boundary as an integration test.
+
 
 use std::collections::BTreeMap;
 use std::fs;
