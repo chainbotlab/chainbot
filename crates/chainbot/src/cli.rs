@@ -1,5 +1,5 @@
 /*
-[INPUT]:  Process arguments, optional root overrides, definition roots, and runtime state boundaries.
+[INPUT]:  Process arguments, environment-resolved definition roots, and runtime state boundaries.
 [OUTPUT]: Parsed CLI command surface, runtime execution side effects, and stable user-facing failures.
 [POS]:    CLI boundary for command routing, root resolution, and user-visible execution errors.
 [UPDATE]: 2026-03-16 - Add validate command with --root support.
@@ -8,6 +8,9 @@
 [UPDATE]: 2026-03-16 - Make restart recovery explicit and keep serve reload policy restart-only.
 [UPDATE]: 2026-03-16 - Drain each accepted serve snapshot deterministically and honor builtin trigger aliases.
 [UPDATE]: 2026-03-17 - Redact runtime plugin/script failure details after secret resolution before log persistence and CLI propagation.
+ [UPDATE]: 2026-03-18 - Resolve runtime roots through effective root-config path overrides before loading state and definitions.
+ [UPDATE]: 2026-03-18 - Add skill-oriented help and status command with persisted runtime snapshots.
+ [UPDATE]: 2026-03-18 - Add trigger enable/disable CLI operations with persisted config mutations.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,7 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{resolve_root_layout, RootDefinitionBundle, RootLayout};
+use crate::config::{
+    load_effective_root_layout, resolve_root_layout, set_trigger_enabled, RootDefinitionBundle,
+    RootLayout, TriggerToggleResult,
+};
 use crate::errors::{ContractError, UserFacingError};
 use crate::executor::{
     BuiltinNodeRegistry, BuiltinNodeRequest, BuiltinNodeResult, ExecutionPlane,
@@ -33,16 +39,17 @@ use crate::secrets::{
 };
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
-    FileStateError, LeaseAcquireResult, RunRecordSummary, RunStatus, StateLayout,
-    SERVE_OWNER_ID_PREFIX,
+    FileStateError, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
+    ServeLeaseState, StateLayout, TriggerEventRecord, SERVE_OWNER_ID_PREFIX,
 };
 use crate::trigger::{
-    TriggerEmission, TriggerKind, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy,
-    TriggerRunRequest, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+    TriggerDefinition, TriggerEmission, TriggerKind, TriggerPlane, TriggerPlaneError,
+    TriggerPluginHostPolicy, TriggerRunRequest, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use crate::worker::{
     ScriptRuntime, WorkerHost, WorkerHostLimits, WorkerProcessSpec, WorkerRequestEnvelope,
 };
+use crate::workflow::WorkflowDefinition;
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
@@ -53,6 +60,8 @@ const SCRIPT_RUNTIME_JAVASCRIPT: &str = "javascript";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliCommand {
     Help(HelpTopic),
+    Status,
+    Trigger,
     Validate,
     Run,
     Serve,
@@ -62,6 +71,8 @@ pub enum CliCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     General,
+    Status,
+    Trigger,
     Validate,
     Run,
     Serve,
@@ -71,7 +82,8 @@ pub enum HelpTopic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliRequest {
     pub command: CliCommand,
-    pub root_override: Option<PathBuf>,
+    pub json_output: bool,
+    pub trigger_operation: Option<TriggerOperation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +95,12 @@ pub struct CliOutput {
 enum SecretDecryptMode {
     Gpg,
     Plaintext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerOperation {
+    Enable { trigger_id: String },
+    Disable { trigger_id: String },
 }
 
 #[derive(Debug)]
@@ -121,6 +139,54 @@ struct SingleRunResult {
     status: RunStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StatusOutput {
+    root: StatusRootView,
+    serve: StatusServeView,
+    workflows: Vec<StatusWorkflowView>,
+    triggers: Vec<StatusTriggerView>,
+    summary: StatusSummaryView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StatusRootView {
+    path: String,
+    profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StatusServeView {
+    state: ServeLeaseState,
+    owner: Option<String>,
+    expires_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StatusWorkflowView {
+    workflow_id: String,
+    last_run_status: Option<RunStatus>,
+    last_run_id: Option<String>,
+    last_started_at_ms: Option<i64>,
+    last_finished_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StatusTriggerView {
+    trigger_id: String,
+    enabled: bool,
+    workflow_id: String,
+    last_event_id: Option<String>,
+    last_accepted_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StatusSummaryView {
+    workflow_count: usize,
+    trigger_count: usize,
+    run_count: usize,
+    running_run_count: usize,
+}
+
 pub fn run_from_env() -> Result<CliOutput, UserFacingError> {
     CliRequest::from_env()?.execute()
 }
@@ -145,15 +211,19 @@ impl CliRequest {
         match command_raw.as_str() {
             "-h" | "--help" => Ok(Self {
                 command: CliCommand::Help(HelpTopic::General),
-                root_override: None,
+                json_output: false,
+                trigger_operation: None,
             }),
             "help" => Self::parse_help_args(args),
+            "status" => Self::parse_command_args(CliCommand::Status, args),
+            "trigger" => Self::parse_trigger_args(args),
             "validate" => Self::parse_command_args(CliCommand::Validate, args),
             "run" => Self::parse_command_args(CliCommand::Run, args),
             "serve" => Self::parse_command_args(CliCommand::Serve, args),
             "list-runs" => Self::parse_command_args(CliCommand::ListRuns, args),
             other => Err(UserFacingError::usage(format!(
-                "Unsupported command `{other}`. Run `chainbot --help` to see available commands."
+                "{}",
+                unsupported_command_message(other)
             ))),
         }
     }
@@ -161,6 +231,8 @@ impl CliRequest {
     pub fn execute(&self) -> Result<CliOutput, UserFacingError> {
         match self.command {
             CliCommand::Help(topic) => Ok(CliOutput::text(help_text(topic))),
+            CliCommand::Status => self.execute_status(),
+            CliCommand::Trigger => self.execute_trigger(),
             CliCommand::Validate => self.execute_validate(),
             CliCommand::Run => self.execute_run(),
             CliCommand::Serve => self.execute_serve(),
@@ -186,7 +258,8 @@ impl CliRequest {
 
         Ok(Self {
             command: CliCommand::Help(topic),
-            root_override: None,
+            json_output: false,
+            trigger_operation: None,
         })
     }
 
@@ -194,26 +267,24 @@ impl CliRequest {
     where
         I: Iterator<Item = OsString>,
     {
-        let mut root_override = None;
+        let mut json_output = false;
         while let Some(arg) = args.next() {
             let raw = arg.to_string_lossy().into_owned();
             match raw.as_str() {
                 "-h" | "--help" => {
                     return Ok(Self {
                         command: CliCommand::Help(help_topic_for(command)),
-                        root_override: None,
+                        json_output: false,
+                        trigger_operation: None,
                     });
                 }
-                "--root" => {
-                    let Some(value) = args.next() else {
-                        return Err(UserFacingError::usage("`--root` requires a path value."));
-                    };
-                    root_override = Some(PathBuf::from(value));
+                "--json" if matches!(command, CliCommand::Status) => {
+                    json_output = true;
                 }
                 _ => {
                     if let Some((flag, value)) = raw.split_once('=') {
-                        if flag == "--root" {
-                            root_override = Some(PathBuf::from(value));
+                        if flag == "--json" && matches!(command, CliCommand::Status) {
+                            json_output = parse_bool_flag_value(value)?;
                             continue;
                         }
                     }
@@ -228,8 +299,117 @@ impl CliRequest {
 
         Ok(Self {
             command,
-            root_override,
+            json_output,
+            trigger_operation: None,
         })
+    }
+
+    fn parse_trigger_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let Some(action) = args.next() else {
+            return Err(UserFacingError::usage(
+                "`chainbot trigger` requires `enable` or `disable`. Run `chainbot help trigger`.",
+            ));
+        };
+        let action = action.to_string_lossy().into_owned();
+        if matches!(action.as_str(), "-h" | "--help") {
+            return Ok(Self {
+                command: CliCommand::Help(HelpTopic::Trigger),
+                json_output: false,
+                trigger_operation: None,
+            });
+        }
+
+        let enabled = match action.as_str() {
+            "enable" => true,
+            "disable" => false,
+            other => {
+                return Err(UserFacingError::usage(format!(
+                    "Unsupported trigger action `{other}`. Use `enable` or `disable`."
+                )));
+            }
+        };
+
+        let mut trigger_id = None;
+        while let Some(arg) = args.next() {
+            let raw = arg.to_string_lossy().into_owned();
+            match raw.as_str() {
+                "-h" | "--help" => {
+                    return Ok(Self {
+                        command: CliCommand::Help(HelpTopic::Trigger),
+                        json_output: false,
+                        trigger_operation: None,
+                    });
+                }
+                _ => {
+                    if trigger_id.is_none() {
+                        trigger_id = Some(raw);
+                        continue;
+                    }
+
+                    return Err(UserFacingError::usage(format!(
+                        "Unexpected argument for trigger {}: {raw}",
+                        if enabled { "enable" } else { "disable" }
+                    )));
+                }
+            }
+        }
+
+        let trigger_id = trigger_id.ok_or_else(|| {
+            UserFacingError::usage(
+                "`chainbot trigger enable|disable` requires a <trigger-id>. Run `chainbot help trigger`.",
+            )
+        })?;
+
+        Ok(Self {
+            command: CliCommand::Trigger,
+            json_output: false,
+            trigger_operation: Some(if enabled {
+                TriggerOperation::Enable { trigger_id }
+            } else {
+                TriggerOperation::Disable { trigger_id }
+            }),
+        })
+    }
+
+    fn execute_status(&self) -> Result<CliOutput, UserFacingError> {
+        let root_layout = self.resolve_existing_root()?;
+        let definitions =
+            RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+        let state_layout = StateLayout::from_root_layout(&root_layout);
+        let state_store = FileBackedStateStore::new(state_layout.clone());
+        let observed_at_ms = current_time_ms()?;
+
+        let run_summaries = state_store
+            .list_committed_run_summaries()
+            .map_err(|error| map_file_state_error("list committed run summaries", error))?;
+        let trigger_records = state_store
+            .load_committed_trigger_records()
+            .map_err(|error| map_file_state_error("load committed trigger records", error))?;
+        let serve_lease =
+            CoordinationStore::inspect_existing_serve_lease(&state_layout, observed_at_ms)
+                .map_err(|error| map_coordination_error("inspect existing serve lease", error))?;
+
+        let payload = build_status_output(
+            &root_layout,
+            definitions.root_config.profile,
+            &definitions.workflows,
+            &definitions.triggers,
+            &run_summaries,
+            &trigger_records,
+            serve_lease,
+        );
+
+        if self.json_output {
+            let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                UserFacingError::state(format!("Failed to serialize status payload: {source}"))
+            })?;
+            return Ok(CliOutput::text(stdout));
+        }
+
+        Ok(CliOutput::text(render_status_output(&payload)))
     }
 
     fn execute_validate(&self) -> Result<CliOutput, UserFacingError> {
@@ -238,6 +418,26 @@ impl CliRequest {
             "validated root: {}",
             layout.root.display()
         )))
+    }
+
+    fn execute_trigger(&self) -> Result<CliOutput, UserFacingError> {
+        let root_layout = self.resolve_existing_root()?;
+        let operation = self.trigger_operation.as_ref().ok_or_else(|| {
+            UserFacingError::usage(
+                "Missing trigger operation. Run `chainbot help trigger` for usage.",
+            )
+        })?;
+        let result = match operation {
+            TriggerOperation::Enable { trigger_id } => {
+                set_trigger_enabled(&root_layout, trigger_id, true)
+            }
+            TriggerOperation::Disable { trigger_id } => {
+                set_trigger_enabled(&root_layout, trigger_id, false)
+            }
+        }
+        .map_err(UserFacingError::from_contract)?;
+
+        Ok(CliOutput::text(render_trigger_operation_output(&result)))
     }
 
     fn execute_list_runs(&self) -> Result<CliOutput, UserFacingError> {
@@ -263,9 +463,19 @@ impl CliRequest {
 
     fn execute_run(&self) -> Result<CliOutput, UserFacingError> {
         let runtime = self.load_runtime_context()?;
-        let workflow = runtime.definitions.workflows.first().ok_or_else(|| {
-            UserFacingError::validation("No workflows were found under <root>/workflows.")
-        })?;
+        let workflow = match runtime.definitions.workflows.as_slice() {
+            [] => {
+                return Err(UserFacingError::validation(
+                    "No workflows were found in the configured workflows directory.",
+                ));
+            }
+            [workflow] => workflow,
+            _ => {
+                return Err(UserFacingError::usage(
+                    "chainbot run requires exactly one workflow package in the root; use a dedicated root or add workflow selection support.",
+                ));
+            }
+        };
 
         let mut request = NormalizedRunRequest::new(
             format!(
@@ -322,9 +532,10 @@ impl CliRequest {
     }
 
     fn resolve_existing_root(&self) -> Result<RootLayout, UserFacingError> {
-        let layout = resolve_root_layout(self.root_override.as_deref())
+        let bootstrap_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+        maybe_prepare_e2e_root(&bootstrap_layout)?;
+        let layout = load_effective_root_layout(&bootstrap_layout)
             .map_err(UserFacingError::from_contract)?;
-        maybe_prepare_e2e_root(&layout)?;
         layout
             .validate_paths_exist()
             .map_err(UserFacingError::from_contract)?;
@@ -377,12 +588,15 @@ impl CliOutput {
 
 fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
     match value {
+        "status" => Ok(HelpTopic::Status),
+        "trigger" => Ok(HelpTopic::Trigger),
         "validate" => Ok(HelpTopic::Validate),
         "run" => Ok(HelpTopic::Run),
         "serve" => Ok(HelpTopic::Serve),
         "list-runs" => Ok(HelpTopic::ListRuns),
         other => Err(UserFacingError::usage(format!(
-            "Unknown help topic `{other}`. Run `chainbot --help` to see available commands."
+            "{}",
+            unsupported_command_message(other)
         ))),
     }
 }
@@ -390,6 +604,8 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
 fn help_topic_for(command: CliCommand) -> HelpTopic {
     match command {
         CliCommand::Help(topic) => topic,
+        CliCommand::Status => HelpTopic::Status,
+        CliCommand::Trigger => HelpTopic::Trigger,
         CliCommand::Validate => HelpTopic::Validate,
         CliCommand::Run => HelpTopic::Run,
         CliCommand::Serve => HelpTopic::Serve,
@@ -400,6 +616,8 @@ fn help_topic_for(command: CliCommand) -> HelpTopic {
 fn command_name(command: CliCommand) -> &'static str {
     match command {
         CliCommand::Help(_) => "help",
+        CliCommand::Status => "status",
+        CliCommand::Trigger => "trigger",
         CliCommand::Validate => "validate",
         CliCommand::Run => "run",
         CliCommand::Serve => "serve",
@@ -408,17 +626,293 @@ fn command_name(command: CliCommand) -> &'static str {
 }
 
 fn general_help_text() -> &'static str {
-    "ChainBot command line interface\n\nUsage:\n  chainbot validate [--root <path>]\n  chainbot list-runs [--root <path>]\n  chainbot run [--root <path>]\n  chainbot serve [--root <path>]\n  chainbot help [command]\n\nCommands:\n  validate   Validate root definitions without starting execution.\n  list-runs  Print persisted run summaries as JSON.\n  run        Execute one single-shot manual run.\n  serve      Acquire a lease, recover prior runtime state, and process one trigger snapshot.\n\nOptions:\n  --root <path>  Override the default root (~/.chainbot).\n  -h, --help     Show help."
+    "ChainBot command skills\n\nUsage:\n  chainbot help [command]\n  chainbot status [--json]\n  chainbot trigger <enable|disable> <trigger-id>\n  chainbot validate\n  chainbot list-runs\n  chainbot run\n  chainbot serve\n\nRoot resolution:\n  - use CHAINBOT_CONFIG_DIR when it is set to a non-empty path\n  - otherwise fall back to ~/.chainbot\n\nCommands:\n  status     Inspect runtime state without executing workflows.\n  trigger    Persistently enable or disable a trigger package.\n  validate   Validate config and package contracts.\n  list-runs  Print persisted run summaries as JSON.\n  run        Execute one single-shot manual run.\n  serve      Drain one trigger snapshot under a serve lease.\n\nUse `chainbot help <command>` for command-specific guidance."
 }
 
 fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::General => general_help_text(),
-        HelpTopic::Validate => "Usage:\n  chainbot validate [--root <path>]\n\nValidate the root definition set without starting execution.\nThe command checks the root layout plus root/workflow/trigger/plugin TOML files.",
-        HelpTopic::ListRuns => "Usage:\n  chainbot list-runs [--root <path>]\n\nPrint persisted run summaries as JSON.\nThe command reads file-backed summaries from <root>/state/runs and prints [] when no runs are recorded.",
-        HelpTopic::Run => "Usage:\n  chainbot run [--root <path>]\n\nExecute one single-shot manual run without a long-lived serve lease.\nRuntime artifacts are persisted under <root>/state.",
-        HelpTopic::Serve => "Usage:\n  chainbot serve [--root <path>]\n\nAcquire a serve lease, recover prior runtime state once, collect one trigger snapshot, execute every accepted run in deterministic order, and release the lease. Config and trigger definitions are reloaded only when the command restarts.\nRuntime artifacts are persisted under <root>/state.",
+        HelpTopic::Status => "status - Inspect runtime state without executing workflows\n\nUse when:\n  - you want to know whether serve is active\n  - you want the latest workflow run result\n  - you want trigger activity without opening state files\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured state runs directory\n  - configured trigger record directory\n  - configured coordination store\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot status\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot status\n  chainbot status --json\n\nSee also:\n  validate, list-runs, serve",
+        HelpTopic::Trigger => "trigger - Persistently enable or disable a trigger package\n\nUse when:\n  - you need to stop a trigger without editing TOML manually\n  - you want to re-enable a trigger after maintenance or debugging\n  - you need a scriptable operator command for trigger state changes\n\nReads:\n  - configured root config\n  - configured trigger packages\n\nWrites:\n  - target trigger package config.toml\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot trigger enable tr-market\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market\n\nSee also:\n  status, validate, serve",
+        HelpTopic::Validate => "validate - Validate config and package contracts\n\nUse when:\n  - you want to confirm a root is structurally valid\n  - you changed config and want a fast contract check\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin manifests\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot validate\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate\n\nSee also:\n  status, run, serve",
+        HelpTopic::ListRuns => "list-runs - Print persisted run summaries as JSON\n\nUse when:\n  - you need machine-readable workflow run summaries\n  - you want raw persisted run status output without higher-level aggregation\n\nReads:\n  - configured state runs directory\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot list-runs\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot list-runs\n\nSee also:\n  status, serve",
+        HelpTopic::Run => "run - Execute one manual workflow run\n\nUse when:\n  - you want a single manual execution without a serve lease\n  - your root contains exactly one workflow package\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured plugin manifests\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n\nExamples:\n  chainbot run\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot run\n\nSee also:\n  status, validate, serve",
+        HelpTopic::Serve => "serve - Drain one trigger snapshot under a serve lease\n\nUse when:\n  - you want to evaluate configured triggers once\n  - you need runtime recovery plus duplicate-suppression coordination\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin manifests\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n  - configured trigger record directory\n  - configured coordination store\n\nExamples:\n  chainbot serve\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot serve\n\nSee also:\n  status, validate, list-runs",
     }
+}
+
+fn build_status_output(
+    root_layout: &RootLayout,
+    profile: Option<String>,
+    workflows: &[WorkflowDefinition],
+    triggers: &[TriggerDefinition],
+    run_summaries: &[RunRecordSummary],
+    trigger_records: &[TriggerEventRecord],
+    serve_lease: ServeLeaseSnapshot,
+) -> StatusOutput {
+    let mut latest_runs = BTreeMap::<String, RunRecordSummary>::new();
+    for summary in run_summaries {
+        match latest_runs.get(&summary.workflow_id) {
+            Some(current) if !run_summary_is_newer(summary, current) => {}
+            _ => {
+                latest_runs.insert(summary.workflow_id.clone(), summary.clone());
+            }
+        }
+    }
+
+    let mut latest_trigger_events = BTreeMap::<String, TriggerEventRecord>::new();
+    for record in trigger_records {
+        match latest_trigger_events.get(&record.trigger_id) {
+            Some(current) if !trigger_record_is_newer(record, current) => {}
+            _ => {
+                latest_trigger_events.insert(record.trigger_id.clone(), record.clone());
+            }
+        }
+    }
+
+    let workflow_views = workflows
+        .iter()
+        .map(|workflow| {
+            let latest_run = latest_runs.get(&workflow.workflow_id);
+            StatusWorkflowView {
+                workflow_id: workflow.workflow_id.clone(),
+                last_run_status: latest_run.map(|summary| summary.status),
+                last_run_id: latest_run.map(|summary| summary.run_id.clone()),
+                last_started_at_ms: latest_run.map(|summary| summary.started_at_ms),
+                last_finished_at_ms: latest_run.and_then(|summary| summary.finished_at_ms),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let trigger_views = triggers
+        .iter()
+        .map(|trigger| {
+            let latest_record = latest_trigger_events.get(&trigger.trigger_id);
+            StatusTriggerView {
+                trigger_id: trigger.trigger_id.clone(),
+                enabled: trigger.enabled,
+                workflow_id: trigger.workflow_id.clone(),
+                last_event_id: latest_record.map(|record| record.event_id.clone()),
+                last_accepted_at_ms: latest_record.map(|record| record.accepted_at_ms),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    StatusOutput {
+        root: StatusRootView {
+            path: root_layout.root.display().to_string(),
+            profile,
+        },
+        serve: StatusServeView {
+            state: serve_lease.state,
+            owner: serve_lease.owner_id,
+            expires_at_ms: serve_lease.expires_at_ms,
+        },
+        workflows: workflow_views,
+        triggers: trigger_views,
+        summary: StatusSummaryView {
+            workflow_count: workflows.len(),
+            trigger_count: triggers.len(),
+            run_count: run_summaries.len(),
+            running_run_count: run_summaries
+                .iter()
+                .filter(|summary| summary.status == RunStatus::Running)
+                .count(),
+        },
+    }
+}
+
+fn render_status_output(status: &StatusOutput) -> String {
+    let mut lines = vec![
+        String::from("Root"),
+        format!("  path: {}", status.root.path),
+        format!(
+            "  profile: {}",
+            status.root.profile.as_deref().unwrap_or("none")
+        ),
+        format!("  serve: {}", render_serve_lease_state(status.serve.state)),
+    ];
+
+    if let Some(owner) = &status.serve.owner {
+        lines.push(format!("  serve_owner: {owner}"));
+    }
+    if let Some(expires_at_ms) = status.serve.expires_at_ms {
+        lines.push(format!("  serve_expires_at_ms: {expires_at_ms}"));
+    }
+
+    lines.push(String::new());
+    lines.push(String::from("Workflows"));
+    if status.workflows.is_empty() {
+        lines.push(String::from("  none"));
+    } else {
+        for workflow in &status.workflows {
+            lines.push(format!(
+                "  {}  {}  last_run={}",
+                workflow.workflow_id,
+                workflow
+                    .last_run_status
+                    .map(render_run_status)
+                    .unwrap_or("none"),
+                workflow.last_run_id.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(String::from("Triggers"));
+    if status.triggers.is_empty() {
+        lines.push(String::from("  none"));
+    } else {
+        for trigger in &status.triggers {
+            lines.push(format!(
+                "  {}  {}  workflow={}  last_event={}",
+                trigger.trigger_id,
+                if trigger.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                trigger.workflow_id,
+                trigger.last_event_id.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(String::from("Summary"));
+    lines.push(format!(
+        "  workflows={} triggers={} runs={} running={}",
+        status.summary.workflow_count,
+        status.summary.trigger_count,
+        status.summary.run_count,
+        status.summary.running_run_count
+    ));
+
+    lines.join("\n")
+}
+
+fn run_summary_is_newer(candidate: &RunRecordSummary, current: &RunRecordSummary) -> bool {
+    (
+        candidate.started_at_ms,
+        candidate.finished_at_ms.unwrap_or(i64::MIN),
+        &candidate.run_id,
+    ) > (
+        current.started_at_ms,
+        current.finished_at_ms.unwrap_or(i64::MIN),
+        &current.run_id,
+    )
+}
+
+fn trigger_record_is_newer(candidate: &TriggerEventRecord, current: &TriggerEventRecord) -> bool {
+    (
+        candidate.accepted_at_ms,
+        candidate.sequence,
+        &candidate.event_id,
+    ) > (current.accepted_at_ms, current.sequence, &current.event_id)
+}
+
+fn render_serve_lease_state(state: ServeLeaseState) -> &'static str {
+    match state {
+        ServeLeaseState::Idle => "idle",
+        ServeLeaseState::Active => "active",
+        ServeLeaseState::Stale => "stale",
+    }
+}
+
+fn parse_bool_flag_value(value: &str) -> Result<bool, UserFacingError> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        other => Err(UserFacingError::usage(format!(
+            "Unsupported boolean flag value `{other}`. Use true, false, 1, or 0."
+        ))),
+    }
+}
+
+fn unsupported_command_message(value: &str) -> String {
+    match suggest_command(value) {
+        Some(suggestion) => format!(
+            "Unsupported command `{value}`. Did you mean `{suggestion}`? Run `chainbot help` to see available command skills."
+        ),
+        None => format!(
+            "Unsupported command `{value}`. Run `chainbot help` to see available command skills."
+        ),
+    }
+}
+
+fn suggest_command(value: &str) -> Option<&'static str> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut best_match = None;
+    let mut best_distance = usize::MAX;
+
+    for candidate in [
+        "help",
+        "status",
+        "trigger",
+        "validate",
+        "list-runs",
+        "run",
+        "serve",
+    ] {
+        let distance = levenshtein_distance(normalized, candidate);
+        if distance < best_distance {
+            best_distance = distance;
+            best_match = Some(candidate);
+        }
+    }
+
+    match (best_match, best_distance) {
+        (Some(candidate), distance) if distance <= 3 => Some(candidate),
+        _ => None,
+    }
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    if left == right {
+        return 0;
+    }
+
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
+
+    for (left_index, left_char) in left_chars.iter().enumerate() {
+        let mut previous_diagonal = costs[0];
+        costs[0] = left_index + 1;
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let insertion = costs[right_index + 1] + 1;
+            let deletion = costs[right_index] + 1;
+            let substitution = previous_diagonal + usize::from(left_char != right_char);
+            previous_diagonal = costs[right_index + 1];
+            costs[right_index + 1] = insertion.min(deletion).min(substitution);
+        }
+    }
+
+    costs[right_chars.len()]
+}
+
+fn render_trigger_operation_output(result: &TriggerToggleResult) -> String {
+    let state = if result.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let outcome = if result.changed {
+        "updated"
+    } else {
+        "unchanged"
+    };
+    format!(
+        "trigger {outcome}: trigger_id={} workflow_id={} state={} config={}",
+        result.trigger_id,
+        result.workflow_id,
+        state,
+        result.config_path.display()
+    )
 }
 
 fn current_time_ms() -> Result<i64, UserFacingError> {
@@ -712,8 +1206,12 @@ fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, Use
         });
     }
 
-    ExecutionPlane::new(runtime.definitions.workflows.clone(), registry)
-        .map_err(UserFacingError::from_contract)
+    ExecutionPlane::new(
+        runtime.definitions.workflows.clone(),
+        runtime.definitions.root_config.runtime_defaults.clone(),
+        registry,
+    )
+    .map_err(UserFacingError::from_contract)
 }
 
 fn execute_external_node_plugin(
@@ -801,10 +1299,12 @@ fn execute_script_node(
             }
         })?;
 
-    let script_path = context
-        .root_layout
-        .root
-        .join(&script_spec.script_relative_path);
+    let script_base_dir = if request.workflow_package_root.as_os_str().is_empty() {
+        context.root_layout.root.clone()
+    } else {
+        request.workflow_package_root.clone()
+    };
+    let script_path = script_base_dir.join(&script_spec.script_relative_path);
     let ResolvedNodeInputs {
         values: resolved_inputs,
         resolved_secrets,
@@ -974,12 +1474,6 @@ fn build_builtin_trigger_emissions(
     definitions: &RootDefinitionBundle,
     now_ms: i64,
 ) -> BTreeMap<String, Vec<TriggerEmission>> {
-    let default_workflow_id = definitions
-        .workflows
-        .first()
-        .map(|workflow| workflow.workflow_id.clone())
-        .unwrap_or_else(|| String::from("workflow-not-found"));
-
     let mut emissions = BTreeMap::new();
     for definition in &definitions.triggers {
         if !matches!(definition.kind(), Ok(TriggerKind::Builtin)) {
@@ -990,7 +1484,6 @@ fn build_builtin_trigger_emissions(
             definition.trigger_id.clone(),
             vec![TriggerEmission {
                 event_id: format!("builtin-event-{}", definition.trigger_id),
-                workflow_id: default_workflow_id.clone(),
                 occurred_at_ms: now_ms,
                 source: Some(definition.source.clone()),
                 payload: serde_json::json!({
@@ -1015,12 +1508,19 @@ fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> Norma
         trigger_request.workflow_id.clone(),
     );
 
-    if let serde_json::Value::Object(values) = &trigger_request.payload {
-        request.trigger_payload_mapping.extend(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+    match &trigger_request.payload {
+        serde_json::Value::Object(values) => {
+            request.trigger_payload_mapping.extend(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+        }
+        other => {
+            request
+                .trigger_payload_mapping
+                .insert(String::from("payload"), other.clone());
+        }
     }
 
     request
@@ -1109,10 +1609,12 @@ mod tests {
         let root = prepare_fixture_root("success", "cli-config-reload-requires-restart");
         let request = CliRequest {
             command: CliCommand::Serve,
-            root_override: Some(root.clone()),
+            json_output: false,
+            trigger_operation: None,
         };
 
         unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
             std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
         }
 
@@ -1121,8 +1623,10 @@ mod tests {
             .expect("initial runtime load should succeed");
 
         fs::write(
-            root.join("triggers").join("external_trigger.toml"),
-            "api_version = \"1.0.0\"\ntrigger_id = [\n",
+            root.join("triggers")
+                .join("external-trigger-e2e")
+                .join("config.toml"),
+            "manifest_version = \"2.0.0\"\ntrigger_id = [\n",
         )
         .expect("mutated trigger file should be writable");
 
@@ -1141,6 +1645,7 @@ mod tests {
             .contains("Definition file is invalid TOML"));
 
         unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
             std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
         }
     }
@@ -1152,18 +1657,24 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
 
         let root = prepare_fixture_root("success", "cli-serve-drains-all-requests");
+        fs::create_dir_all(root.join("triggers").join("builtin-trigger-e2e"))
+            .expect("builtin trigger package directory should be creatable");
         fs::write(
-            root.join("triggers").join("builtin_trigger.toml"),
-            "api_version = \"1.0.0\"\ntrigger_id = \"builtin-trigger-e2e\"\nkind = \"manual\"\nsource = \"manual-source\"\nenabled = true\n",
+            root.join("triggers")
+                .join("builtin-trigger-e2e")
+                .join("config.toml"),
+            "manifest_version = \"2.0.0\"\ntrigger_id = \"builtin-trigger-e2e\"\nkind = \"manual\"\nsource = \"manual-source\"\nworkflow_id = \"wf-e2e\"\nenabled = true\n",
         )
         .expect("builtin trigger fixture should be writable");
 
         let request = CliRequest {
             command: CliCommand::Serve,
-            root_override: Some(root),
+            json_output: false,
+            trigger_operation: None,
         };
 
         unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
             std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
         }
 
@@ -1190,6 +1701,7 @@ mod tests {
         assert_eq!(run_summaries.len(), 2);
 
         unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
             std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
         }
     }
