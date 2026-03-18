@@ -29,13 +29,13 @@ fn end_to_end_vertical_slice() {
 
     let root = prepare_fixture_root("success", "e2e");
 
-    let validate_output = run_chainbot(["validate", "--root"], &root, true);
+    let validate_output = run_chainbot(["validate"], &root, true);
     assert!(validate_output.status.success());
 
-    let run_output = run_chainbot(["run", "--root"], &root, true);
+    let run_output = run_chainbot(["run"], &root, true);
     assert!(run_output.status.success());
 
-    let serve_output = run_chainbot(["serve", "--root"], &root, true);
+    let serve_output = run_chainbot(["serve"], &root, true);
     assert!(
         serve_output.status.success(),
         "serve failed: stdout={} stderr={}",
@@ -43,7 +43,7 @@ fn end_to_end_vertical_slice() {
         String::from_utf8_lossy(&serve_output.stderr)
     );
 
-    let list_runs_output = run_chainbot(["list-runs", "--root"], &root, false);
+    let list_runs_output = run_chainbot(["list-runs"], &root, false);
     assert!(list_runs_output.status.success());
     let runs: Vec<serde_json::Value> = serde_json::from_slice(&list_runs_output.stdout)
         .expect("list-runs output should decode as JSON array");
@@ -75,17 +75,17 @@ fn end_to_end_vertical_slice_failure_modes() {
 
     let root = prepare_fixture_root("failure_missing_secret", "e2e-failure");
 
-    let validate_output = run_chainbot(["validate", "--root"], &root, true);
+    let validate_output = run_chainbot(["validate"], &root, true);
     assert!(validate_output.status.success());
 
-    let run_output = run_chainbot(["run", "--root"], &root, true);
+    let run_output = run_chainbot(["run"], &root, true);
     assert!(!run_output.status.success());
 
     let stderr = String::from_utf8(run_output.stderr).expect("stderr should decode as UTF-8");
     assert!(stderr.contains("Run manual-"));
     assert!(stderr.contains("failed"));
 
-    let list_runs_output = run_chainbot(["list-runs", "--root"], &root, false);
+    let list_runs_output = run_chainbot(["list-runs"], &root, false);
     assert!(list_runs_output.status.success());
 
     let runs: Vec<serde_json::Value> = serde_json::from_slice(&list_runs_output.stdout)
@@ -115,7 +115,7 @@ fn end_to_end_vertical_slice_failure_modes_redact_plugin_error_details() {
     .expect("plugin fixture should be writable");
     make_executable(&root.join("plugins").join("bin").join("external_node.sh"));
 
-    let run_output = run_chainbot(["run", "--root"], &root, true);
+    let run_output = run_chainbot(["run"], &root, true);
     assert!(!run_output.status.success());
 
     let stderr = String::from_utf8(run_output.stderr).expect("stderr should decode as UTF-8");
@@ -203,7 +203,7 @@ fn serve_restart_recovery() {
     ));
     drop(coordination);
 
-    let serve_output = run_chainbot(["serve", "--root"], &root, true);
+    let serve_output = run_chainbot(["serve"], &root, true);
     assert!(
         serve_output.status.success(),
         "serve restart recovery failed: stdout={} stderr={}",
@@ -262,7 +262,7 @@ fn duplicate_trigger_after_restart() {
 
     let root = prepare_fixture_root("success", "e2e-duplicate-trigger-after-restart");
 
-    let first_serve = run_chainbot(["serve", "--root"], &root, true);
+    let first_serve = run_chainbot(["serve"], &root, true);
     assert!(
         first_serve.status.success(),
         "first serve failed: stdout={} stderr={}",
@@ -275,7 +275,7 @@ fn duplicate_trigger_after_restart() {
     assert!(first_trigger_count >= 1);
     assert_eq!(first_runs.len(), 1);
 
-    let second_serve = run_chainbot(["serve", "--root"], &root, true);
+    let second_serve = run_chainbot(["serve"], &root, true);
     assert!(
         second_serve.status.success(),
         "second serve failed: stdout={} stderr={}",
@@ -306,7 +306,7 @@ fn run_chainbot<const N: usize>(
     with_plaintext_secrets: bool,
 ) -> std::process::Output {
     let mut command = std::process::Command::new(chainbot_bin());
-    command.args(args).arg(root);
+    command.env("CHAINBOT_CONFIG_DIR", root).args(args);
     if with_plaintext_secrets {
         command.env(SECRET_DECRYPT_ENV, SECRET_DECRYPT_MODE_PLAINTEXT);
     }
@@ -396,7 +396,7 @@ fn collect_text_files(path: &Path) -> String {
 }
 
 fn read_run_summaries(root: &Path) -> Vec<serde_json::Value> {
-    let list_runs_output = run_chainbot(["list-runs", "--root"], root, false);
+    let list_runs_output = run_chainbot(["list-runs"], root, false);
     assert!(
         list_runs_output.status.success(),
         "list-runs failed: stdout={} stderr={}",
