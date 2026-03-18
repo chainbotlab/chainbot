@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Defines the configuration and package-loading boundary for ChainBot runtime state on disk.
 
-
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -284,7 +283,7 @@ pub fn set_trigger_enabled(
         .find(|definition| definition.trigger_id == trigger_id)
         .ok_or_else(|| ContractError::CliUsage {
             message: format!(
-                "Unknown trigger `{trigger_id}`. Run `chainbot status` to inspect configured triggers."
+                "Unknown trigger `{trigger_id}`. Run `chainbot trigger list` to inspect configured triggers."
             ),
         })?;
 
@@ -320,7 +319,9 @@ pub fn load_trigger_definitions(
     layout: &RootLayout,
 ) -> Result<Vec<TriggerDefinition>, ContractError> {
     let effective_layout = load_effective_root_layout(layout)?;
-    effective_layout.validate_paths_exist()?;
+    validate_directory_exists(&effective_layout.root, "root")?;
+    validate_directory_exists(&effective_layout.config_dir, "config")?;
+    validate_directory_exists(&effective_layout.triggers_dir, "triggers")?;
     let triggers: Vec<TriggerDefinition> =
         decode_package_collection(&effective_layout.triggers_dir)?;
     for trigger in &triggers {

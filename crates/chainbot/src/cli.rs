@@ -2,11 +2,10 @@
 //! Process arguments, environment-resolved ChainBot roots, and runtime services from config, state, trigger, executor, worker, and secrets modules.
 //!
 //! [OUTPUT]
-//! Parses commands, executes help, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
+//! Parses commands, executes help, init, status, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
 //!
 //! [ROLE]
 //! Owns the user-facing command boundary for the `chainbot` binary.
-
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -16,8 +15,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{
-    load_effective_root_layout, resolve_root_layout, set_trigger_enabled, RootDefinitionBundle,
-    RootLayout, TriggerToggleResult,
+    load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
+    RootConfigDefinition, RootDefinitionBundle, RootLayout, RootPathOverrides, RootPluginDiscovery,
+    TriggerToggleResult,
 };
 use crate::errors::{ContractError, UserFacingError};
 use crate::executor::{
@@ -51,10 +51,12 @@ const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
 const SCRIPT_RUNTIME_PYTHON: &str = "python";
 const SCRIPT_RUNTIME_JAVASCRIPT: &str = "javascript";
+const INIT_MANIFEST_VERSION: &str = "2.0.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliCommand {
     Help(HelpTopic),
+    Init,
     Status,
     Trigger,
     Validate,
@@ -66,6 +68,7 @@ pub enum CliCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     General,
+    Init,
     Status,
     Trigger,
     Validate,
@@ -94,8 +97,16 @@ enum SecretDecryptMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerOperation {
+    List,
     Enable { trigger_id: String },
     Disable { trigger_id: String },
+}
+
+#[derive(Debug)]
+struct InitResult {
+    root: PathBuf,
+    created_paths: Vec<PathBuf>,
+    reused_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -210,6 +221,7 @@ impl CliRequest {
                 trigger_operation: None,
             }),
             "help" => Self::parse_help_args(args),
+            "init" => Self::parse_command_args(CliCommand::Init, args),
             "status" => Self::parse_command_args(CliCommand::Status, args),
             "trigger" => Self::parse_trigger_args(args),
             "validate" => Self::parse_command_args(CliCommand::Validate, args),
@@ -226,6 +238,7 @@ impl CliRequest {
     pub fn execute(&self) -> Result<CliOutput, UserFacingError> {
         match self.command {
             CliCommand::Help(topic) => Ok(CliOutput::text(help_text(topic))),
+            CliCommand::Init => self.execute_init(),
             CliCommand::Status => self.execute_status(),
             CliCommand::Trigger => self.execute_trigger(),
             CliCommand::Validate => self.execute_validate(),
@@ -305,7 +318,7 @@ impl CliRequest {
     {
         let Some(action) = args.next() else {
             return Err(UserFacingError::usage(
-                "`chainbot trigger` requires `enable` or `disable`. Run `chainbot help trigger`.",
+                "`chainbot trigger` requires `list`, `enable`, or `disable`. Run `chainbot help trigger`.",
             ));
         };
         let action = action.to_string_lossy().into_owned();
@@ -317,12 +330,42 @@ impl CliRequest {
             });
         }
 
+        if action == "list" {
+            let mut json_output = false;
+            while let Some(arg) = args.next() {
+                let raw = arg.to_string_lossy().into_owned();
+                match raw.as_str() {
+                    "--json" => {
+                        json_output = true;
+                    }
+                    _ => {
+                        if let Some((flag, value)) = raw.split_once('=') {
+                            if flag == "--json" {
+                                json_output = parse_bool_flag_value(value)?;
+                                continue;
+                            }
+                        }
+
+                        return Err(UserFacingError::usage(format!(
+                            "Unexpected argument for trigger list: {raw}"
+                        )));
+                    }
+                }
+            }
+
+            return Ok(Self {
+                command: CliCommand::Trigger,
+                json_output,
+                trigger_operation: Some(TriggerOperation::List),
+            });
+        }
+
         let enabled = match action.as_str() {
             "enable" => true,
             "disable" => false,
             other => {
                 return Err(UserFacingError::usage(format!(
-                    "Unsupported trigger action `{other}`. Use `enable` or `disable`."
+                    "Unsupported trigger action `{other}`. Use `list`, `enable`, or `disable`."
                 )));
             }
         };
@@ -367,6 +410,13 @@ impl CliRequest {
                 TriggerOperation::Disable { trigger_id }
             }),
         })
+    }
+
+    fn execute_init(&self) -> Result<CliOutput, UserFacingError> {
+        let root_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+        let init_result = initialize_root_layout(&root_layout)?;
+        let _ = RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+        Ok(CliOutput::text(render_init_output(&init_result)))
     }
 
     fn execute_status(&self) -> Result<CliOutput, UserFacingError> {
@@ -416,13 +466,26 @@ impl CliRequest {
     }
 
     fn execute_trigger(&self) -> Result<CliOutput, UserFacingError> {
-        let root_layout = self.resolve_existing_root()?;
+        let root_layout = self.resolve_trigger_root()?;
         let operation = self.trigger_operation.as_ref().ok_or_else(|| {
             UserFacingError::usage(
                 "Missing trigger operation. Run `chainbot help trigger` for usage.",
             )
         })?;
         let result = match operation {
+            TriggerOperation::List => {
+                let triggers = load_trigger_definitions(&root_layout)
+                    .map_err(UserFacingError::from_contract)?;
+                if self.json_output {
+                    let stdout = serde_json::to_string_pretty(&triggers).map_err(|source| {
+                        UserFacingError::state(format!(
+                            "Failed to serialize trigger list payload: {source}"
+                        ))
+                    })?;
+                    return Ok(CliOutput::text(stdout));
+                }
+                return Ok(CliOutput::text(render_trigger_list_output(&triggers)));
+            }
             TriggerOperation::Enable { trigger_id } => {
                 set_trigger_enabled(&root_layout, trigger_id, true)
             }
@@ -543,6 +606,13 @@ impl CliRequest {
         Ok(layout)
     }
 
+    fn resolve_trigger_root(&self) -> Result<RootLayout, UserFacingError> {
+        let bootstrap_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+        maybe_prepare_e2e_root(&bootstrap_layout)?;
+        load_trigger_definitions(&bootstrap_layout).map_err(UserFacingError::from_contract)?;
+        load_effective_root_layout(&bootstrap_layout).map_err(UserFacingError::from_contract)
+    }
+
     fn load_runtime_context(&self) -> Result<RuntimeContext, UserFacingError> {
         let root_layout = self.resolve_existing_root()?;
         let definitions =
@@ -583,6 +653,7 @@ impl CliOutput {
 
 fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
     match value {
+        "init" => Ok(HelpTopic::Init),
         "status" => Ok(HelpTopic::Status),
         "trigger" => Ok(HelpTopic::Trigger),
         "validate" => Ok(HelpTopic::Validate),
@@ -599,6 +670,7 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
 fn help_topic_for(command: CliCommand) -> HelpTopic {
     match command {
         CliCommand::Help(topic) => topic,
+        CliCommand::Init => HelpTopic::Init,
         CliCommand::Status => HelpTopic::Status,
         CliCommand::Trigger => HelpTopic::Trigger,
         CliCommand::Validate => HelpTopic::Validate,
@@ -611,6 +683,7 @@ fn help_topic_for(command: CliCommand) -> HelpTopic {
 fn command_name(command: CliCommand) -> &'static str {
     match command {
         CliCommand::Help(_) => "help",
+        CliCommand::Init => "init",
         CliCommand::Status => "status",
         CliCommand::Trigger => "trigger",
         CliCommand::Validate => "validate",
@@ -621,14 +694,15 @@ fn command_name(command: CliCommand) -> &'static str {
 }
 
 fn general_help_text() -> &'static str {
-    "ChainBot command skills\n\nUsage:\n  chainbot help [command]\n  chainbot status [--json]\n  chainbot trigger <enable|disable> <trigger-id>\n  chainbot validate\n  chainbot list-runs\n  chainbot run\n  chainbot serve\n\nRoot resolution:\n  - use CHAINBOT_CONFIG_DIR when it is set to a non-empty path\n  - otherwise fall back to ~/.chainbot\n\nCommands:\n  status     Inspect runtime state without executing workflows.\n  trigger    Persistently enable or disable a trigger package.\n  validate   Validate config and package contracts.\n  list-runs  Print persisted run summaries as JSON.\n  run        Execute one single-shot manual run.\n  serve      Drain one trigger snapshot under a serve lease.\n\nUse `chainbot help <command>` for command-specific guidance."
+    "ChainBot command skills\n\nUsage:\n  chainbot help [command]\n  chainbot init\n  chainbot status [--json]\n  chainbot trigger list [--json]\n  chainbot trigger <enable|disable> <trigger-id>\n  chainbot validate\n  chainbot list-runs\n  chainbot run\n  chainbot serve\n\nRoot resolution:\n  - use CHAINBOT_CONFIG_DIR when it is set to a non-empty path\n  - otherwise fall back to ~/.chainbot\n\nCommands:\n  init       Bootstrap a minimal ChainBot root.\n  status     Inspect runtime state without executing workflows.\n  trigger    Inspect or persist trigger package state.\n  validate   Validate config and package contracts.\n  list-runs  Print persisted run summaries as JSON.\n  run        Execute one single-shot manual run.\n  serve      Drain one trigger snapshot under a serve lease.\n\nUse `chainbot help <command>` for command-specific guidance."
 }
 
 fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::General => general_help_text(),
+        HelpTopic::Init => "init - Bootstrap a minimal ChainBot root\n\nUse when:\n  - you need a new ChainBot root that validates immediately\n  - you want the default config directory layout without manual setup\n  - you are preparing a fresh local root for workflows and triggers\n\nWrites:\n  - resolved root directory\n  - config/root.toml when it is missing\n  - default package directories under the root\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot init\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot init\n\nSee also:\n  validate, status, trigger",
         HelpTopic::Status => "status - Inspect runtime state without executing workflows\n\nUse when:\n  - you want to know whether serve is active\n  - you want the latest workflow run result\n  - you want trigger activity without opening state files\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured state runs directory\n  - configured trigger record directory\n  - configured coordination store\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot status\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot status\n  chainbot status --json\n\nSee also:\n  validate, list-runs, serve",
-        HelpTopic::Trigger => "trigger - Persistently enable or disable a trigger package\n\nUse when:\n  - you need to stop a trigger without editing TOML manually\n  - you want to re-enable a trigger after maintenance or debugging\n  - you need a scriptable operator command for trigger state changes\n\nReads:\n  - configured root config\n  - configured trigger packages\n\nWrites:\n  - target trigger package config.toml\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot trigger enable tr-market\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market\n\nSee also:\n  status, validate, serve",
+        HelpTopic::Trigger => "trigger - Inspect or persist trigger package state\n\nUse when:\n  - you need to inspect configured triggers without opening TOML manually\n  - you need to stop a trigger without editing TOML manually\n  - you want to re-enable a trigger after maintenance or debugging\n\nReads:\n  - configured root config\n  - configured trigger packages\n\nWrites:\n  - target trigger package config.toml for enable or disable actions\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot trigger list\n  chainbot trigger list --json\n  chainbot trigger enable tr-market\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market\n\nSee also:\n  init, status, validate, serve",
         HelpTopic::Validate => "validate - Validate config and package contracts\n\nUse when:\n  - you want to confirm a root is structurally valid\n  - you changed config and want a fast contract check\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin manifests\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot validate\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate\n\nSee also:\n  status, run, serve",
         HelpTopic::ListRuns => "list-runs - Print persisted run summaries as JSON\n\nUse when:\n  - you need machine-readable workflow run summaries\n  - you want raw persisted run status output without higher-level aggregation\n\nReads:\n  - configured state runs directory\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot list-runs\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot list-runs\n\nSee also:\n  status, serve",
         HelpTopic::Run => "run - Execute one manual workflow run\n\nUse when:\n  - you want a single manual execution without a serve lease\n  - your root contains exactly one workflow package\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured plugin manifests\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n\nExamples:\n  chainbot run\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot run\n\nSee also:\n  status, validate, serve",
@@ -847,6 +921,7 @@ fn suggest_command(value: &str) -> Option<&'static str> {
     for candidate in [
         "help",
         "status",
+        "init",
         "trigger",
         "validate",
         "list-runs",
@@ -908,6 +983,246 @@ fn render_trigger_operation_output(result: &TriggerToggleResult) -> String {
         state,
         result.config_path.display()
     )
+}
+
+fn render_trigger_list_output(triggers: &[TriggerDefinition]) -> String {
+    let mut lines = vec![String::from("Triggers")];
+    if triggers.is_empty() {
+        lines.push(String::from("  none"));
+        return lines.join("\n");
+    }
+
+    for trigger in triggers {
+        lines.push(format!(
+            "  {}  {}  workflow={}  kind={}  source={}",
+            trigger.trigger_id,
+            if trigger.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            trigger.workflow_id,
+            trigger.kind,
+            trigger.source
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn initialize_root_layout(layout: &RootLayout) -> Result<InitResult, UserFacingError> {
+    let mut created_paths = Vec::new();
+    let mut reused_paths = Vec::new();
+
+    ensure_directory(&layout.root, &mut created_paths, &mut reused_paths)?;
+    ensure_directory(&layout.config_dir, &mut created_paths, &mut reused_paths)?;
+    let root_config = ensure_root_config(layout, &mut created_paths, &mut reused_paths)?;
+    let effective_layout = layout
+        .apply_root_config(&root_config)
+        .map_err(UserFacingError::from_contract)?;
+
+    ensure_directory(
+        &effective_layout.workflows_dir,
+        &mut created_paths,
+        &mut reused_paths,
+    )?;
+    ensure_directory(
+        &effective_layout.triggers_dir,
+        &mut created_paths,
+        &mut reused_paths,
+    )?;
+    ensure_directory(
+        &effective_layout.plugins_dir,
+        &mut created_paths,
+        &mut reused_paths,
+    )?;
+    ensure_directory(
+        &effective_layout.plugins_dir.join("bin"),
+        &mut created_paths,
+        &mut reused_paths,
+    )?;
+    ensure_directory(
+        &effective_layout.secrets_dir,
+        &mut created_paths,
+        &mut reused_paths,
+    )?;
+    ensure_directory(
+        &effective_layout.state_dir,
+        &mut created_paths,
+        &mut reused_paths,
+    )?;
+
+    for manifest_dir in plugin_manifest_directories(&effective_layout.root, &root_config)? {
+        ensure_directory(&manifest_dir, &mut created_paths, &mut reused_paths)?;
+    }
+
+    Ok(InitResult {
+        root: layout.root.clone(),
+        created_paths,
+        reused_paths,
+    })
+}
+
+fn ensure_directory(
+    path: &Path,
+    created_paths: &mut Vec<PathBuf>,
+    reused_paths: &mut Vec<PathBuf>,
+) -> Result<(), UserFacingError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            reused_paths.push(path.to_path_buf());
+            Ok(())
+        }
+        Ok(_) => Err(UserFacingError::conflict(format!(
+            "Init expected a directory at {}, but found a file. Move it or choose another CHAINBOT_CONFIG_DIR.",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|source| {
+                UserFacingError::state(format!(
+                    "Failed to create init directory {}: {source}",
+                    path.display()
+                ))
+            })?;
+            created_paths.push(path.to_path_buf());
+            Ok(())
+        }
+        Err(error) => Err(UserFacingError::state(format!(
+            "Failed to inspect init path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn ensure_root_config(
+    layout: &RootLayout,
+    created_paths: &mut Vec<PathBuf>,
+    reused_paths: &mut Vec<PathBuf>,
+) -> Result<RootConfigDefinition, UserFacingError> {
+    let path = layout.root_config_path();
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {
+            reused_paths.push(path);
+            let contents = fs::read_to_string(layout.root_config_path()).map_err(|source| {
+                UserFacingError::state(format!(
+                    "Failed to read init root config at {}: {source}",
+                    layout.root_config_path().display()
+                ))
+            })?;
+            let root_config = toml::from_str::<RootConfigDefinition>(&contents).map_err(|source| {
+                UserFacingError::validation(format!(
+                    "Existing init root config is invalid TOML at {}: {source}",
+                    layout.root_config_path().display()
+                ))
+            })?;
+            root_config
+                .validate()
+                .map_err(UserFacingError::from_contract)?;
+            Ok(root_config)
+        }
+        Ok(_) => Err(UserFacingError::conflict(format!(
+            "Init expected a file at {}, but found a directory. Remove it or choose another CHAINBOT_CONFIG_DIR.",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let root_config = default_root_config();
+            let contents = toml::to_string_pretty(&root_config).map_err(|source| {
+                UserFacingError::state(format!(
+                    "Failed to serialize init root config at {}: {source}",
+                    path.display()
+                ))
+            })?;
+            fs::write(&path, contents).map_err(|source| {
+                UserFacingError::state(format!(
+                    "Failed to write init root config at {}: {source}",
+                    path.display()
+                ))
+            })?;
+            created_paths.push(path);
+            Ok(root_config)
+        }
+        Err(error) => Err(UserFacingError::state(format!(
+            "Failed to inspect init root config {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn plugin_manifest_directories(
+    root: &Path,
+    root_config: &RootConfigDefinition,
+) -> Result<Vec<PathBuf>, UserFacingError> {
+    let globs = if root_config.plugins.manifest_globs.is_empty() {
+        vec![String::from("plugins/manifests/*.toml")]
+    } else {
+        root_config.plugins.manifest_globs.clone()
+    };
+
+    let mut directories = BTreeSet::new();
+    for pattern in globs {
+        let Some(directory_pattern) = pattern.strip_suffix("/*.toml") else {
+            return Err(UserFacingError::validation(format!(
+                "root_config.plugins.manifest_globs must use a root-relative <dir>/*.toml pattern: {pattern}"
+            )));
+        };
+        let candidate = Path::new(directory_pattern);
+        if candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(UserFacingError::validation(format!(
+                "root_config.plugins.manifest_globs must stay within the root: {pattern}"
+            )));
+        }
+        directories.insert(root.join(candidate));
+    }
+
+    Ok(directories.into_iter().collect())
+}
+
+fn default_root_config() -> RootConfigDefinition {
+    RootConfigDefinition {
+        schema_version: INIT_MANIFEST_VERSION.to_owned(),
+        profile: Some(String::from("default")),
+        secret_refs: Vec::new(),
+        runtime_defaults: BTreeMap::from([(
+            String::from("timezone"),
+            serde_json::Value::String(String::from("UTC")),
+        )]),
+        paths: RootPathOverrides {
+            workflows_dir: Some(String::from("workflows")),
+            triggers_dir: Some(String::from("triggers")),
+            plugins_dir: Some(String::from("plugins")),
+            secrets_dir: Some(String::from("secrets")),
+            state_dir: Some(String::from("state")),
+        },
+        plugins: RootPluginDiscovery {
+            manifest_globs: vec![String::from("plugins/manifests/*.toml")],
+        },
+    }
+}
+
+fn render_init_output(result: &InitResult) -> String {
+    let mut lines = vec![format!("init completed: root={}", result.root.display())];
+    if result.created_paths.is_empty() {
+        lines.push(String::from("created:"));
+        lines.push(String::from("  none"));
+    } else {
+        lines.push(String::from("created:"));
+        for path in &result.created_paths {
+            lines.push(format!("  {}", path.display()));
+        }
+    }
+
+    if !result.reused_paths.is_empty() {
+        lines.push(String::from("reused:"));
+        for path in &result.reused_paths {
+            lines.push(format!("  {}", path.display()));
+        }
+    }
+
+    lines.join("\n")
 }
 
 fn current_time_ms() -> Result<i64, UserFacingError> {

@@ -6,7 +6,7 @@
 - Current Phase: Implementation
 - Last Updated: 2026-03-18
 - Workspace Layout: `crates/`
-- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`
+- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`
 
 ## Documentation Topology
 ```text
@@ -34,6 +34,7 @@ crates/
 | `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md` | implementation | active | Records the MVP artifact rename, evidence cleanup, and release-version alignment. |
 | `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md` | implementation | active | Records the v2.1 package-layout implementation, root-config overrides, and validation coverage. |
 | `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md` | implementation | active | Records the v2.1.2 CLI root-resolution contract update and release-version alignment. |
+| `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md` | implementation | active | Records the v2.1.3 CLI init bootstrap, trigger listing surface, and release-version alignment. |
 | `docs/research/CHAINBOT_V212_CLI_PROPOSAL.md` | research | active | Proposes the v2.1.2 CLI usability surface with environment-based root resolution. |
 
 ## Fractal Architecture

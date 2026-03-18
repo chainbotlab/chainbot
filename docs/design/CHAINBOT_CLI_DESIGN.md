@@ -10,8 +10,9 @@
 
 ```text
 chainbot help [command]
+chainbot init
 chainbot status [--json]
-chainbot trigger <enable|disable> <trigger-id>
+chainbot trigger <list|enable|disable> [trigger-id]
 chainbot validate
 chainbot list-runs
 chainbot run
@@ -49,11 +50,19 @@ chainbot serve
 
 ### `trigger`
 
-- 提供 trigger package 的 operator 级开关操作。
+- 提供 trigger package 的 operator 级查看与开关操作。
+- `chainbot trigger list` 输出当前配置面里的 trigger 列表。
 - `chainbot trigger enable <trigger-id>` 将目标 trigger package 的 `enabled` 置为 `true`。
 - `chainbot trigger disable <trigger-id>` 将目标 trigger package 的 `enabled` 置为 `false`。
 - 开关结果在下一次 `status`、`validate`、`serve` 或任意重新加载定义的命令中生效。
 - 不修改运行态 trigger record、dedup/cooldown coordination 或 serve lease。
+
+### `init`
+
+- 初始化一个最小可校验的 ChainBot root。
+- 若目标 root 不存在则创建默认目录布局。
+- 若 `config/root.toml` 缺失则写入默认模板。
+- 已存在的目录与 root config 默认按幂等方式复用，不递归覆盖业务内容。
 
 ### `list-runs`
 
@@ -211,8 +220,9 @@ CLI 错误不仅描述失败，还必须给出下一步动作。
 ## Output Strategy
 
 - `help`: human-readable only
+- `init`: human-readable bootstrap result
 - `status`: human-readable by default, `--json` optional
-- `trigger`: human-readable mutation result
+- `trigger`: human-readable list or mutation result
 - `validate`: human-readable success / validation failure
 - `list-runs`: JSON output
 - `run`: human-readable execution result

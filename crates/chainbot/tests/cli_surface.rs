@@ -2,11 +2,10 @@
 //! CLI binary invocations, temporary fixture roots, and persisted trigger package state under test roots.
 //!
 //! [OUTPUT]
-//! Verifies command help, exit behavior, and persisted trigger enable or disable CLI mutations.
+//! Verifies command help, init bootstrap behavior, exit behavior, and persisted trigger list or toggle CLI actions.
 //!
 //! [ROLE]
 //! Covers the user-facing CLI surface as an integration boundary.
-
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,11 +41,32 @@ fn help_lists_expected_commands() {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
     assert!(stdout.contains("validate"));
+    assert!(stdout.contains("init"));
     assert!(stdout.contains("status"));
     assert!(stdout.contains("trigger"));
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("list-runs"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_init_includes_bootstrap_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "init"])
+        .output()
+        .expect("chainbot help init should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Bootstrap a minimal ChainBot root"));
+    assert!(stdout.contains("CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot init"));
     assert!(stderr.is_empty());
 }
 
@@ -86,9 +106,137 @@ fn help_trigger_includes_toggle_guidance() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
-    assert!(stdout.contains("enable or disable a trigger package"));
+    assert!(stdout.contains("Inspect or persist trigger package state"));
+    assert!(stdout.contains("chainbot trigger list"));
     assert!(stdout.contains("chainbot trigger enable tr-market"));
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn init_creates_minimal_root_and_validate_accepts_it() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("init-minimal");
+    let _ = fs::remove_dir_all(&root);
+
+    let init_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("init should execute");
+
+    assert!(init_output.status.success());
+
+    let init_stdout = String::from_utf8(init_output.stdout).expect("stdout should be UTF-8");
+    let init_stderr = String::from_utf8(init_output.stderr).expect("stderr should be UTF-8");
+    assert!(init_stdout.contains("init completed:"));
+    assert!(init_stdout.contains(root.to_string_lossy().as_ref()));
+    assert!(init_stderr.is_empty());
+
+    assert!(root.join("config").is_dir());
+    assert!(root.join("workflows").is_dir());
+    assert!(root.join("triggers").is_dir());
+    assert!(root.join("plugins").join("manifests").is_dir());
+    assert!(root.join("plugins").join("bin").is_dir());
+    assert!(root.join("secrets").is_dir());
+    assert!(root.join("state").is_dir());
+
+    let root_config = fs::read_to_string(root.join("config").join("root.toml"))
+        .expect("root config should be created by init");
+    assert!(root_config.contains("manifest_version = \"2.0.0\""));
+    assert!(root_config.contains("profile = \"default\""));
+    assert!(root_config.contains("workflows_dir = \"workflows\""));
+
+    let validate_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("validate")
+        .output()
+        .expect("validate should execute after init");
+
+    assert!(validate_output.status.success());
+    let validate_stdout =
+        String::from_utf8(validate_output.stdout).expect("stdout should be UTF-8");
+    let validate_stderr =
+        String::from_utf8(validate_output.stderr).expect("stderr should be UTF-8");
+    assert!(validate_stdout.contains("validated root:"));
+    assert!(validate_stderr.is_empty());
+}
+
+#[test]
+fn init_is_idempotent_when_root_already_exists() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("init-idempotent");
+    let _ = fs::remove_dir_all(&root);
+
+    let first_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("first init should execute");
+    assert!(first_output.status.success());
+
+    let second_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("second init should execute");
+    assert!(second_output.status.success());
+
+    let stdout = String::from_utf8(second_output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(second_output.stderr).expect("stderr should be UTF-8");
+    assert!(stdout.contains("reused:"));
+    assert!(stdout.contains(root.join("config").to_string_lossy().as_ref()));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn init_respects_existing_root_path_overrides() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("init-overrides");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n\n[plugins]\nmanifest_globs = [\"extensions/catalog/*.toml\"]\n",
+    )
+    .expect("custom root config should be writable");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("init should execute with existing overrides");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stdout.contains(
+        root.join("defs")
+            .join("workflows")
+            .to_string_lossy()
+            .as_ref()
+    ));
+    assert!(stdout.contains(
+        root.join("extensions")
+            .join("catalog")
+            .to_string_lossy()
+            .as_ref()
+    ));
+    assert!(stderr.is_empty());
+
+    assert!(root.join("defs").join("workflows").is_dir());
+    assert!(root.join("defs").join("triggers").is_dir());
+    assert!(root.join("extensions").is_dir());
+    assert!(root.join("extensions").join("bin").is_dir());
+    assert!(root.join("extensions").join("catalog").is_dir());
+    assert!(root.join("vault").is_dir());
+    assert!(root.join("runtime").is_dir());
+
+    let validate_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("validate")
+        .output()
+        .expect("validate should execute after override init");
+    assert!(validate_output.status.success());
 }
 
 #[test]
@@ -205,6 +353,105 @@ fn trigger_enable_and_disable_persist_trigger_state() {
     let trigger_config = fs::read_to_string(&trigger_config_path)
         .expect("trigger config should remain readable after disable");
     assert!(trigger_config.contains("enabled = false"));
+}
+
+#[test]
+fn trigger_list_reports_configured_triggers() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["trigger", "list"])
+        .output()
+        .expect("trigger list should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stdout.contains("Triggers"));
+    assert!(stdout.contains("tr-market"));
+    assert!(stdout.contains("workflow=wf-alpha"));
+    assert!(stdout.contains("source=market-feed"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn trigger_list_json_reports_machine_readable_payload() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["trigger", "list", "--json"])
+        .output()
+        .expect("trigger list --json should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    let payload = serde_json::from_str::<serde_json::Value>(&stdout)
+        .expect("trigger list json payload should decode");
+
+    assert_eq!(payload.as_array().map(Vec::len), Some(1));
+    assert_eq!(payload[0]["manifest_version"], "2.0.0");
+    assert_eq!(payload[0]["trigger_id"], "tr-market");
+    assert_eq!(payload[0]["kind"], "market_tick");
+    assert_eq!(payload[0]["workflow_id"], "wf-alpha");
+    assert_eq!(payload[0]["enabled"], false);
+    assert_eq!(payload[0]["source"], "market-feed");
+    assert_eq!(payload[0]["input_mapping"], serde_json::json!({}));
+    assert_eq!(payload[0].get("package_root"), None);
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn trigger_list_only_requires_trigger_root_inputs() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("trigger-minimal");
+    let _ = fs::remove_dir_all(&root);
+
+    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("tr-market"))
+        .expect("trigger directory should be creatable");
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"minimal\"\nsecret_refs = []\n",
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
+    )
+    .expect("trigger config should be writable");
+
+    let list_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["trigger", "list"])
+        .output()
+        .expect("trigger list should execute on minimal root");
+    assert!(list_output.status.success());
+
+    let list_stdout = String::from_utf8(list_output.stdout).expect("stdout should be UTF-8");
+    let list_stderr = String::from_utf8(list_output.stderr).expect("stderr should be UTF-8");
+    assert!(list_stdout.contains("tr-market"));
+    assert!(list_stderr.is_empty());
+
+    let enable_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["trigger", "enable", "tr-market"])
+        .output()
+        .expect("trigger enable should execute on minimal root");
+    assert!(enable_output.status.success());
+    let enable_stdout = String::from_utf8(enable_output.stdout).expect("stdout should be UTF-8");
+    assert!(enable_stdout.contains("state=enabled"));
+
+    let trigger_config =
+        fs::read_to_string(root.join("triggers").join("tr-market").join("config.toml"))
+            .expect("trigger config should remain readable after enable");
+    assert!(trigger_config.contains("enabled = true"));
 }
 
 #[test]
@@ -384,6 +631,17 @@ fn basic_root() -> PathBuf {
         .join("target")
         .join("test-roots")
         .join("basic")
+}
+
+fn unique_root(label: &str) -> PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after UNIX_EPOCH")
+        .as_nanos();
+    workspace_root()
+        .join("target")
+        .join("test-roots")
+        .join(format!("{label}-{suffix}"))
 }
 
 fn workspace_root() -> PathBuf {
