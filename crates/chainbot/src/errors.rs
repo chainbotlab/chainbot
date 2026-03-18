@@ -42,6 +42,10 @@ pub enum ContractError {
         path: PathBuf,
         source: toml::de::Error,
     },
+    TomlEncode {
+        path: PathBuf,
+        source: toml::ser::Error,
+    },
     Io {
         path: PathBuf,
         operation: &'static str,
@@ -58,6 +62,10 @@ pub enum ContractError {
     },
     CliUsage {
         message: String,
+    },
+    InvalidRootConfigField {
+        field: &'static str,
+        detail: String,
     },
     InvalidVersionFormat {
         field: &'static str,
@@ -94,8 +102,21 @@ pub enum ContractError {
     DuplicateWorkflowId {
         workflow_id: String,
     },
+    DuplicatePluginId {
+        plugin_id: String,
+    },
     UnknownWorkflowDefinition {
         workflow_id: String,
+    },
+    TriggerReferencesUnknownWorkflow {
+        trigger_id: String,
+        workflow_id: String,
+    },
+    PackageDirectoryIdentityMismatch {
+        kind: &'static str,
+        path: PathBuf,
+        expected_id: String,
+        directory_name: String,
     },
     SubflowDepthExceeded {
         workflow_id: String,
@@ -353,18 +374,43 @@ impl UserFacingError {
         match error {
             ContractError::CliUsage { message } => Self::usage(message),
             ContractError::MissingHomeDirectory => Self::validation(
-                "Default root could not be resolved because HOME is not set. Pass --root <path>.",
+                "Default root could not be resolved because neither CHAINBOT_CONFIG_DIR nor HOME is set.",
             ),
-            ContractError::MissingFile { path, kind } => Self::validation(format!(
-                "Root is missing required {kind} file: {}",
-                path.display()
-            )),
-            ContractError::MissingDirectory { path, kind } => Self::validation(format!(
-                "Root is missing required {kind} directory: {}",
+            ContractError::MissingFile { path, kind } => {
+                let mut message = format!("Root is missing required {kind} file: {}", path.display());
+                if kind == "root config" {
+                    message.push_str(
+                        " Check CHAINBOT_CONFIG_DIR or ensure ~/.chainbot/config/root.toml exists.",
+                    );
+                }
+                Self::validation(message)
+            }
+            ContractError::MissingDirectory { path, kind } => {
+                let mut message = format!(
+                    "Root is missing required {kind} directory: {}",
+                    path.display()
+                );
+                if kind == "root" {
+                    message.push_str(
+                        " Check CHAINBOT_CONFIG_DIR or ensure ~/.chainbot exists and is a valid root.",
+                    );
+                }
+                Self::validation(message)
+            }
+            ContractError::Io {
+                path,
+                operation,
+                source,
+            } => Self::state(format!(
+                "Failed to {operation} at {}: {source}",
                 path.display()
             )),
             ContractError::TomlDecode { path, source } => Self::validation(format!(
                 "Definition file is invalid TOML at {}: {source}",
+                path.display()
+            )),
+            ContractError::TomlEncode { path, source } => Self::state(format!(
+                "Definition file could not be serialized at {}: {source}",
                 path.display()
             )),
             ContractError::JsonDecode(source) => {
@@ -386,6 +432,9 @@ impl Display for ContractError {
             Self::TomlDecode { path, source } => {
                 write!(f, "failed to decode TOML at {}: {source}", path.display())
             }
+            Self::TomlEncode { path, source } => {
+                write!(f, "failed to encode TOML at {}: {source}", path.display())
+            }
             Self::Io {
                 path,
                 operation,
@@ -405,6 +454,9 @@ impl Display for ContractError {
                 write!(f, "missing required {kind} directory: {}", path.display())
             }
             Self::CliUsage { message } => write!(f, "{message}"),
+            Self::InvalidRootConfigField { field, detail } => {
+                write!(f, "root config has invalid field {field}: {detail}")
+            }
             Self::InvalidVersionFormat { field, value } => {
                 write!(f, "{field} must start with a numeric major version: {value}")
             }
@@ -446,9 +498,29 @@ impl Display for ContractError {
             Self::DuplicateWorkflowId { workflow_id } => {
                 write!(f, "duplicate workflow_id detected: {workflow_id}")
             }
+            Self::DuplicatePluginId { plugin_id } => {
+                write!(f, "duplicate plugin_id detected: {plugin_id}")
+            }
             Self::UnknownWorkflowDefinition { workflow_id } => {
                 write!(f, "unknown workflow definition: {workflow_id}")
             }
+            Self::TriggerReferencesUnknownWorkflow {
+                trigger_id,
+                workflow_id,
+            } => write!(
+                f,
+                "trigger {trigger_id} references unknown workflow definition {workflow_id}"
+            ),
+            Self::PackageDirectoryIdentityMismatch {
+                kind,
+                path,
+                expected_id,
+                directory_name,
+            } => write!(
+                f,
+                "{kind} package at {} must use directory name {expected_id}, found {directory_name}",
+                path.display()
+            ),
             Self::SubflowDepthExceeded {
                 workflow_id,
                 max_depth,
