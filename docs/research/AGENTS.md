@@ -6,4 +6,4 @@
 - Constraints: Do not create placeholder research docs without a real question to capture.
 
 ## Members
-- No active research documents yet.
+- `CHAINBOT_V212_CLI_PROPOSAL.md`: Proposal for the v2.1.2 CLI surface covering `status`, `init`, environment-based root resolution, and skill-oriented `help`.

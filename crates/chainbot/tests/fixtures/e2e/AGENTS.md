@@ -6,5 +6,5 @@
 - Constraints: Keep fixtures deterministic, local-only, and free of real credentials.
 
 ## Members
-- `success/`: Runnable fixture root with one workflow, external trigger plugin, external node plugin, script node, builtin node, and secret reference.
-- `failure_missing_secret/`: Runnable fixture root that keeps definitions valid but fails at runtime secret resolution.
+- `success/`: Runnable v2.1 fixture root with one workflow package, one trigger package, shared plugin manifests, plugin executables, and a secret reference.
+- `failure_missing_secret/`: Runnable v2.1 fixture root that keeps package manifests valid but fails at runtime secret resolution.
