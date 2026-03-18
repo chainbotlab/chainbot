@@ -147,7 +147,7 @@ fn node_plugin_host_uses_default_deny_environment() {
 
 fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
     PluginManifest {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         plugin_id: plugin_id.to_owned(),
         kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
         entrypoint: "node.exec.v1".to_owned(),
@@ -155,6 +155,7 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
         executable: Some(executable.to_owned()),
         input_schema: vec!["symbol".to_owned()],
         output_schema: vec!["decision".to_owned()],
+        manifest_path: PathBuf::new(),
     }
 }
 

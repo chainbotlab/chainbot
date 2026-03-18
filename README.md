@@ -16,17 +16,23 @@ This repository keeps the root as a pure Cargo workspace. Application code lives
 
 The primary crate is `crates/chainbot`.
 
-## Current CLI Surface
+## Documented CLI Surface
 
-The `chainbot` binary currently provides these commands:
+The `chainbot` binary currently provides these runtime commands:
 
 - `help`
+- `status`
+- `trigger`
 - `validate`
 - `run`
 - `serve`
 - `list-runs`
 
-The command parser supports `--root <path>` for command execution against an explicit ChainBot root.
+The v2.1.2 CLI design resolves the ChainBot root from `CHAINBOT_CONFIG_DIR` when it is set to a non-empty path.
+If `CHAINBOT_CONFIG_DIR` is unset or empty, the documented contract falls back to the default root at `~/.chainbot`.
+The current runtime parser follows that contract directly and no longer exposes `--root` as a public CLI option.
+`status` also supports `--json` for structured status snapshots.
+`trigger` supports `enable` and `disable` actions for persisted trigger package state.
 
 ## Expected Root Layout
 
@@ -56,10 +62,11 @@ Do not run formatting commands in this repository.
 
 ## Version
 
-The current crate version is `2.0.0`.
+The current crate version is `2.1.2`.
 
 ## Documentation
 
 - Design constraints: `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`
 - Workspace bootstrap record: `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`
 - MVP implementation record: `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`
+- CLI v2.1.2 implementation record: `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`

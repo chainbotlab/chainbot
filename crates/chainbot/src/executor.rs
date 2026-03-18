@@ -8,6 +8,7 @@
 */
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use crate::workflow::{
     WhenCondition, WorkflowDefinition,
 };
 
-pub const CURRENT_API_MAJOR: u64 = 1;
+pub const CURRENT_API_MAJOR: u64 = 2;
 pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
 
 type BuiltinDispatchFn =
@@ -26,9 +27,12 @@ type BuiltinDispatchFn =
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeDefinition {
+    #[serde(rename = "manifest_version", alias = "api_version")]
     pub api_version: String,
+    #[serde(rename = "id", alias = "node_id")]
     pub node_id: String,
     pub kind: String,
+    #[serde(rename = "plugin", alias = "plugin_id")]
     pub plugin_id: String,
     pub operation: String,
     #[serde(default)]
@@ -85,6 +89,7 @@ pub struct WorkflowRunReport {
 pub struct BuiltinNodeRequest {
     pub run_id: String,
     pub workflow_id: String,
+    pub workflow_package_root: PathBuf,
     pub node_id: String,
     pub operation: String,
     pub inputs: BTreeMap<String, serde_json::Value>,
@@ -105,6 +110,7 @@ pub struct BuiltinNodeRegistry {
 
 pub struct ExecutionPlane {
     workflows: BTreeMap<String, WorkflowDefinition>,
+    config_defaults: BTreeMap<String, serde_json::Value>,
     builtin_registry: BuiltinNodeRegistry,
     max_subflow_depth: usize,
 }
@@ -118,7 +124,11 @@ enum DependencyDecision {
 
 impl NodeDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major("node.api_version", &self.api_version, CURRENT_API_MAJOR)?;
+        assert_supported_major(
+            "node.manifest_version",
+            &self.api_version,
+            CURRENT_API_MAJOR,
+        )?;
 
         for input in &self.inputs {
             if !input.validate() {
@@ -232,13 +242,20 @@ impl BuiltinNodeRegistry {
 impl ExecutionPlane {
     pub fn new(
         workflows: Vec<WorkflowDefinition>,
+        config_defaults: BTreeMap<String, serde_json::Value>,
         builtin_registry: BuiltinNodeRegistry,
     ) -> Result<Self, ContractError> {
-        Self::with_max_subflow_depth(workflows, builtin_registry, DEFAULT_MAX_SUBFLOW_DEPTH)
+        Self::with_max_subflow_depth(
+            workflows,
+            config_defaults,
+            builtin_registry,
+            DEFAULT_MAX_SUBFLOW_DEPTH,
+        )
     }
 
     pub fn with_max_subflow_depth(
         workflows: Vec<WorkflowDefinition>,
+        config_defaults: BTreeMap<String, serde_json::Value>,
         builtin_registry: BuiltinNodeRegistry,
         max_subflow_depth: usize,
     ) -> Result<Self, ContractError> {
@@ -256,6 +273,7 @@ impl ExecutionPlane {
 
         Ok(Self {
             workflows: workflow_map,
+            config_defaults,
             builtin_registry,
             max_subflow_depth,
         })
@@ -314,7 +332,7 @@ impl ExecutionPlane {
             manual_invocation_input: request.manual_invocation_input.clone(),
             trigger_payload_mapping: request.trigger_payload_mapping.clone(),
             workflow_defaults: workflow.runtime.workflow_defaults.clone(),
-            config_defaults: workflow.runtime.config_defaults.clone(),
+            config_defaults: self.config_defaults.clone(),
         };
         let mut runtime_namespaces = runtime_layers.resolve_namespaces(request.subflow_input.clone());
 
@@ -499,6 +517,7 @@ impl ExecutionPlane {
         let dispatch_request = BuiltinNodeRequest {
             run_id: request.run_id.clone(),
             workflow_id: workflow.workflow_id.clone(),
+            workflow_package_root: workflow.package_root.clone(),
             node_id: node.node_id.clone(),
             operation: node.operation.clone(),
             inputs,

@@ -6,10 +6,10 @@
 */
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use chainbot::errors::ContractError;
 use chainbot::executor::NodeDefinition;
-use chainbot::trigger::TriggerDefinition;
 use chainbot::workflow::{
     DependsMode, RuntimeVariableLayers, RuntimeVariableNamespace, RuntimeVariableNamespaces,
     RuntimeVariableSource, SubflowContract, SubflowExport, SubflowImport, VariableBinding,
@@ -20,30 +20,30 @@ use serde_json::json;
 #[test]
 fn dag_cycle_validation() {
     let valid = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-dag-ok".to_owned(),
         name: "dag-ok".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-1")],
         nodes: vec![
             node("node-a", vec![]),
             node("node-b", vec!["node-a"]),
             node("node-c", vec!["node-b"]),
         ],
+        package_root: PathBuf::new(),
     };
     valid.validate().expect("valid DAG should pass");
 
     let cyclic = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-dag-cycle".to_owned(),
         name: "dag-cycle".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-1")],
         nodes: vec![
             node("node-a", vec!["node-c"]),
             node("node-b", vec!["node-a"]),
             node("node-c", vec!["node-b"]),
         ],
+        package_root: PathBuf::new(),
     };
 
     let error = cyclic.validate().expect_err("cyclic DAG must be rejected");
@@ -179,13 +179,12 @@ fn subflow_contract_boundaries() {
     );
 
     let workflow = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-subflow".to_owned(),
         name: "subflow".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-1")],
         nodes: vec![NodeDefinition {
-            api_version: "1.0.0".to_owned(),
+            api_version: "2.0.0".to_owned(),
             node_id: "subflow-node".to_owned(),
             kind: "subflow".to_owned(),
             plugin_id: "builtin-subflow".to_owned(),
@@ -209,6 +208,7 @@ fn subflow_contract_boundaries() {
             }),
             subflow: Some(subflow),
         }],
+        package_root: PathBuf::new(),
     };
     workflow
         .validate()
@@ -218,12 +218,12 @@ fn subflow_contract_boundaries() {
 #[test]
 fn invalid_dag_and_variable_fixtures_rejected() {
     let missing_dependency = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-missing-dep".to_owned(),
         name: "missing-dep".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-1")],
         nodes: vec![node("node-a", vec!["missing"])],
+        package_root: PathBuf::new(),
     };
     let dependency_error = missing_dependency
         .validate()
@@ -238,13 +238,12 @@ fn invalid_dag_and_variable_fixtures_rejected() {
     ));
 
     let invalid_namespace = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-invalid-namespace".to_owned(),
         name: "invalid-namespace".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-1")],
         nodes: vec![NodeDefinition {
-            api_version: "1.0.0".to_owned(),
+            api_version: "2.0.0".to_owned(),
             node_id: "subflow-node".to_owned(),
             kind: "subflow".to_owned(),
             plugin_id: "builtin-subflow".to_owned(),
@@ -265,6 +264,7 @@ fn invalid_dag_and_variable_fixtures_rejected() {
                 exports: vec![],
             }),
         }],
+        package_root: PathBuf::new(),
     };
     let namespace_error = invalid_namespace
         .validate()
@@ -283,7 +283,7 @@ fn invalid_dag_and_variable_fixtures_rejected() {
 
 fn node(node_id: &str, depends_on: Vec<&str>) -> NodeDefinition {
     NodeDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         node_id: node_id.to_owned(),
         kind: "plugin".to_owned(),
         plugin_id: "quote-plugin".to_owned(),
@@ -293,15 +293,5 @@ fn node(node_id: &str, depends_on: Vec<&str>) -> NodeDefinition {
         inputs: vec![],
         when: None,
         subflow: None,
-    }
-}
-
-fn trigger(trigger_id: &str) -> TriggerDefinition {
-    TriggerDefinition {
-        api_version: "1.0.0".to_owned(),
-        trigger_id: trigger_id.to_owned(),
-        kind: "manual".to_owned(),
-        source: "manual".to_owned(),
-        enabled: true,
     }
 }

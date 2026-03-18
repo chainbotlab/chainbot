@@ -1,10 +1,11 @@
 /*
 [INPUT]:  Plugin manifest definitions, node-plugin invocation payloads, and plugin host root path.
 [OUTPUT]: Validated manifest contracts plus external-node plugin execution results with typed failures.
-[POS]:    Plugin boundary module for V2 manifest compatibility and safe external-node host execution.
+[POS]:    Plugin boundary module for V2.1 manifest compatibility and safe external-node host execution.
 [UPDATE]: 2026-03-16 - Add versioned plugin manifest contract and parser.
 [UPDATE]: 2026-03-16 - Add external node plugin host, manifest guards, and execution contract validation.
 [UPDATE]: 2026-03-17 - Apply default-deny process environment with explicit allowlist for external plugin hosts.
+[UPDATE]: 2026-03-18 - Resolve executable paths relative to plugin manifest files for v2.1 package layout.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{assert_supported_major, ContractError};
 
-pub const CURRENT_API_MAJOR: u64 = 1;
+pub const CURRENT_API_MAJOR: u64 = 2;
 pub const NODE_PLUGIN_CONTRACT_VERSION: &str = "1.0.0";
 pub const NODE_PLUGIN_CONTRACT_MAX_MAJOR: u64 = 1;
 pub const NODE_PLUGIN_EXECUTE_CAPABILITY: &str = "node:execute";
@@ -38,6 +39,7 @@ pub enum PluginKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginManifest {
+    #[serde(rename = "manifest_version", alias = "api_version")]
     pub api_version: String,
     pub plugin_id: String,
     pub kind: String,
@@ -49,11 +51,17 @@ pub struct PluginManifest {
     pub input_schema: Vec<String>,
     #[serde(default)]
     pub output_schema: Vec<String>,
+    #[serde(skip)]
+    pub manifest_path: PathBuf,
 }
 
 impl PluginManifest {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major("plugin.api_version", &self.api_version, CURRENT_API_MAJOR)?;
+        assert_supported_major(
+            "plugin.manifest_version",
+            &self.api_version,
+            CURRENT_API_MAJOR,
+        )?;
 
         validate_non_empty(&self.plugin_id, "plugin.plugin_id", &self.plugin_id)?;
         validate_non_empty(&self.entrypoint, "plugin.entrypoint", &self.plugin_id)?;
@@ -275,7 +283,10 @@ impl ExternalNodePluginHost {
             });
         }
 
-        let candidate = self.plugins_root.join(executable_path);
+        let manifest_root = self
+            .manifest_root(manifest)
+            .unwrap_or_else(|| self.plugins_root.clone());
+        let candidate = manifest_root.join(executable_path);
         let canonical_root =
             fs::canonicalize(&self.plugins_root).map_err(|source| ContractError::Io {
                 path: self.plugins_root.clone(),
@@ -324,6 +335,14 @@ impl ExternalNodePluginHost {
         }
 
         Ok(canonical_candidate)
+    }
+
+    fn manifest_root(&self, manifest: &PluginManifest) -> Option<PathBuf> {
+        manifest
+            .manifest_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf)
     }
 }
 

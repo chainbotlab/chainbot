@@ -6,13 +6,13 @@
 */
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use chainbot::errors::ContractError;
 use chainbot::executor::{
     BuiltinNodeRegistry, BuiltinNodeRequest, ExecutionPlane, NodeDefinition, NormalizedRunRequest,
     ScheduledNodeState, WorkflowRunStatus,
 };
-use chainbot::trigger::TriggerDefinition;
 use chainbot::workflow::{
     DependsMode, RuntimeVariableLayers, RuntimeVariableNamespace, VariableBinding,
     VariableReference, WhenCondition, WhenOperator, WorkflowDefinition,
@@ -22,14 +22,13 @@ use serde_json::json;
 #[test]
 fn scheduler_parallel_ready_nodes() {
     let workflow = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-parallel".to_owned(),
         name: "parallel".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-parallel")],
         nodes: vec![
             NodeDefinition {
-                api_version: "1.0.0".to_owned(),
+                api_version: "2.0.0".to_owned(),
                 node_id: "start".to_owned(),
                 kind: "builtin.identity".to_owned(),
                 plugin_id: "builtin.identity".to_owned(),
@@ -55,10 +54,15 @@ fn scheduler_parallel_ready_nodes() {
                 DependsMode::All,
             ),
         ],
+        package_root: PathBuf::new(),
     };
 
-    let execution_plane =
-        ExecutionPlane::new(vec![workflow], BuiltinNodeRegistry::with_defaults()).expect("plane");
+    let execution_plane = ExecutionPlane::new(
+        vec![workflow],
+        BTreeMap::new(),
+        BuiltinNodeRegistry::with_defaults(),
+    )
+    .expect("plane");
     let mut request = NormalizedRunRequest::new("run-parallel", "wf-parallel");
     request.cli_args.insert("seed".to_owned(), json!("BTCUSDT"));
 
@@ -99,15 +103,14 @@ fn scheduler_when_and_depends_mode() {
     });
 
     let workflow = WorkflowDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         workflow_id: "wf-when-depends".to_owned(),
         name: "when-depends".to_owned(),
         runtime: RuntimeVariableLayers::default(),
-        triggers: vec![trigger("tr-when")],
         nodes: vec![
             builtin_node("a-fail", "builtin.fail", vec![], DependsMode::All),
             NodeDefinition {
-                api_version: "1.0.0".to_owned(),
+                api_version: "2.0.0".to_owned(),
                 node_id: "b-ok".to_owned(),
                 kind: "builtin.identity".to_owned(),
                 plugin_id: "builtin.identity".to_owned(),
@@ -137,7 +140,7 @@ fn scheduler_when_and_depends_mode() {
                 DependsMode::Any,
             ),
             NodeDefinition {
-                api_version: "1.0.0".to_owned(),
+                api_version: "2.0.0".to_owned(),
                 node_id: "gated".to_owned(),
                 kind: "builtin.identity".to_owned(),
                 plugin_id: "builtin.identity".to_owned(),
@@ -156,9 +159,11 @@ fn scheduler_when_and_depends_mode() {
                 subflow: None,
             },
         ],
+        package_root: PathBuf::new(),
     };
 
-    let execution_plane = ExecutionPlane::new(vec![workflow], registry).expect("plane");
+    let execution_plane =
+        ExecutionPlane::new(vec![workflow], BTreeMap::new(), registry).expect("plane");
     let mut request = NormalizedRunRequest::new("run-when-depends", "wf-when-depends");
     request
         .manual_invocation_input
@@ -208,6 +213,7 @@ fn builtin_node_registry_dispatch() {
     let request = BuiltinNodeRequest {
         run_id: "run-registry".to_owned(),
         workflow_id: "wf-registry".to_owned(),
+        workflow_package_root: PathBuf::new(),
         node_id: "node-registry".to_owned(),
         operation: "run".to_owned(),
         inputs: BTreeMap::from_iter([(String::from("symbol"), json!("ETHUSDT"))]),
@@ -239,7 +245,7 @@ fn builtin_node(
     depends_mode: DependsMode,
 ) -> NodeDefinition {
     NodeDefinition {
-        api_version: "1.0.0".to_owned(),
+        api_version: "2.0.0".to_owned(),
         node_id: node_id.to_owned(),
         kind: kind.to_owned(),
         plugin_id: kind.to_owned(),
@@ -249,15 +255,5 @@ fn builtin_node(
         inputs: vec![],
         when: None,
         subflow: None,
-    }
-}
-
-fn trigger(trigger_id: &str) -> TriggerDefinition {
-    TriggerDefinition {
-        api_version: "1.0.0".to_owned(),
-        trigger_id: trigger_id.to_owned(),
-        kind: "builtin".to_owned(),
-        source: "builtin.test".to_owned(),
-        enabled: true,
     }
 }

@@ -8,3 +8,5 @@
 ## Members
 - `WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`: Bootstrap checklist and validation matrix for the initial repository setup.
 - `CHAINBOT_V2_MVP_IMPLEMENTATION.md`: Records the MVP rename, artifact alignment, and release-version update for ChainBot V2.
+- `CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`: Records the v2.1 package-layout implementation, root-config overrides, and validation coverage.
+- `CHAINBOT_V212_CLI_IMPLEMENTATION.md`: Records the v2.1.2 CLI root-resolution contract update and release-version alignment.

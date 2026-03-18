@@ -7,7 +7,8 @@
 [UPDATE]: 2026-03-16 - Add deterministic run-summary listing for CLI queries.
 [UPDATE]: 2026-03-16 - Expose deterministic path-component sanitizer for cross-plane state naming.
 [UPDATE]: 2026-03-16 - Harden restart recovery for leases, append-only logs, trigger records, and incomplete runs.
-[UPDATE]: 2026-03-16 - Rebuild trigger coordination from durable records to keep restart boundaries consistent.
+ [UPDATE]: 2026-03-16 - Rebuild trigger coordination from durable records to keep restart boundaries consistent.
+ [UPDATE]: 2026-03-18 - Add serve lease snapshot inspection for CLI status queries.
 */
 
 use std::error::Error;
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +107,21 @@ pub enum LeaseAcquireResult {
         current_owner: String,
         expires_at_ms: i64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServeLeaseState {
+    Idle,
+    Active,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeLeaseSnapshot {
+    pub state: ServeLeaseState,
+    pub owner_id: Option<String>,
+    pub expires_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -319,35 +335,12 @@ impl FileBackedStateStore {
         load_run_summary_file(&path)
     }
 
-    pub fn list_run_summaries(&self) -> Result<Vec<RunRecordSummary>, FileStateError> {
-        self.layout.ensure_state_tree()?;
-        let _ = self.recover_run_summaries()?;
-
-        let entries = fs::read_dir(&self.layout.runs_dir).map_err(|source| FileStateError::Io {
-            path: self.layout.runs_dir.clone(),
-            operation: "read runs directory",
-            source,
-        })?;
-
+    pub fn list_committed_run_summaries(&self) -> Result<Vec<RunRecordSummary>, FileStateError> {
         let mut summary_paths = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|source| FileStateError::Io {
-                path: self.layout.runs_dir.clone(),
-                operation: "read runs directory entry",
-                source,
-            })?;
-
-            let run_dir = entry.path();
-            if !run_dir.is_dir() {
-                continue;
-            }
-
-            let summary_path = run_dir.join(RUN_SUMMARY_FILE_NAME);
-            if summary_path.exists() {
-                summary_paths.push(summary_path);
-            }
-        }
-
+        collect_existing_json_files(&self.layout.runs_dir, &mut summary_paths)?;
+        summary_paths.retain(|path| {
+            path.file_name().and_then(|value| value.to_str()) == Some(RUN_SUMMARY_FILE_NAME)
+        });
         summary_paths.sort();
 
         let mut summaries = Vec::with_capacity(summary_paths.len());
@@ -362,6 +355,13 @@ impl FileBackedStateStore {
         });
 
         Ok(summaries)
+    }
+
+    pub fn list_run_summaries(&self) -> Result<Vec<RunRecordSummary>, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let _ = self.recover_run_summaries()?;
+
+        self.list_committed_run_summaries()
     }
 
     pub fn write_workflow_log_entry(
@@ -424,8 +424,14 @@ impl FileBackedStateStore {
         self.layout.ensure_state_tree()?;
         let _ = self.recover_trigger_records()?;
 
+        self.load_committed_trigger_records()
+    }
+
+    pub fn load_committed_trigger_records(
+        &self,
+    ) -> Result<Vec<TriggerEventRecord>, FileStateError> {
         let mut record_paths = Vec::new();
-        collect_json_files(&self.layout.trigger_records_dir, &mut record_paths)?;
+        collect_existing_json_files(&self.layout.trigger_records_dir, &mut record_paths)?;
         record_paths.sort();
 
         let mut records = Vec::with_capacity(record_paths.len());
@@ -570,6 +576,31 @@ impl FileBackedStateStore {
 }
 
 impl CoordinationStore {
+    pub fn inspect_existing_serve_lease(
+        layout: &StateLayout,
+        now_ms: i64,
+    ) -> Result<ServeLeaseSnapshot, CoordinationError> {
+        if !layout.coordination_db_path.exists() {
+            return Ok(ServeLeaseSnapshot {
+                state: ServeLeaseState::Idle,
+                owner_id: None,
+                expires_at_ms: None,
+            });
+        }
+
+        let connection = Connection::open_with_flags(
+            &layout.coordination_db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|source| CoordinationError::Sqlite {
+            path: layout.coordination_db_path.clone(),
+            operation: "open sqlite database in read-only mode",
+            source,
+        })?;
+
+        inspect_serve_lease_snapshot(&connection, &layout.coordination_db_path, now_ms)
+    }
+
     pub fn open(layout: &StateLayout, now_ms: i64) -> Result<Self, CoordinationError> {
         create_dir_all_coordination(&layout.state_root)?;
 
@@ -630,6 +661,13 @@ impl CoordinationStore {
         }
 
         Ok(versions)
+    }
+
+    pub fn inspect_serve_lease(
+        &self,
+        now_ms: i64,
+    ) -> Result<ServeLeaseSnapshot, CoordinationError> {
+        inspect_serve_lease_snapshot(&self.connection, &self.db_path, now_ms)
     }
 
     pub fn try_acquire_serve_lease(
@@ -1411,6 +1449,65 @@ fn collect_json_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), File
     }
 
     Ok(())
+}
+
+fn collect_existing_json_files(
+    root: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), FileStateError> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => collect_json_files(root, output),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(FileStateError::Io {
+            path: root.to_path_buf(),
+            operation: "inspect metadata",
+            source,
+        }),
+    }
+}
+
+fn inspect_serve_lease_snapshot(
+    connection: &Connection,
+    db_path: &Path,
+    now_ms: i64,
+) -> Result<ServeLeaseSnapshot, CoordinationError> {
+    let current_lease = connection
+        .query_row(
+            "SELECT owner_id, expires_at_ms FROM serve_leases WHERE lease_key = ?1",
+            params![SERVE_LEASE_KEY],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|source| CoordinationError::Sqlite {
+            path: db_path.to_path_buf(),
+            operation: "inspect current serve lease",
+            source,
+        })?;
+
+    let snapshot = match current_lease {
+        None => ServeLeaseSnapshot {
+            state: ServeLeaseState::Idle,
+            owner_id: None,
+            expires_at_ms: None,
+        },
+        Some((owner_id, expires_at_ms))
+            if expires_at_ms > now_ms && serve_lease_owner_is_active(&owner_id) =>
+        {
+            ServeLeaseSnapshot {
+                state: ServeLeaseState::Active,
+                owner_id: Some(owner_id),
+                expires_at_ms: Some(expires_at_ms),
+            }
+        }
+        Some((owner_id, expires_at_ms)) => ServeLeaseSnapshot {
+            state: ServeLeaseState::Stale,
+            owner_id: Some(owner_id),
+            expires_at_ms: Some(expires_at_ms),
+        },
+    };
+
+    Ok(snapshot)
 }
 
 fn accepted_trigger_key(trigger_id: &str, event_id: &str) -> String {
