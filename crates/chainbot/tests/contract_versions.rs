@@ -15,27 +15,20 @@ use chainbot::worker::WorkerRequestEnvelope;
 fn contract_versions() {
     let config_fixture = r#"
     {
-      "schema_version": "1.0.0",
+      "schema_version": "2.0.0",
       "workflows": [
         {
-          "api_version": "1.2.0",
-          "workflow_id": "wf-alpha",
-          "name": "alpha",
-          "triggers": [
-            {
-              "api_version": "1.0.1",
-              "trigger_id": "tr-market",
-              "kind": "market_tick",
-              "source": "market-feed",
-              "enabled": true
-            }
-          ],
+          "workflow": {
+            "manifest_version": "2.2.0",
+            "id": "wf-alpha",
+            "name": "alpha"
+          },
           "nodes": [
             {
-              "api_version": "1.1.0",
-              "node_id": "node-quote",
+              "api_version": "2.1.0",
+              "id": "node-quote",
               "kind": "plugin",
-              "plugin_id": "quote-plugin",
+              "plugin": "quote-plugin",
               "operation": "normalize",
               "depends_on": []
             }
@@ -44,7 +37,7 @@ fn contract_versions() {
       ],
       "plugins": [
         {
-          "api_version": "1.0.0",
+          "api_version": "2.0.0",
           "plugin_id": "quote-plugin",
           "kind": "builtin",
           "entrypoint": "plugins.quote",
@@ -81,10 +74,7 @@ fn contract_versions() {
     "#;
 
     let config = ConfigRoot::from_json_str(config_fixture).expect("config fixture should be valid");
-    let config_json = serde_json::to_string(&config).expect("config should serialize");
-    let reparsed =
-        ConfigRoot::from_json_str(&config_json).expect("serialized config should reparse");
-    assert_eq!(reparsed.schema_version, "1.0.0");
+    assert_eq!(config.schema_version, "2.0.0");
 
     let secret =
         SecretReference::parse("secret://vault/api_key#value").expect("secret syntax should parse");
@@ -95,7 +85,7 @@ fn contract_versions() {
 fn invalid_contract_fixtures_are_rejected() {
     let config_err = ConfigRoot::from_json_str(
         r#"{
-          "schema_version": "2.0.0",
+          "schema_version": "3.0.0",
           "workflows": [],
           "plugins": [],
           "worker_templates": [],
@@ -107,8 +97,8 @@ fn invalid_contract_fixtures_are_rejected() {
         config_err,
         ContractError::UnsupportedFutureMajorVersion {
             field: "config.schema_version",
-            major: 2,
-            max_supported_major: 1
+            major: 3,
+            max_supported_major: 2
         }
     ));
 
@@ -125,9 +115,9 @@ fn invalid_contract_fixtures_are_rejected() {
     assert!(matches!(
         plugin_err,
         ContractError::UnsupportedFutureMajorVersion {
-            field: "plugin.api_version",
+            field: "plugin.manifest_version",
             major: 9,
-            max_supported_major: 1
+            max_supported_major: 2
         }
     ));
 

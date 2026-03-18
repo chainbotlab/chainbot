@@ -1,10 +1,14 @@
 /*
-[INPUT]:  Root path overrides, TOML definitions on disk, and JSON contract fixtures.
-[OUTPUT]: Explicit root layout paths plus validated TOML definition bundle.
+[INPUT]:  Root path environment resolution, package manifests on disk, and JSON contract fixtures.
+[OUTPUT]: Explicit root layout paths plus validated v2.1 definition bundles with package roots.
 [POS]:    Config boundary module for root layout and definition loading.
 [UPDATE]: 2026-03-16 - Add explicit root resolver and TOML loaders.
+ [UPDATE]: 2026-03-18 - Load workflow and trigger package manifests from package `config.toml` files and plugin manifests from `plugins/manifests`.
+ [UPDATE]: 2026-03-18 - Add persisted trigger enable/disable mutation support for CLI operations.
+ [UPDATE]: 2026-03-18 - Resolve roots from CHAINBOT_CONFIG_DIR before falling back to HOME/.chainbot.
 */
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,9 +24,11 @@ use crate::trigger::TriggerDefinition;
 use crate::worker::{WorkerRequestEnvelope, WorkerResponseEnvelope};
 use crate::workflow::WorkflowDefinition;
 
-pub const CURRENT_SCHEMA_MAJOR: u64 = 1;
+pub const CURRENT_SCHEMA_MAJOR: u64 = 2;
 pub const DEFAULT_ROOT_DIR_NAME: &str = ".chainbot";
+pub const CHAINBOT_CONFIG_DIR_ENV: &str = "CHAINBOT_CONFIG_DIR";
 pub const ROOT_CONFIG_FILE_NAME: &str = "root.toml";
+pub const PACKAGE_CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigRoot {
@@ -42,11 +48,38 @@ pub struct WorkerTemplate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootConfigDefinition {
+    #[serde(rename = "manifest_version", alias = "schema_version")]
     pub schema_version: String,
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
     pub secret_refs: Vec<String>,
+    #[serde(default)]
+    pub runtime_defaults: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub paths: RootPathOverrides,
+    #[serde(default)]
+    pub plugins: RootPluginDiscovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RootPathOverrides {
+    #[serde(default)]
+    pub workflows_dir: Option<String>,
+    #[serde(default)]
+    pub triggers_dir: Option<String>,
+    #[serde(default)]
+    pub plugins_dir: Option<String>,
+    #[serde(default)]
+    pub secrets_dir: Option<String>,
+    #[serde(default)]
+    pub state_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RootPluginDiscovery {
+    #[serde(default)]
+    pub manifest_globs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +88,16 @@ pub struct RootDefinitionBundle {
     pub workflows: Vec<WorkflowDefinition>,
     pub triggers: Vec<TriggerDefinition>,
     pub plugins: Vec<PluginManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerToggleResult {
+    pub trigger_id: String,
+    pub workflow_id: String,
+    pub previous_enabled: bool,
+    pub enabled: bool,
+    pub changed: bool,
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +149,7 @@ impl ConfigRoot {
 impl RootConfigDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
         assert_supported_major(
-            "root_config.schema_version",
+            "root_config.manifest_version",
             &self.schema_version,
             CURRENT_SCHEMA_MAJOR,
         )?;
@@ -120,17 +163,22 @@ impl RootConfigDefinition {
 }
 
 impl RootLayout {
-    pub fn resolve(root_override: Option<&Path>) -> Result<Self, ContractError> {
-        Self::resolve_with_home(root_override, None)
+    pub fn resolve() -> Result<Self, ContractError> {
+        Self::resolve_with_env_home(None, None)
     }
 
-    pub fn resolve_with_home(
-        root_override: Option<&Path>,
+    pub fn resolve_with_env_home(
+        config_dir_override: Option<&Path>,
         home_override: Option<&Path>,
     ) -> Result<Self, ContractError> {
-        let root = match root_override {
+        let root = match config_dir_override {
             Some(path) => path.to_path_buf(),
             None => {
+                if let Some(path) =
+                    std::env::var_os(CHAINBOT_CONFIG_DIR_ENV).filter(|value| !value.is_empty())
+                {
+                    return Ok(Self::from_root(PathBuf::from(path)));
+                }
                 let home = match home_override {
                     Some(path) => path.to_path_buf(),
                     None => {
@@ -162,6 +210,16 @@ impl RootLayout {
         self.config_dir.join(ROOT_CONFIG_FILE_NAME)
     }
 
+    pub fn plugin_manifests_dir(&self) -> PathBuf {
+        self.plugins_dir.join("manifests")
+    }
+
+    pub fn validate_bootstrap_paths_exist(&self) -> Result<(), ContractError> {
+        validate_directory_exists(&self.root, "root")?;
+        validate_directory_exists(&self.config_dir, "config")?;
+        Ok(())
+    }
+
     pub fn validate_paths_exist(&self) -> Result<(), ContractError> {
         validate_directory_exists(&self.root, "root")?;
         validate_directory_exists(&self.config_dir, "config")?;
@@ -176,26 +234,35 @@ impl RootLayout {
 
 impl RootDefinitionBundle {
     pub fn load(layout: &RootLayout) -> Result<Self, ContractError> {
-        layout.validate_paths_exist()?;
+        let effective_layout = load_effective_root_layout(layout)?;
+        effective_layout.validate_paths_exist()?;
 
         let root_config: RootConfigDefinition =
-            decode_required_toml(&layout.root_config_path(), "root config")?;
+            decode_required_toml(&effective_layout.root_config_path(), "root config")?;
         root_config.validate()?;
 
-        let workflows: Vec<WorkflowDefinition> = decode_toml_collection(&layout.workflows_dir)?;
+        let workflows: Vec<WorkflowDefinition> =
+            decode_package_collection(&effective_layout.workflows_dir)?;
         for workflow in &workflows {
             workflow.validate()?;
         }
 
-        let triggers: Vec<TriggerDefinition> = decode_toml_collection(&layout.triggers_dir)?;
+        let triggers: Vec<TriggerDefinition> =
+            decode_package_collection(&effective_layout.triggers_dir)?;
         for trigger in &triggers {
             trigger.validate()?;
         }
 
-        let plugins: Vec<PluginManifest> = decode_toml_collection(&layout.plugins_dir)?;
+        let plugins: Vec<PluginManifest> = decode_plugin_manifests(
+            &effective_layout.root,
+            &effective_layout.plugins_dir,
+            &root_config.plugins,
+        )?;
         for plugin in &plugins {
             plugin.validate()?;
         }
+
+        validate_bundle_contracts(&workflows, &triggers, &plugins)?;
 
         Ok(Self {
             root_config,
@@ -206,8 +273,189 @@ impl RootDefinitionBundle {
     }
 }
 
-pub fn resolve_root_layout(root_override: Option<&Path>) -> Result<RootLayout, ContractError> {
-    RootLayout::resolve(root_override)
+pub fn set_trigger_enabled(
+    layout: &RootLayout,
+    trigger_id: &str,
+    enabled: bool,
+) -> Result<TriggerToggleResult, ContractError> {
+    let effective_layout = load_effective_root_layout(layout)?;
+    let trigger = load_trigger_definitions(&effective_layout)?
+        .into_iter()
+        .find(|definition| definition.trigger_id == trigger_id)
+        .ok_or_else(|| ContractError::CliUsage {
+            message: format!(
+                "Unknown trigger `{trigger_id}`. Run `chainbot status` to inspect configured triggers."
+            ),
+        })?;
+
+    let config_path = trigger.package_root.join(PACKAGE_CONFIG_FILE_NAME);
+    let mut stored_definition: TriggerDefinition =
+        decode_required_toml(&config_path, "definition")?;
+    stored_definition.package_root = trigger.package_root;
+    let previous_enabled = stored_definition.enabled;
+    stored_definition.enabled = enabled;
+    stored_definition.validate()?;
+
+    if previous_enabled != enabled {
+        let contents = toml::to_string_pretty(&stored_definition).map_err(|source| {
+            ContractError::TomlEncode {
+                path: config_path.clone(),
+                source,
+            }
+        })?;
+        write_atomic_string(&config_path, &contents)?;
+    }
+
+    Ok(TriggerToggleResult {
+        trigger_id: stored_definition.trigger_id,
+        workflow_id: stored_definition.workflow_id,
+        previous_enabled,
+        enabled,
+        changed: previous_enabled != enabled,
+        config_path,
+    })
+}
+
+pub fn load_trigger_definitions(
+    layout: &RootLayout,
+) -> Result<Vec<TriggerDefinition>, ContractError> {
+    let effective_layout = load_effective_root_layout(layout)?;
+    effective_layout.validate_paths_exist()?;
+    let triggers: Vec<TriggerDefinition> =
+        decode_package_collection(&effective_layout.triggers_dir)?;
+    for trigger in &triggers {
+        trigger.validate()?;
+    }
+    Ok(triggers)
+}
+
+fn validate_bundle_contracts(
+    workflows: &[WorkflowDefinition],
+    triggers: &[TriggerDefinition],
+    plugins: &[PluginManifest],
+) -> Result<(), ContractError> {
+    let mut workflow_ids = std::collections::BTreeSet::new();
+    for workflow in workflows {
+        if !workflow_ids.insert(workflow.workflow_id.clone()) {
+            return Err(ContractError::DuplicateWorkflowId {
+                workflow_id: workflow.workflow_id.clone(),
+            });
+        }
+        validate_package_identity("workflow", &workflow.package_root, &workflow.workflow_id)?;
+    }
+
+    let mut trigger_ids = std::collections::BTreeSet::new();
+    for trigger in triggers {
+        if !trigger_ids.insert(trigger.trigger_id.clone()) {
+            return Err(ContractError::DuplicateTriggerId {
+                trigger_id: trigger.trigger_id.clone(),
+            });
+        }
+        validate_package_identity("trigger", &trigger.package_root, &trigger.trigger_id)?;
+        if !workflow_ids.contains(&trigger.workflow_id) {
+            return Err(ContractError::TriggerReferencesUnknownWorkflow {
+                trigger_id: trigger.trigger_id.clone(),
+                workflow_id: trigger.workflow_id.clone(),
+            });
+        }
+    }
+
+    let mut plugin_ids = std::collections::BTreeSet::new();
+    for plugin in plugins {
+        if !plugin_ids.insert(plugin.plugin_id.clone()) {
+            return Err(ContractError::DuplicatePluginId {
+                plugin_id: plugin.plugin_id.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_package_identity(
+    kind: &'static str,
+    package_root: &Path,
+    expected_id: &str,
+) -> Result<(), ContractError> {
+    let directory_name = package_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    if directory_name != expected_id {
+        return Err(ContractError::PackageDirectoryIdentityMismatch {
+            kind,
+            path: package_root.to_path_buf(),
+            expected_id: expected_id.to_owned(),
+            directory_name,
+        });
+    }
+    Ok(())
+}
+
+pub fn resolve_root_layout() -> Result<RootLayout, ContractError> {
+    RootLayout::resolve()
+}
+
+pub fn load_effective_root_layout(base_layout: &RootLayout) -> Result<RootLayout, ContractError> {
+    base_layout.validate_bootstrap_paths_exist()?;
+    let root_config: RootConfigDefinition =
+        decode_required_toml(&base_layout.root_config_path(), "root config")?;
+    root_config.validate()?;
+    base_layout.apply_root_config(&root_config)
+}
+
+impl RootLayout {
+    pub fn apply_root_config(
+        &self,
+        root_config: &RootConfigDefinition,
+    ) -> Result<Self, ContractError> {
+        Ok(Self {
+            root: self.root.clone(),
+            config_dir: self.config_dir.clone(),
+            workflows_dir: resolve_root_relative_dir(
+                &self.root,
+                "root_config.paths.workflows_dir",
+                root_config
+                    .paths
+                    .workflows_dir
+                    .as_deref()
+                    .unwrap_or("workflows"),
+            )?,
+            triggers_dir: resolve_root_relative_dir(
+                &self.root,
+                "root_config.paths.triggers_dir",
+                root_config
+                    .paths
+                    .triggers_dir
+                    .as_deref()
+                    .unwrap_or("triggers"),
+            )?,
+            plugins_dir: resolve_root_relative_dir(
+                &self.root,
+                "root_config.paths.plugins_dir",
+                root_config
+                    .paths
+                    .plugins_dir
+                    .as_deref()
+                    .unwrap_or("plugins"),
+            )?,
+            secrets_dir: resolve_root_relative_dir(
+                &self.root,
+                "root_config.paths.secrets_dir",
+                root_config
+                    .paths
+                    .secrets_dir
+                    .as_deref()
+                    .unwrap_or("secrets"),
+            )?,
+            state_dir: resolve_root_relative_dir(
+                &self.root,
+                "root_config.paths.state_dir",
+                root_config.paths.state_dir.as_deref().unwrap_or("state"),
+            )?,
+        })
+    }
 }
 
 fn validate_directory_exists(path: &Path, kind: &'static str) -> Result<(), ContractError> {
@@ -258,18 +506,92 @@ where
     })
 }
 
-fn decode_toml_collection<T>(directory: &Path) -> Result<Vec<T>, ContractError>
+fn write_atomic_string(path: &Path, contents: &str) -> Result<(), ContractError> {
+    let temporary_path = path.with_extension("toml.tmp");
+    fs::write(&temporary_path, contents).map_err(|source| ContractError::Io {
+        path: temporary_path.clone(),
+        operation: "write file",
+        source,
+    })?;
+    fs::rename(&temporary_path, path).map_err(|source| ContractError::Io {
+        path: path.to_path_buf(),
+        operation: "rename file",
+        source,
+    })?;
+    Ok(())
+}
+
+fn decode_package_collection<T>(directory: &Path) -> Result<Vec<T>, ContractError>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + PackageManifestExt,
 {
     let mut definitions = Vec::new();
 
-    for path in collect_toml_files(directory)? {
-        let definition = decode_required_toml(&path, "definition")?;
+    for path in collect_package_config_files(directory)? {
+        let mut definition = decode_required_toml::<T>(&path, "definition")?;
+        definition.set_package_root(
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(PathBuf::new),
+        );
         definitions.push(definition);
     }
 
     Ok(definitions)
+}
+
+fn decode_plugin_manifests(
+    root: &Path,
+    plugins_dir: &Path,
+    discovery: &RootPluginDiscovery,
+) -> Result<Vec<PluginManifest>, ContractError> {
+    let mut definitions = Vec::new();
+
+    for path in collect_plugin_manifest_files(root, plugins_dir, discovery)? {
+        let mut definition = decode_required_toml::<PluginManifest>(&path, "definition")?;
+        definition.manifest_path = path;
+        definitions.push(definition);
+    }
+
+    Ok(definitions)
+}
+
+fn collect_plugin_manifest_files(
+    root: &Path,
+    plugins_dir: &Path,
+    discovery: &RootPluginDiscovery,
+) -> Result<Vec<PathBuf>, ContractError> {
+    let manifest_globs = if discovery.manifest_globs.is_empty() {
+        vec![String::from("plugins/manifests/*.toml")]
+    } else {
+        discovery.manifest_globs.clone()
+    };
+
+    let mut files = Vec::new();
+    for pattern in manifest_globs {
+        let Some(directory_pattern) = pattern.strip_suffix("/*.toml") else {
+            return Err(ContractError::InvalidRootConfigField {
+                field: "root_config.plugins.manifest_globs",
+                detail: format!(
+                    "unsupported pattern `{pattern}`; expected a root-relative <dir>/*.toml form"
+                ),
+            });
+        };
+        let directory = if directory_pattern == "plugins/manifests" {
+            plugins_dir.join("manifests")
+        } else {
+            resolve_root_relative_dir(
+                root,
+                "root_config.plugins.manifest_globs",
+                directory_pattern,
+            )?
+        };
+        files.extend(collect_toml_files(&directory)?);
+    }
+
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 fn collect_toml_files(directory: &Path) -> Result<Vec<PathBuf>, ContractError> {
@@ -294,4 +616,73 @@ fn collect_toml_files(directory: &Path) -> Result<Vec<PathBuf>, ContractError> {
 
     files.sort();
     Ok(files)
+}
+
+fn collect_package_config_files(directory: &Path) -> Result<Vec<PathBuf>, ContractError> {
+    let entries = fs::read_dir(directory).map_err(|source| ContractError::Io {
+        path: directory.to_path_buf(),
+        operation: "read directory",
+        source,
+    })?;
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| ContractError::Io {
+            path: directory.to_path_buf(),
+            operation: "read directory entry",
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            let config_path = path.join(PACKAGE_CONFIG_FILE_NAME);
+            if config_path.is_file() {
+                files.push(config_path);
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+fn resolve_root_relative_dir(
+    root: &Path,
+    field: &'static str,
+    value: &str,
+) -> Result<PathBuf, ContractError> {
+    let candidate = Path::new(value);
+    if candidate.is_absolute() {
+        return Err(ContractError::InvalidRootConfigField {
+            field,
+            detail: format!("absolute paths are not allowed: {value}"),
+        });
+    }
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ContractError::InvalidRootConfigField {
+            field,
+            detail: format!("paths must stay within <root> and may not contain `..`: {value}"),
+        });
+    }
+
+    Ok(root.join(candidate))
+}
+
+trait PackageManifestExt {
+    fn set_package_root(&mut self, package_root: PathBuf);
+}
+
+impl PackageManifestExt for WorkflowDefinition {
+    fn set_package_root(&mut self, package_root: PathBuf) {
+        self.package_root = package_root;
+    }
+}
+
+impl PackageManifestExt for TriggerDefinition {
+    fn set_package_root(&mut self, package_root: PathBuf) {
+        self.package_root = package_root;
+    }
 }
