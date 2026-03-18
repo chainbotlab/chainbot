@@ -1,23 +1,23 @@
 /*
-[INPUT]:  Workflow contracts, node dependency declarations, and namespace/subflow mappings.
+[INPUT]:  Workflow package manifests, node dependency declarations, and namespace/subflow mappings.
 [OUTPUT]: Typed DAG validation, namespace-safe runtime variable contracts, deterministic precedence resolution, and when-condition evaluation helpers.
-[POS]:    Workflow semantic boundary that freezes graph and variable contracts while exposing scheduler-safe evaluators.
+[POS]:    Workflow semantic boundary that freezes package-based graph and variable contracts while exposing scheduler-safe evaluators.
 [UPDATE]: 2026-03-16 - Add versioned workflow definition contract.
 [UPDATE]: 2026-03-16 - Add DAG validation, typed depends_mode/when, runtime variable namespaces, and subflow import/export contracts.
 [UPDATE]: 2026-03-16 - Add deterministic when evaluation and runtime namespace materialization helpers for execution-plane scheduling.
+[UPDATE]: 2026-03-18 - Parse v2.1 workflow package manifests with nested headers and package-root-relative resources.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::DiGraph;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::errors::{assert_supported_major, ContractError};
 use crate::executor::NodeDefinition;
-use crate::trigger::TriggerDefinition;
-
-pub const CURRENT_API_MAJOR: u64 = 1;
+pub const CURRENT_API_MAJOR: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -388,6 +388,46 @@ pub struct RuntimeVariableLayers {
     pub config_defaults: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowHeader {
+    #[serde(rename = "manifest_version", alias = "api_version")]
+    manifest_version: String,
+    #[serde(rename = "id", alias = "workflow_id")]
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkflowRuntime {
+    #[serde(default)]
+    defaults: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    workflow_defaults: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    config_defaults: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkflowDefinition {
+    #[serde(default)]
+    workflow: Option<WorkflowHeader>,
+    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(default)]
+    api_version: Option<String>,
+    #[serde(rename = "id", alias = "workflow_id")]
+    #[serde(default)]
+    workflow_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    runtime: RawWorkflowRuntime,
+    #[serde(default)]
+    nodes: Vec<NodeDefinition>,
+}
+
 impl RuntimeVariableLayers {
     pub fn resolve(&self) -> BTreeMap<String, ResolvedRuntimeVariable> {
         let mut keys = BTreeSet::new();
@@ -456,24 +496,69 @@ impl RuntimeVariableLayers {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WorkflowDefinition {
     pub api_version: String,
     pub workflow_id: String,
     pub name: String,
     #[serde(default)]
     pub runtime: RuntimeVariableLayers,
-    pub triggers: Vec<TriggerDefinition>,
     pub nodes: Vec<NodeDefinition>,
+    #[serde(skip)]
+    pub package_root: PathBuf,
+}
+
+impl<'de> Deserialize<'de> for WorkflowDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawWorkflowDefinition::deserialize(deserializer)?;
+        let api_version = raw
+            .workflow
+            .as_ref()
+            .map(|header| header.manifest_version.clone())
+            .or(raw.api_version)
+            .ok_or_else(|| serde::de::Error::missing_field("workflow.manifest_version"))?;
+        let workflow_id = raw
+            .workflow
+            .as_ref()
+            .map(|header| header.id.clone())
+            .or(raw.workflow_id)
+            .ok_or_else(|| serde::de::Error::missing_field("workflow.id"))?;
+        let name = raw
+            .workflow
+            .as_ref()
+            .map(|header| header.name.clone())
+            .or(raw.name)
+            .ok_or_else(|| serde::de::Error::missing_field("workflow.name"))?;
+
+        let mut runtime = RuntimeVariableLayers::default();
+        runtime.workflow_defaults = if raw.runtime.defaults.is_empty() {
+            raw.runtime.workflow_defaults
+        } else {
+            raw.runtime.defaults
+        };
+        runtime.config_defaults = raw.runtime.config_defaults;
+
+        Ok(Self {
+            api_version,
+            workflow_id,
+            name,
+            runtime,
+            nodes: raw.nodes,
+            package_root: PathBuf::new(),
+        })
+    }
 }
 
 impl WorkflowDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major("workflow.api_version", &self.api_version, CURRENT_API_MAJOR)?;
-
-        for trigger in &self.triggers {
-            trigger.validate()?;
-        }
+        assert_supported_major(
+            "workflow.manifest_version",
+            &self.api_version,
+            CURRENT_API_MAJOR,
+        )?;
 
         for node in &self.nodes {
             self.validate_node_contract(node)?;
