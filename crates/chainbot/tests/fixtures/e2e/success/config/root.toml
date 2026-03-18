@@ -1,3 +1,6 @@
-schema_version = "1.0.0"
+manifest_version = "2.0.0"
 profile = "e2e-success"
 secret_refs = ["secret://ops/slack/webhook#api_token"]
+
+[runtime_defaults]
+environment = "test"

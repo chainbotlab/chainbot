@@ -1,0 +1,10 @@
+manifest_version = "2.0.0"
+trigger_id = "external-trigger-e2e"
+kind = "external_plugin"
+plugin = "trigger-e2e-plugin"
+source = "external-trigger-plugin"
+workflow_id = "wf-e2e"
+enabled = true
+
+[input_mapping]
+symbol = "payload.symbol"
