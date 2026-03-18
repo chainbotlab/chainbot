@@ -14,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chainbot::config::RootLayout;
 use chainbot::state::{
     CoordinationStore, FileBackedStateStore, FileStateError, LeaseAcquireResult, RunRecordSummary,
-    RunStatus, StateLayout, TriggerEventRecord, WorkflowRuntimeLogEntry,
+    RunStatus, ServeLeaseState, StateLayout, TriggerEventRecord, WorkflowRuntimeLogEntry,
+    SERVE_OWNER_ID_PREFIX,
 };
 use rusqlite::Connection;
 
@@ -102,6 +103,39 @@ fn serve_single_owner_lease() {
         .try_acquire_serve_lease("owner-beta", 1_710_000_014_000, 5_000)
         .expect("lease should be free after release");
     assert!(matches!(third, LeaseAcquireResult::Acquired));
+}
+
+#[test]
+fn inspect_serve_lease_snapshot_tracks_idle_active_and_stale() {
+    let layout = unique_state_layout("inspect-serve-lease-snapshot-tracks-states");
+    let mut store =
+        CoordinationStore::open(&layout, 1_710_000_020_000).expect("sqlite store should open");
+
+    let idle = store
+        .inspect_serve_lease(1_710_000_020_000)
+        .expect("idle lease snapshot should load");
+    assert_eq!(idle.state, ServeLeaseState::Idle);
+    assert_eq!(idle.owner_id, None);
+    assert_eq!(idle.expires_at_ms, None);
+
+    let owner_id = format!("{SERVE_OWNER_ID_PREFIX}{}", std::process::id());
+    store
+        .try_acquire_serve_lease(&owner_id, 1_710_000_020_000, 5_000)
+        .expect("serve lease should be acquired");
+
+    let active = store
+        .inspect_serve_lease(1_710_000_021_000)
+        .expect("active lease snapshot should load");
+    assert_eq!(active.state, ServeLeaseState::Active);
+    assert_eq!(active.owner_id.as_deref(), Some(owner_id.as_str()));
+    assert_eq!(active.expires_at_ms, Some(1_710_000_025_000));
+
+    let stale = store
+        .inspect_serve_lease(1_710_000_026_000)
+        .expect("stale lease snapshot should load");
+    assert_eq!(stale.state, ServeLeaseState::Stale);
+    assert_eq!(stale.owner_id.as_deref(), Some(owner_id.as_str()));
+    assert_eq!(stale.expires_at_ms, Some(1_710_000_025_000));
 }
 
 #[test]
