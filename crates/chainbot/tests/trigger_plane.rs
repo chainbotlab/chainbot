@@ -28,7 +28,7 @@ fn trigger_plugin_manifest_validation() {
     let valid_plugin_path = plugin_root.join("valid-trigger.sh");
     write_executable_script(
         &valid_plugin_path,
-        "{\"api_version\":\"1.0.0\",\"events\":[]}",
+        "{\"api_version\":\"2.0.0\",\"events\":[]}",
     );
 
     let definitions = vec![trigger_definition(
@@ -38,7 +38,7 @@ fn trigger_plugin_manifest_validation() {
     )];
     let valid_manifest = plugin_manifest(
         "plugin-ok",
-        "1.0.0",
+        "2.0.0",
         "trigger",
         "valid-trigger.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
@@ -134,7 +134,7 @@ fn trigger_plugin_manifest_validation() {
 
     let missing_capability_manifest = plugin_manifest(
         "plugin-ok",
-        "1.0.0",
+        "2.0.0",
         "trigger",
         "valid-trigger.sh",
         &["trigger.observe"],
@@ -162,7 +162,7 @@ fn trigger_plugin_manifest_validation() {
 
     let escaping_manifest = plugin_manifest(
         "plugin-ok",
-        "1.0.0",
+        "2.0.0",
         "trigger",
         "../escape.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
@@ -182,15 +182,16 @@ fn trigger_plugin_manifest_validation() {
     .expect_err("entrypoint escaping plugin root must be rejected");
     assert!(matches!(
         escaping_error,
-        TriggerPlaneError::Contract(ContractError::TriggerPluginEntrypointMustBeRelative {
+        TriggerPlaneError::Contract(ContractError::TriggerPluginEntrypointEscapesRoot {
             plugin_id,
             entrypoint,
+            ..
         }) if plugin_id == "plugin-ok" && entrypoint == "../escape.sh"
     ));
 
     let unsupported_api_manifest = plugin_manifest(
         "plugin-ok",
-        "2.0.0",
+        "3.0.0",
         "trigger",
         "valid-trigger.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
@@ -211,9 +212,9 @@ fn trigger_plugin_manifest_validation() {
     assert!(matches!(
         unsupported_api_error,
         TriggerPlaneError::Contract(ContractError::UnsupportedFutureMajorVersion {
-            field: "plugin.api_version",
-            major: 2,
-            max_supported_major: 1,
+            field: "plugin.manifest_version",
+            major: 3,
+            max_supported_major: 2,
         })
     ));
 }
@@ -331,7 +332,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
     let external_plugin_path = plugin_root.join("plugin-external.sh");
     write_executable_script(
         &external_plugin_path,
-        "{\"api_version\":\"1.0.0\",\"events\":[{\"event_id\":\"event/ext\",\"workflow_id\":\"wf-external\",\"occurred_at_ms\":1710100020000,\"source\":\"plugin-source\",\"payload\":{\"side\":\"sell\"}}]}",
+        "{\"api_version\":\"2.0.0\",\"events\":[{\"event_id\":\"event/ext\",\"occurred_at_ms\":1710100020000,\"source\":\"plugin-source\",\"payload\":{\"side\":\"sell\"}}]}",
     );
 
     let definitions = vec![
@@ -340,7 +341,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
     ];
     let manifests = vec![plugin_manifest(
         "plugin-external",
-        "1.0.0",
+        "2.0.0",
         "trigger",
         "plugin-external.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
@@ -358,7 +359,6 @@ fn builtin_and_external_trigger_emit_run_requests() {
             "builtin-trigger".to_string(),
             vec![TriggerEmission {
                 event_id: "event-builtin".to_string(),
-                workflow_id: "wf-builtin".to_string(),
                 occurred_at_ms: 1_710_100_020_000,
                 source: Some("builtin-source".to_string()),
                 payload: serde_json::json!({"side": "buy"}),
@@ -409,7 +409,6 @@ fn trigger_records_are_file_backed() {
             "builtin-record".to_string(),
             vec![TriggerEmission {
                 event_id: "btc/usdt@1m".to_string(),
-                workflow_id: "wf-record".to_string(),
                 occurred_at_ms: 1_710_100_030_000,
                 source: Some("builtin-feed".to_string()),
                 payload: serde_json::json!({"price": 64000}),
@@ -474,7 +473,6 @@ fn builtin_trigger_kind_aliases_are_accepted() {
                 "manual-trigger".to_string(),
                 vec![TriggerEmission {
                     event_id: "manual-event".to_string(),
-                    workflow_id: "wf-manual".to_string(),
                     occurred_at_ms: 1_710_100_040_000,
                     source: Some("manual-source".to_string()),
                     payload: serde_json::json!({"kind": "manual"}),
@@ -488,7 +486,6 @@ fn builtin_trigger_kind_aliases_are_accepted() {
                 "market-trigger".to_string(),
                 vec![TriggerEmission {
                     event_id: "market-event".to_string(),
-                    workflow_id: "wf-market".to_string(),
                     occurred_at_ms: 1_710_100_040_001,
                     source: Some("market-feed".to_string()),
                     payload: serde_json::json!({"kind": "market_tick"}),
@@ -598,7 +595,7 @@ fn trigger_plugin_host_uses_default_deny_environment() {
     )];
     let manifests = vec![plugin_manifest(
         "plugin-env-probe",
-        "1.0.0",
+        "2.0.0",
         "trigger",
         "plugin-env-probe.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
@@ -630,11 +627,22 @@ fn trigger_plugin_host_uses_default_deny_environment() {
 
 fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefinition {
     TriggerDefinition {
-        api_version: "1.0.0".to_string(),
+        api_version: "2.0.0".to_string(),
         trigger_id: trigger_id.to_string(),
         kind: kind.to_string(),
         source: source.to_string(),
+        plugin: (kind == "external_plugin" || kind == "plugin").then(|| source.to_string()),
+        workflow_id: match trigger_id {
+            "builtin-trigger" => "wf-builtin",
+            "external-trigger" => "wf-external",
+            "manual-trigger" => "wf-manual",
+            "market-trigger" => "wf-market",
+            _ => "wf-test",
+        }
+        .to_string(),
         enabled: true,
+        input_mapping: BTreeMap::new(),
+        package_root: PathBuf::new(),
     }
 }
 
@@ -654,6 +662,7 @@ fn plugin_manifest(
         executable: Some(executable.to_string()),
         input_schema: Vec::new(),
         output_schema: Vec::new(),
+        manifest_path: PathBuf::new(),
     }
 }
 
@@ -677,7 +686,7 @@ fn policy(
 
 fn builtin_event(
     event_id: &str,
-    workflow_id: &str,
+    _workflow_id: &str,
     dedup_key: &str,
     dedup_window_ms: i64,
     cooldown_key: &str,
@@ -685,7 +694,6 @@ fn builtin_event(
 ) -> TriggerEmission {
     TriggerEmission {
         event_id: event_id.to_string(),
-        workflow_id: workflow_id.to_string(),
         occurred_at_ms: 1_710_100_010_000,
         source: Some("builtin-source".to_string()),
         payload: serde_json::json!({"event": event_id}),
@@ -745,7 +753,7 @@ fn write_executable_script(path: &Path, json_payload: &str) {
 
 fn write_trigger_env_probe_script(path: &Path, probe_key: &str, marker_path: &Path) {
     let script = format!(
-        "#!/bin/sh\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\ncat <<'JSON'\n{{\"api_version\":\"1.0.0\",\"events\":[{{\"event_id\":\"event-env\",\"workflow_id\":\"wf-env\",\"occurred_at_ms\":1710100060000,\"source\":\"env-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
+        "#!/bin/sh\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\ncat <<'JSON'\n{{\"api_version\":\"2.0.0\",\"events\":[{{\"event_id\":\"event-env\",\"occurred_at_ms\":1710100060000,\"source\":\"env-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
         marker_path.display()
     );
     fs::write(path, script).expect("script fixture should be writable");

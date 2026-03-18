@@ -1,12 +1,13 @@
 /*
-[INPUT]:  Trigger definitions, builtin trigger emissions, and external trigger plugin manifests/executables.
+[INPUT]:  Trigger package definitions, builtin trigger emissions, and external trigger plugin manifests/executables.
 [OUTPUT]: Normalized run requests with dedup/cooldown coordination and durable trigger event records.
-[POS]:    Trigger-plane boundary that validates trigger plugin host policy without executing DAG nodes.
+[POS]:    Trigger-plane boundary that validates trigger package contracts and plugin host policy without executing DAG nodes.
 [UPDATE]: 2026-03-16 - Add versioned trigger definition contract.
 [UPDATE]: 2026-03-16 - Add trigger plane runtime with builtin + external trigger plugin dispatch.
 [UPDATE]: 2026-03-16 - Add restart-safe accepted-event suppression and executable revalidation.
 [UPDATE]: 2026-03-16 - Restore fail-fast trigger kind validation and rebuild coordination from durable trigger records.
 [UPDATE]: 2026-03-17 - Apply default-deny process environment for external trigger plugin execution.
+[UPDATE]: 2026-03-18 - Add v2.1 trigger package fields for workflow binding, plugin references, and payload input mapping.
 */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +25,7 @@ use crate::state::{
     FileStateError, StateLayout, TriggerEventRecord,
 };
 
-pub const CURRENT_API_MAJOR: u64 = 1;
+pub const CURRENT_API_MAJOR: u64 = 2;
 pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.emit.run_request";
 pub const TRIGGER_KIND_BUILTIN: &str = "builtin";
 pub const TRIGGER_KIND_MANUAL_ALIAS: &str = "manual";
@@ -40,18 +41,26 @@ pub enum TriggerKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerDefinition {
+    #[serde(rename = "manifest_version", alias = "api_version")]
     pub api_version: String,
     pub trigger_id: String,
     pub kind: String,
     pub source: String,
+    #[serde(default)]
+    pub plugin: Option<String>,
+    pub workflow_id: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub input_mapping: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub package_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerEmission {
     pub event_id: String,
-    pub workflow_id: String,
     pub occurred_at_ms: i64,
     #[serde(default)]
     pub source: Option<String>,
@@ -118,10 +127,22 @@ struct ExternalTriggerPlugin {
 
 impl TriggerDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major("trigger.api_version", &self.api_version, CURRENT_API_MAJOR)?;
+        assert_supported_major(
+            "trigger.manifest_version",
+            &self.api_version,
+            CURRENT_API_MAJOR,
+        )?;
         validate_non_empty_field(&self.trigger_id, "trigger.trigger_id", "<unknown-trigger>")?;
         validate_non_empty_field(&self.source, "trigger.source", &self.trigger_id)?;
-        let _ = self.kind()?;
+        validate_non_empty_field(&self.workflow_id, "trigger.workflow_id", &self.trigger_id)?;
+        match self.kind()? {
+            TriggerKind::Builtin => {}
+            TriggerKind::ExternalPlugin => validate_non_empty_field(
+                self.plugin.as_deref().unwrap_or_default(),
+                "trigger.plugin",
+                &self.trigger_id,
+            )?,
+        }
         Ok(())
     }
 
@@ -221,13 +242,19 @@ impl TriggerPlane {
                     .remove(&definition.trigger_id)
                     .unwrap_or_default(),
                 TriggerKind::ExternalPlugin => {
-                    let plugin =
-                        self.external_plugins
-                            .get(&definition.source)
-                            .ok_or_else(|| ContractError::UnknownTriggerPlugin {
-                                trigger_id: definition.trigger_id.clone(),
-                                plugin_id: definition.source.clone(),
-                            })?;
+                    let plugin_id = definition.plugin.as_deref().ok_or_else(|| {
+                        ContractError::InvalidTriggerDefinitionField {
+                            trigger_id: definition.trigger_id.clone(),
+                            field: "trigger.plugin",
+                            detail: "value cannot be empty".to_owned(),
+                        }
+                    })?;
+                    let plugin = self.external_plugins.get(plugin_id).ok_or_else(|| {
+                        ContractError::UnknownTriggerPlugin {
+                            trigger_id: definition.trigger_id.clone(),
+                            plugin_id: plugin_id.to_owned(),
+                        }
+                    })?;
                     plugin.emit(&definition.trigger_id)?
                 }
             };
@@ -262,15 +289,6 @@ impl TriggerPlane {
                 },
             ));
         }
-        if emission.workflow_id.trim().is_empty() {
-            return Err(TriggerPlaneError::Contract(
-                ContractError::InvalidTriggerEmission {
-                    trigger_id: definition.trigger_id.clone(),
-                    detail: "workflow_id cannot be empty".to_owned(),
-                },
-            ));
-        }
-
         let dedup_key = emission
             .dedup_window_ms
             .filter(|value| *value > 0)
@@ -315,7 +333,7 @@ impl TriggerPlane {
         self.accepted_sequence = self.accepted_sequence.saturating_add(1);
         let run_id = format!(
             "run-{}-{}-{}-{}-{}-{:020}",
-            sanitize_path_component(&emission.workflow_id),
+            sanitize_path_component(&definition.workflow_id),
             sanitize_path_component(&definition.trigger_id),
             sanitize_path_component(&emission.event_id),
             emission.occurred_at_ms,
@@ -357,12 +375,12 @@ impl TriggerPlane {
 
         Ok(Some(TriggerRunRequest {
             run_id,
-            workflow_id: emission.workflow_id,
+            workflow_id: definition.workflow_id.clone(),
             trigger_id: definition.trigger_id.clone(),
             event_id: emission.event_id,
             source,
             accepted_at_ms,
-            payload: emission.payload,
+            payload: map_trigger_payload(definition, &emission.payload),
             trigger_record_path,
         }))
     }
@@ -452,8 +470,7 @@ fn validate_trigger_plugin_manifest(
                 detail: "value cannot be empty".to_owned(),
             })?;
 
-    let executable_path =
-        resolve_executable_path(&manifest.plugin_id, executable, &policy.plugin_root_dir)?;
+    let executable_path = resolve_executable_path(manifest, executable, &policy.plugin_root_dir)?;
 
     Ok(ExternalTriggerPlugin {
         plugin_id: manifest.plugin_id.clone(),
@@ -462,7 +479,7 @@ fn validate_trigger_plugin_manifest(
 }
 
 fn resolve_executable_path(
-    plugin_id: &str,
+    manifest: &PluginManifest,
     entrypoint: &str,
     plugin_root_dir: &Path,
 ) -> Result<PathBuf, ContractError> {
@@ -470,25 +487,37 @@ fn resolve_executable_path(
     if entrypoint_path.is_absolute()
         || entrypoint_path
             .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+            .any(|component| matches!(component, Component::RootDir))
     {
         return Err(ContractError::TriggerPluginEntrypointMustBeRelative {
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: manifest.plugin_id.clone(),
             entrypoint: entrypoint.to_owned(),
         });
     }
 
+    let manifest_root_dir = manifest
+        .manifest_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(plugin_root_dir);
     let plugin_root =
         std::fs::canonicalize(plugin_root_dir).map_err(|source| ContractError::Io {
             path: plugin_root_dir.to_path_buf(),
             operation: "canonicalize trigger plugin root",
             source,
         })?;
-    let executable_path = plugin_root_dir.join(entrypoint_path);
+    if entrypoint_escapes_root(manifest_root_dir, &plugin_root, entrypoint_path) {
+        return Err(ContractError::TriggerPluginEntrypointEscapesRoot {
+            plugin_id: manifest.plugin_id.clone(),
+            entrypoint: entrypoint.to_owned(),
+            root: plugin_root,
+        });
+    }
+    let executable_path = manifest_root_dir.join(entrypoint_path);
 
     if !executable_path.exists() {
         return Err(ContractError::TriggerPluginExecutableMissing {
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: manifest.plugin_id.clone(),
             path: executable_path,
         });
     }
@@ -502,7 +531,7 @@ fn resolve_executable_path(
 
     if !executable_canonical.starts_with(&plugin_root) {
         return Err(ContractError::TriggerPluginEntrypointEscapesRoot {
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: manifest.plugin_id.clone(),
             entrypoint: entrypoint.to_owned(),
             root: plugin_root,
         });
@@ -516,7 +545,7 @@ fn resolve_executable_path(
         })?;
     if !metadata.is_file() {
         return Err(ContractError::TriggerPluginExecutableNotFile {
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: manifest.plugin_id.clone(),
             path: executable_canonical,
         });
     }
@@ -526,7 +555,7 @@ fn resolve_executable_path(
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o111 == 0 {
             return Err(ContractError::TriggerPluginExecutableNotExecutable {
-                plugin_id: plugin_id.to_owned(),
+                plugin_id: manifest.plugin_id.clone(),
                 path: executable_canonical,
             });
         }
@@ -589,6 +618,65 @@ impl ExternalTriggerPlugin {
 
 fn accepted_event_key(trigger_id: &str, event_id: &str) -> String {
     format!("{trigger_id}:::{event_id}")
+}
+
+fn entrypoint_escapes_root(base_dir: &Path, root_dir: &Path, entrypoint_path: &Path) -> bool {
+    let mut depth = match base_dir.strip_prefix(root_dir) {
+        Ok(relative) => relative
+            .components()
+            .filter(|component| matches!(component, Component::Normal(_)))
+            .count() as isize,
+        Err(_) => 0,
+    };
+
+    for component in entrypoint_path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(_) => depth += 1,
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => return true,
+        }
+    }
+
+    false
+}
+
+fn map_trigger_payload(
+    definition: &TriggerDefinition,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    if definition.input_mapping.is_empty() {
+        return payload.clone();
+    }
+
+    let mut mapped = serde_json::Map::new();
+    for (target, selector) in &definition.input_mapping {
+        if let Some(value) = select_payload_value(payload, selector) {
+            mapped.insert(target.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(mapped)
+}
+
+fn select_payload_value<'a>(
+    payload: &'a serde_json::Value,
+    selector: &str,
+) -> Option<&'a serde_json::Value> {
+    if selector == "payload" {
+        return Some(payload);
+    }
+    let remainder = selector.strip_prefix("payload.")?;
+
+    let mut current = payload;
+    for segment in remainder.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
 }
 
 fn validate_existing_executable(
