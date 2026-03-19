@@ -1,74 +1,75 @@
 # ChainBot
 
-ChainBot is a Rust workspace for the `chainbot` CLI application.
+ChainBot is a Rust-based CLI application for managing automation workflows, triggers, and plugins.
 
-## Workspace Layout
+## What is ChainBot?
 
-This repository keeps the root as a pure Cargo workspace. Application code lives under `crates/`.
+ChainBot is a workspace-based automation framework that lets you define and run triggered workflows. It provides a plugin architecture for extensibility and supports persistent trigger states.
 
-```text
-.
-|- crates/
-|  `- chainbot/
-|- docs/
-`- postmortem/
+## Quick Start
+
+```bash
+# Install from source
+cargo install --path crates/chainbot
+
+# Initialize a new workspace
+chainbot init
+
+# Check status
+chainbot status
+
+# Run a workflow
+chainbot run <workflow-name>
+
+# Serve the web interface
+chainbot serve
+
+# Manage triggers
+chainbot trigger list
+chainbot trigger enable <trigger-id>
+chainbot trigger disable <trigger-id>
 ```
 
-The primary crate is `crates/chainbot`.
+## Workspace Structure
 
-## Documented CLI Surface
-
-The `chainbot` binary currently provides these runtime commands:
-
-- `help`
-- `init`
-- `status`
-- `trigger`
-- `validate`
-- `run`
-- `serve`
-- `list-runs`
-
-The v2.1.3 CLI design resolves the ChainBot root from `CHAINBOT_CONFIG_DIR` when it is set to a non-empty path.
-If `CHAINBOT_CONFIG_DIR` is unset or empty, the documented contract falls back to the default root at `~/.chainbot`.
-The current runtime parser follows that contract directly and no longer exposes `--root` as a public CLI option.
-`status` also supports `--json` for structured status snapshots.
-`init` bootstraps a minimal root layout with `config/root.toml` and the default package directories.
-`trigger` supports `list`, `enable`, and `disable` actions for persisted trigger package state.
-
-## Expected Root Layout
-
-The current runtime and tests expect a ChainBot root with these directories:
+When you run `chainbot init`, it creates this layout:
 
 ```text
 <root>/
-|- config/
-|- workflows/
-|- triggers/
-|- plugins/
-|- secrets/
-`- state/
+|- config/        # Configuration files
+|- workflows/    # Workflow definitions
+|- triggers/     # Trigger state persistence
+|- plugins/      # Plugin binaries and configs
+|- secrets/      # Secret management
+`- state/        # Runtime state
 ```
 
-## Development
+The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to override.
 
-Validate the workspace with:
+## CLI Commands
 
-```bash
-cargo metadata --no-deps
-cargo check --workspace
-cargo test --workspace
-```
+| Command | Description |
+|---------|-------------|
+| `chainbot help` | Show help information |
+| `chainbot init` | Initialize a new workspace |
+| `chainbot status` | Show workspace status (use `--json` for structured output) |
+| `chainbot trigger` | Manage triggers: `list`, `enable`, `disable` |
+| `chainbot validate` | Validate workspace configuration |
+| `chainbot run` | Execute a workflow |
+| `chainbot serve` | Start the web interface |
+| `chainbot list-runs` | List workflow run history |
 
-Do not run formatting commands in this repository.
+## Configuration
+
+Main configuration file: `config/root.toml`
 
 ## Version
 
-The current crate version is `2.1.3`.
+Current version: **2.1.3**
 
-## Documentation
+## Links
 
-- Design constraints: `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`
-- Workspace bootstrap record: `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`
-- MVP implementation record: `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`
-- CLI v2.1.3 implementation record: `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`
+- [Contributing Guide](CONTRIBUTING.md) — Development setup and architecture
+- [CLI Design](docs/design/CHAINBOT_CLI_DESIGN.md) — CLI command reference
+- [Workspace Design](docs/design/CHAINBOT_WORKSPACE_DESIGN.md) — Root layout specification
+- [Trigger & Workflow Design](docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md) — Workflow definition format
