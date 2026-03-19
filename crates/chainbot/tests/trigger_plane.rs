@@ -7,15 +7,15 @@
 //! [ROLE]
 //! Covers the trigger-plane boundary as an integration test.
 
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chainbot::builtins::triggers::build_builtin_trigger_emissions;
 use chainbot::config::RootLayout;
 use chainbot::errors::ContractError;
-use chainbot::plugin::{PluginManifest, PLUGIN_HOST_ENV_ALLOWLIST};
+use chainbot::plugin::PluginManifest;
 use chainbot::state::{StateLayout, TriggerEventRecord};
 use chainbot::trigger::{
     TriggerDefinition, TriggerEmission, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy,
@@ -515,6 +515,65 @@ fn builtin_trigger_kind_aliases_are_accepted() {
 }
 
 #[test]
+fn builtin_trigger_fanout_emits_multiple_run_requests_end_to_end() {
+    let (state_layout, plugin_root) = unique_layout("builtin-trigger-fanout-end-to-end");
+    let definitions = vec![
+        trigger_definition("manual-trigger-a", "manual", "manual-source-a"),
+        trigger_definition("manual-trigger-b", "manual", "manual-source-b"),
+    ];
+    let builtin_events = build_builtin_trigger_emissions(&definitions, 1_710_100_041_000)
+        .expect("builtin trigger emission generation should succeed");
+
+    let mut plane = TriggerPlane::open(
+        state_layout,
+        definitions,
+        Vec::new(),
+        policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]),
+        builtin_events,
+        1_710_100_041_050,
+    )
+    .expect("trigger plane should open for builtin fanout scenario");
+
+    let requests = plane
+        .collect_run_requests(1_710_100_041_060)
+        .expect("builtin fanout events should normalize into run requests");
+
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().any(|request| {
+        request.trigger_id == "manual-trigger-a"
+            && request.event_id == "builtin-event-manual-trigger-a"
+            && request.workflow_id == "wf-test"
+    }));
+    assert!(requests.iter().any(|request| {
+        request.trigger_id == "manual-trigger-b"
+            && request.event_id == "builtin-event-manual-trigger-b"
+            && request.workflow_id == "wf-test"
+    }));
+}
+
+#[test]
+fn builtin_trigger_generation_preserves_alias_payload_contract() {
+    let definitions = vec![
+        trigger_definition("manual-trigger", "manual", "manual-source"),
+        trigger_definition("market-trigger", "builtin", "market_tick"),
+    ];
+
+    let emissions = build_builtin_trigger_emissions(&definitions, 1_710_100_041_500)
+        .expect("builtin trigger emission generation should support alias and builtin forms");
+
+    assert_eq!(emissions["manual-trigger"].len(), 1);
+    assert_eq!(
+        emissions["manual-trigger"][0].payload,
+        serde_json::json!({"kind": "manual", "source": "manual-source"})
+    );
+    assert_eq!(emissions["market-trigger"].len(), 1);
+    assert_eq!(
+        emissions["market-trigger"][0].payload,
+        serde_json::json!({"kind": "market_tick", "source": "market_tick", "symbol": "BTCUSDT"})
+    );
+}
+
+#[test]
 fn trigger_coordination_rebuilds_from_file_records_after_restart() {
     let (state_layout, plugin_root) = unique_layout("trigger-coordination-rebuild-after-restart");
     let definitions = vec![trigger_definition(
@@ -774,7 +833,7 @@ fn select_non_allowlisted_host_env_key() -> String {
     let mut candidates = std::env::vars_os()
         .filter_map(|(key, value)| {
             let key = key.to_string_lossy().to_string();
-            if value.is_empty() || PLUGIN_HOST_ENV_ALLOWLIST.contains(&key.as_str()) {
+            if value.is_empty() || TEST_PLUGIN_HOST_ENV_ALLOWLIST.contains(&key.as_str()) {
                 return None;
             }
             Some(key)
@@ -786,3 +845,5 @@ fn select_non_allowlisted_host_env_key() -> String {
         .next()
         .expect("test process should expose at least one non-allowlisted environment variable")
 }
+const TEST_PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
+    &["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"];

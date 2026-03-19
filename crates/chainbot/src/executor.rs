@@ -9,11 +9,13 @@
 
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::builtins::nodes::contract::{
+    BuiltinNodeRegistry, BuiltinNodeRequest, BuiltinNodeResult,
+};
+use crate::builtins::nodes::dispatch::builtin_dispatch_kind;
 use crate::errors::{assert_supported_major, ContractError};
 use crate::workflow::{
     DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, SubflowContract, VariableBinding,
@@ -22,9 +24,6 @@ use crate::workflow::{
 
 pub const CURRENT_API_MAJOR: u64 = 2;
 pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
-
-type BuiltinDispatchFn =
-    dyn Fn(&BuiltinNodeRequest) -> Result<BuiltinNodeResult, ContractError> + Send + Sync;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeDefinition {
@@ -84,29 +83,6 @@ pub struct WorkflowRunReport {
     pub node_failures: BTreeMap<String, String>,
     pub runtime_namespaces: RuntimeVariableNamespaces,
     pub schedule_waves: Vec<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BuiltinNodeRequest {
-    pub run_id: String,
-    pub workflow_id: String,
-    pub workflow_package_root: PathBuf,
-    pub node_id: String,
-    pub operation: String,
-    pub inputs: BTreeMap<String, serde_json::Value>,
-    pub runtime_namespaces: RuntimeVariableNamespaces,
-}
-
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct BuiltinNodeResult {
-    pub outputs: BTreeMap<String, serde_json::Value>,
-    pub run_scoped: BTreeMap<String, serde_json::Value>,
-    pub subflow_output: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Clone, Default)]
-pub struct BuiltinNodeRegistry {
-    handlers: BTreeMap<String, Arc<BuiltinDispatchFn>>,
 }
 
 pub struct ExecutionPlane {
@@ -178,65 +154,6 @@ impl ScheduledNodeState {
             self,
             Self::Succeeded | Self::Skipped | Self::Failed
         )
-    }
-}
-
-impl std::fmt::Debug for BuiltinNodeRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BuiltinNodeRegistry")
-            .field("registered_kinds", &self.handlers.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-impl BuiltinNodeRegistry {
-    pub fn new() -> Self {
-        Self {
-            handlers: BTreeMap::new(),
-        }
-    }
-
-    pub fn with_defaults() -> Self {
-        let mut registry = Self::new();
-        registry.register("builtin.identity", |request| {
-            Ok(BuiltinNodeResult {
-                outputs: request.inputs.clone(),
-                ..BuiltinNodeResult::default()
-            })
-        });
-        registry.register("builtin.emit_subflow_output", |request| {
-            Ok(BuiltinNodeResult {
-                subflow_output: request.inputs.clone(),
-                ..BuiltinNodeResult::default()
-            })
-        });
-        registry
-    }
-
-    pub fn register<F>(&mut self, kind: impl Into<String>, handler: F)
-    where
-        F: Fn(&BuiltinNodeRequest) -> Result<BuiltinNodeResult, ContractError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.handlers.insert(kind.into(), Arc::new(handler));
-    }
-
-    pub fn dispatch(
-        &self,
-        kind: &str,
-        request: &BuiltinNodeRequest,
-    ) -> Result<BuiltinNodeResult, ContractError> {
-        let Some(handler) = self.handlers.get(kind) else {
-            return Err(ContractError::UnknownBuiltinNodeKind {
-                workflow_id: request.workflow_id.clone(),
-                node_id: request.node_id.clone(),
-                kind: kind.to_owned(),
-            });
-        };
-
-        handler(request)
     }
 }
 
@@ -621,14 +538,4 @@ fn normalized_dependencies(depends_on: &[String]) -> Vec<String> {
         dependencies.insert(dependency.clone());
     }
     dependencies.into_iter().collect()
-}
-
-fn builtin_dispatch_kind(node: &NodeDefinition) -> Option<&str> {
-    if node.kind == "builtin" {
-        Some(node.plugin_id.as_str())
-    } else if node.kind.starts_with("builtin.") {
-        Some(node.kind.as_str())
-    } else {
-        None
-    }
 }

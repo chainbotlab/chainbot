@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Covers the external node plugin host boundary as an integration test.
 
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,10 +14,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::errors::ContractError;
 use chainbot::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PLUGIN_HOST_ENV_ALLOWLIST,
-    PLUGIN_KIND_EXTERNAL_NODE,
+    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
+
+const TEST_PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
+    &["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"];
 
 #[test]
 fn node_plugin_manifest_validation() {
@@ -227,7 +228,7 @@ fn select_non_allowlisted_host_env_key() -> String {
     let mut candidates = std::env::vars_os()
         .filter_map(|(key, value)| {
             let key = key.to_string_lossy().to_string();
-            if value.is_empty() || PLUGIN_HOST_ENV_ALLOWLIST.contains(&key.as_str()) {
+            if value.is_empty() || TEST_PLUGIN_HOST_ENV_ALLOWLIST.contains(&key.as_str()) {
                 return None;
             }
             Some(key)

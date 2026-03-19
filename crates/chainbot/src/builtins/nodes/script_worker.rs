@@ -1,15 +1,14 @@
 //! [INPUT]
-//! Worker request and response envelopes, subprocess runtime specifications, and host safety limits.
+//! Script node subprocess specifications, host limits, and runtime failure handling.
 //!
 //! [OUTPUT]
-//! Defines versioned worker protocol types and executes Python or JavaScript workers with bounded subprocess cleanup.
+//! Executes Python or JavaScript builtin script workers with bounded subprocess cleanup.
 //!
 //! [ROLE]
-//! Provides the script-worker protocol and host boundary for external runtime nodes.
+//! Owns the script-worker host implementation for builtin script nodes.
 //!
 //! [INVARIANTS]
 //! Timed-out workers are always reaped or reported as explicit failures, and protocol version checks happen before payload handling.
-
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -19,28 +18,8 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-
-use crate::errors::{assert_supported_major, ContractError};
-
-pub const CURRENT_PROTOCOL_MAJOR: u64 = 1;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkerRequestEnvelope {
-    pub protocol_version: String,
-    pub request_id: String,
-    pub worker_id: String,
-    pub workflow_id: String,
-    pub payload: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkerResponseEnvelope {
-    pub protocol_version: String,
-    pub request_id: String,
-    pub success: bool,
-    pub output: serde_json::Value,
-}
+use crate::errors::ContractError;
+use crate::script_protocol::{WorkerRequestEnvelope, WorkerResponseEnvelope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptRuntime {
@@ -312,38 +291,6 @@ impl WorkerHost {
         }
 
         Ok(response)
-    }
-}
-
-impl WorkerRequestEnvelope {
-    pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
-            "worker_request.protocol_version",
-            &self.protocol_version,
-            CURRENT_PROTOCOL_MAJOR,
-        )
-    }
-
-    pub fn from_json_str(input: &str) -> Result<Self, ContractError> {
-        let envelope: Self = serde_json::from_str(input)?;
-        envelope.validate()?;
-        Ok(envelope)
-    }
-}
-
-impl WorkerResponseEnvelope {
-    pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
-            "worker_response.protocol_version",
-            &self.protocol_version,
-            CURRENT_PROTOCOL_MAJOR,
-        )
-    }
-
-    pub fn from_json_str(input: &str) -> Result<Self, ContractError> {
-        let envelope: Self = serde_json::from_str(input)?;
-        envelope.validate()?;
-        Ok(envelope)
     }
 }
 

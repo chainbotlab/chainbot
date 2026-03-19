@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{assert_supported_major, ContractError};
 use crate::plugin::PluginManifest;
+use crate::script_protocol::{WorkerRequestEnvelope, WorkerResponseEnvelope};
 use crate::secrets::SecretReference;
 use crate::state::RunRecordSummary;
 use crate::trigger::TriggerDefinition;
-use crate::worker::{WorkerRequestEnvelope, WorkerResponseEnvelope};
 use crate::workflow::WorkflowDefinition;
 
 pub const CURRENT_SCHEMA_MAJOR: u64 = 2;

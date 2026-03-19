@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Covers the script worker-host boundary as an integration test.
 
-
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,11 +14,11 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chainbot::errors::ContractError;
-use chainbot::worker::{
+use chainbot::builtins::nodes::script_worker::{
     ScriptRuntime, WorkerHost, WorkerHostError, WorkerHostLimits, WorkerProcessSpec,
-    WorkerRequestEnvelope,
 };
+use chainbot::errors::ContractError;
+use chainbot::script_protocol::WorkerRequestEnvelope;
 
 #[test]
 fn worker_protocol_version_negotiation() {

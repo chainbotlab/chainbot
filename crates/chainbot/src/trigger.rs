@@ -10,7 +10,6 @@
 //! [INVARIANTS]
 //! Accepted-event suppression stays restart-safe, and trigger validation fails before any workflow run request is emitted.
 
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -159,6 +158,19 @@ impl TriggerDefinition {
                 trigger_id: self.trigger_id.clone(),
                 kind: self.kind.clone(),
             }),
+        }
+    }
+
+    pub fn builtin_subtype(&self) -> Result<Option<&str>, ContractError> {
+        match self.kind()? {
+            TriggerKind::ExternalPlugin => Ok(None),
+            TriggerKind::Builtin => {
+                if self.kind == TRIGGER_KIND_BUILTIN {
+                    Ok(Some(self.source.as_str()))
+                } else {
+                    Ok(Some(self.kind.as_str()))
+                }
+            }
         }
     }
 }
