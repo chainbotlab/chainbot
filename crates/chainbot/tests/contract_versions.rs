@@ -7,12 +7,11 @@
 //! [ROLE]
 //! Guards the crate's versioned contract compatibility boundary.
 
-
 use chainbot::config::ConfigRoot;
 use chainbot::errors::ContractError;
 use chainbot::plugin::PluginManifest;
+use chainbot::script_protocol::WorkerRequestEnvelope;
 use chainbot::secrets::SecretReference;
-use chainbot::worker::WorkerRequestEnvelope;
 
 #[test]
 fn contract_versions() {

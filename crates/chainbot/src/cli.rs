@@ -11,46 +11,35 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
+use crate::builtins::{
+    build_builtin_registry, build_builtin_trigger_emissions, BuiltinRuntimeContext,
+    SecretDecryptMode,
+};
 use crate::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
     RootConfigDefinition, RootDefinitionBundle, RootLayout, RootPathOverrides, RootPluginDiscovery,
     TriggerToggleResult,
 };
-use crate::errors::{ContractError, UserFacingError};
-use crate::executor::{
-    BuiltinNodeRegistry, BuiltinNodeRequest, BuiltinNodeResult, ExecutionPlane,
-    NormalizedRunRequest, WorkflowRunStatus,
-};
-use crate::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginKind, PluginManifest,
-    NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
-};
-use crate::secrets::{
-    redact_text, GpgSecretDecryptor, PlaintextSecretDecryptor, SecretProvider, SecretReference,
-    SecretValue,
-};
+use crate::errors::UserFacingError;
+use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
+use crate::plugin::{PluginKind, PluginManifest};
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
     FileStateError, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
     ServeLeaseState, StateLayout, TriggerEventRecord, SERVE_OWNER_ID_PREFIX,
 };
 use crate::trigger::{
-    TriggerDefinition, TriggerEmission, TriggerKind, TriggerPlane, TriggerPlaneError,
-    TriggerPluginHostPolicy, TriggerRunRequest, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
-};
-use crate::worker::{
-    ScriptRuntime, WorkerHost, WorkerHostLimits, WorkerProcessSpec, WorkerRequestEnvelope,
+    TriggerDefinition, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
+    REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use crate::workflow::WorkflowDefinition;
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
-const SCRIPT_RUNTIME_PYTHON: &str = "python";
-const SCRIPT_RUNTIME_JAVASCRIPT: &str = "javascript";
 const INIT_MANIFEST_VERSION: &str = "2.0.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,12 +78,6 @@ pub struct CliOutput {
     stdout: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SecretDecryptMode {
-    Gpg,
-    Plaintext,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerOperation {
     List,
@@ -116,26 +99,6 @@ struct RuntimeContext {
     state_store: FileBackedStateStore,
     secret_mode: SecretDecryptMode,
     worker_host: WorkerHost,
-}
-
-#[derive(Debug, Clone)]
-struct RuntimePluginContext {
-    root_layout: RootLayout,
-    manifests: BTreeMap<String, PluginManifest>,
-    secret_mode: SecretDecryptMode,
-    worker_host: WorkerHost,
-}
-
-#[derive(Debug, Clone)]
-struct ScriptNodeSpec {
-    runtime: ScriptRuntime,
-    script_relative_path: String,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedNodeInputs {
-    values: BTreeMap<String, serde_json::Value>,
-    resolved_secrets: Vec<SecretValue>,
 }
 
 #[derive(Debug)]
@@ -1313,7 +1276,9 @@ fn serve_once_with_lease(
         })
         .collect::<Vec<_>>();
     let policy = build_trigger_host_policy(&trigger_manifests, &runtime.root_layout.plugins_dir);
-    let builtin_events = build_builtin_trigger_emissions(&runtime.definitions, accepted_at_ms);
+    let builtin_events =
+        build_builtin_trigger_emissions(&runtime.definitions.triggers, accepted_at_ms)
+            .map_err(UserFacingError::from_contract)?;
 
     let mut trigger_plane = TriggerPlane::open(
         state_layout,
@@ -1487,7 +1452,7 @@ fn execute_single_run(
 }
 
 fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, UserFacingError> {
-    let plugin_context = Arc::new(RuntimePluginContext {
+    let registry = build_builtin_registry(BuiltinRuntimeContext {
         root_layout: runtime.root_layout.clone(),
         manifests: runtime
             .definitions
@@ -1500,262 +1465,12 @@ fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, Use
         worker_host: runtime.worker_host.clone(),
     });
 
-    let mut registry = BuiltinNodeRegistry::with_defaults();
-
-    {
-        let context = Arc::clone(&plugin_context);
-        registry.register("builtin.external_node", move |request| {
-            execute_external_node_plugin(&context, request)
-        });
-    }
-
-    {
-        let context = Arc::clone(&plugin_context);
-        registry.register("builtin.script", move |request| {
-            execute_script_node(&context, request)
-        });
-    }
-
     ExecutionPlane::new(
         runtime.definitions.workflows.clone(),
         runtime.definitions.root_config.runtime_defaults.clone(),
         registry,
     )
     .map_err(UserFacingError::from_contract)
-}
-
-fn execute_external_node_plugin(
-    context: &RuntimePluginContext,
-    request: &BuiltinNodeRequest,
-) -> Result<BuiltinNodeResult, ContractError> {
-    let plugin_id = request.operation.trim();
-    if plugin_id.is_empty() {
-        return Err(ContractError::CliUsage {
-            message: format!(
-                "workflow {} node {} missing plugin id in operation field",
-                request.workflow_id, request.node_id
-            ),
-        });
-    }
-
-    let manifest = context
-        .manifests
-        .get(plugin_id)
-        .ok_or_else(|| ContractError::CliUsage {
-            message: format!(
-                "workflow {} node {} references unknown external node plugin {}",
-                request.workflow_id, request.node_id, plugin_id
-            ),
-        })?;
-
-    if manifest.kind()? != PluginKind::ExternalNode {
-        return Err(ContractError::CliUsage {
-            message: format!(
-                "workflow {} node {} expected external node plugin kind for {}",
-                request.workflow_id, request.node_id, plugin_id
-            ),
-        });
-    }
-
-    let ResolvedNodeInputs {
-        values: resolved_inputs,
-        resolved_secrets,
-    } = resolve_node_inputs(
-        &context.root_layout.secrets_dir,
-        context.secret_mode,
-        &request.inputs,
-    )?;
-    let host = ExternalNodePluginHost::new(context.root_layout.plugins_dir.clone());
-    let response = host
-        .execute(
-            manifest,
-            &ExternalNodePluginRequest {
-                contract_version: NODE_PLUGIN_CONTRACT_VERSION.to_owned(),
-                plugin_id: plugin_id.to_owned(),
-                node_id: request.node_id.clone(),
-                operation: "execute".to_owned(),
-                requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
-                input: resolved_inputs,
-            },
-        )
-        .map_err(|source| ContractError::CliUsage {
-            message: redact_text(&source.to_string(), &resolved_secrets),
-        })?;
-
-    Ok(BuiltinNodeResult {
-        outputs: response.output.clone(),
-        run_scoped: response.output,
-        ..BuiltinNodeResult::default()
-    })
-}
-
-fn execute_script_node(
-    context: &RuntimePluginContext,
-    request: &BuiltinNodeRequest,
-) -> Result<BuiltinNodeResult, ContractError> {
-    let script_spec = parse_script_node_operation(&request.operation)?;
-    let interpreter_path =
-        resolve_interpreter_for_runtime(script_spec.runtime).ok_or_else(|| {
-            ContractError::CliUsage {
-                message: format!(
-                    "workflow {} node {} cannot resolve interpreter for runtime {}",
-                    request.workflow_id,
-                    request.node_id,
-                    match script_spec.runtime {
-                        ScriptRuntime::Python => SCRIPT_RUNTIME_PYTHON,
-                        ScriptRuntime::JavaScript => SCRIPT_RUNTIME_JAVASCRIPT,
-                    }
-                ),
-            }
-        })?;
-
-    let script_base_dir = if request.workflow_package_root.as_os_str().is_empty() {
-        context.root_layout.root.clone()
-    } else {
-        request.workflow_package_root.clone()
-    };
-    let script_path = script_base_dir.join(&script_spec.script_relative_path);
-    let ResolvedNodeInputs {
-        values: resolved_inputs,
-        resolved_secrets,
-    } = resolve_node_inputs(
-        &context.root_layout.secrets_dir,
-        context.secret_mode,
-        &request.inputs,
-    )?;
-
-    let process = WorkerProcessSpec::new(script_spec.runtime, interpreter_path, script_path);
-    let response = context
-        .worker_host
-        .execute(
-            &process,
-            &WorkerRequestEnvelope {
-                protocol_version: "1.0.0".to_owned(),
-                request_id: format!("{}::{}", request.run_id, request.node_id),
-                worker_id: request.node_id.clone(),
-                workflow_id: request.workflow_id.clone(),
-                payload: serde_json::to_value(&resolved_inputs)?,
-            },
-        )
-        .map_err(|source| ContractError::CliUsage {
-            message: format!(
-                "script worker failed for workflow {} node {}: {}",
-                request.workflow_id,
-                request.node_id,
-                redact_text(&source.to_string(), &resolved_secrets)
-            ),
-        })?;
-
-    let outputs = match response.output {
-        serde_json::Value::Object(values) => values.into_iter().collect(),
-        other => BTreeMap::from([(String::from("result"), other)]),
-    };
-
-    Ok(BuiltinNodeResult {
-        outputs: outputs.clone(),
-        run_scoped: outputs,
-        ..BuiltinNodeResult::default()
-    })
-}
-
-fn parse_script_node_operation(operation: &str) -> Result<ScriptNodeSpec, ContractError> {
-    let Some((runtime_raw, script_relative_path)) = operation.split_once(':') else {
-        return Err(ContractError::CliUsage {
-            message: format!(
-                "script node operation must use <runtime>:<relative_script_path>, got {operation}"
-            ),
-        });
-    };
-
-    let runtime = match runtime_raw.trim() {
-        SCRIPT_RUNTIME_PYTHON => ScriptRuntime::Python,
-        SCRIPT_RUNTIME_JAVASCRIPT => ScriptRuntime::JavaScript,
-        other => {
-            return Err(ContractError::CliUsage {
-                message: format!(
-                    "script node runtime {other} is unsupported; use python or javascript"
-                ),
-            });
-        }
-    };
-
-    let script_relative_path = script_relative_path.trim();
-    if script_relative_path.is_empty() {
-        return Err(ContractError::CliUsage {
-            message: "script node operation requires a relative script path".to_owned(),
-        });
-    }
-
-    Ok(ScriptNodeSpec {
-        runtime,
-        script_relative_path: script_relative_path.to_owned(),
-    })
-}
-
-fn resolve_node_inputs(
-    secrets_root: &Path,
-    mode: SecretDecryptMode,
-    values: &BTreeMap<String, serde_json::Value>,
-) -> Result<ResolvedNodeInputs, ContractError> {
-    let mut resolved_values = BTreeMap::new();
-    let mut resolved_secrets = Vec::new();
-    for (key, value) in values {
-        let resolved_value =
-            resolve_value_with_secrets(secrets_root, mode, value, &mut resolved_secrets)?;
-        resolved_values.insert(key.clone(), resolved_value);
-    }
-    Ok(ResolvedNodeInputs {
-        values: resolved_values,
-        resolved_secrets,
-    })
-}
-
-fn resolve_value_with_secrets(
-    secrets_root: &Path,
-    mode: SecretDecryptMode,
-    value: &serde_json::Value,
-    resolved_secrets: &mut Vec<SecretValue>,
-) -> Result<serde_json::Value, ContractError> {
-    match value {
-        serde_json::Value::String(raw) if raw.starts_with("secret://") => {
-            let reference = SecretReference::parse(raw)?;
-            let secret_value = match mode {
-                SecretDecryptMode::Gpg => {
-                    SecretProvider::new(secrets_root.to_path_buf(), GpgSecretDecryptor::new())
-                        .resolve_reference(&reference)?
-                }
-                SecretDecryptMode::Plaintext => {
-                    SecretProvider::new(secrets_root.to_path_buf(), PlaintextSecretDecryptor)
-                        .resolve_reference(&reference)?
-                }
-            };
-            resolved_secrets.push(secret_value.clone());
-            Ok(serde_json::Value::String(secret_value.expose().to_owned()))
-        }
-        serde_json::Value::Array(items) => {
-            let mut resolved = Vec::with_capacity(items.len());
-            for item in items {
-                resolved.push(resolve_value_with_secrets(
-                    secrets_root,
-                    mode,
-                    item,
-                    resolved_secrets,
-                )?);
-            }
-            Ok(serde_json::Value::Array(resolved))
-        }
-        serde_json::Value::Object(map) => {
-            let mut resolved = serde_json::Map::with_capacity(map.len());
-            for (key, item) in map {
-                resolved.insert(
-                    key.clone(),
-                    resolve_value_with_secrets(secrets_root, mode, item, resolved_secrets)?,
-                );
-            }
-            Ok(serde_json::Value::Object(resolved))
-        }
-        _ => Ok(value.clone()),
-    }
 }
 
 fn build_trigger_host_policy(
@@ -1778,38 +1493,6 @@ fn build_trigger_host_policy(
         allowed_capabilities: BTreeSet::from([REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()]),
         plugin_root_dir: plugins_root_dir.to_path_buf(),
     }
-}
-
-fn build_builtin_trigger_emissions(
-    definitions: &RootDefinitionBundle,
-    now_ms: i64,
-) -> BTreeMap<String, Vec<TriggerEmission>> {
-    let mut emissions = BTreeMap::new();
-    for definition in &definitions.triggers {
-        if !matches!(definition.kind(), Ok(TriggerKind::Builtin)) {
-            continue;
-        }
-
-        emissions.insert(
-            definition.trigger_id.clone(),
-            vec![TriggerEmission {
-                event_id: format!("builtin-event-{}", definition.trigger_id),
-                occurred_at_ms: now_ms,
-                source: Some(definition.source.clone()),
-                payload: serde_json::json!({
-                    "kind": "builtin",
-                    "source": definition.source,
-                    "symbol": "BTCUSDT"
-                }),
-                dedup_key: None,
-                dedup_window_ms: None,
-                cooldown_key: None,
-                cooldown_ms: None,
-            }],
-        );
-    }
-
-    emissions
 }
 
 fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> NormalizedRunRequest {
@@ -1882,25 +1565,6 @@ fn secret_decrypt_mode_from_env() -> SecretDecryptMode {
         Some(SECRET_DECRYPTOR_PLAINTEXT) => SecretDecryptMode::Plaintext,
         _ => SecretDecryptMode::Gpg,
     }
-}
-
-fn resolve_interpreter_for_runtime(runtime: ScriptRuntime) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime {
-        ScriptRuntime::Python => &["python3", "python"],
-        ScriptRuntime::JavaScript => &["node", "nodejs"],
-    };
-    let path_env = std::env::var_os("PATH")?;
-
-    for candidate in candidates {
-        for root in std::env::split_paths(&path_env) {
-            let path = root.join(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

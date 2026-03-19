@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Covers the execution scheduler boundary as an integration test.
 
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -63,7 +62,7 @@ fn scheduler_parallel_ready_nodes() {
     let execution_plane = ExecutionPlane::new(
         vec![workflow],
         BTreeMap::new(),
-        BuiltinNodeRegistry::with_defaults(),
+        BuiltinNodeRegistry::with_test_handlers(),
     )
     .expect("plane");
     let mut request = NormalizedRunRequest::new("run-parallel", "wf-parallel");
@@ -98,7 +97,7 @@ fn scheduler_parallel_ready_nodes() {
 
 #[test]
 fn scheduler_when_and_depends_mode() {
-    let mut registry = BuiltinNodeRegistry::with_defaults();
+    let mut registry = BuiltinNodeRegistry::with_test_handlers();
     registry.register("builtin.fail", |_request| {
         Err(ContractError::CliUsage {
             message: "forced node failure".to_owned(),
@@ -212,7 +211,7 @@ fn scheduler_when_and_depends_mode() {
 
 #[test]
 fn builtin_node_registry_dispatch() {
-    let registry = BuiltinNodeRegistry::with_defaults();
+    let registry = BuiltinNodeRegistry::with_test_handlers();
     let request = BuiltinNodeRequest {
         run_id: "run-registry".to_owned(),
         workflow_id: "wf-registry".to_owned(),
@@ -238,6 +237,84 @@ fn builtin_node_registry_dispatch() {
             node_id,
             kind,
         } if workflow_id == "wf-registry" && node_id == "node-registry" && kind == "builtin.unknown"
+    ));
+}
+
+#[test]
+fn builtin_node_registry_test_handlers_extend_with_custom_registration() {
+    let mut registry = BuiltinNodeRegistry::with_test_handlers();
+    registry.register("builtin.capture_runtime", |request| {
+        Ok(chainbot::executor::BuiltinNodeResult {
+            outputs: BTreeMap::from([(
+                String::from("workflow"),
+                json!(request
+                    .runtime_namespaces
+                    .run_scoped
+                    .get("workflow")
+                    .cloned()),
+            )]),
+            ..Default::default()
+        })
+    });
+
+    let request = BuiltinNodeRequest {
+        run_id: "run-registry".to_owned(),
+        workflow_id: "wf-registry".to_owned(),
+        workflow_package_root: PathBuf::new(),
+        node_id: "node-registry".to_owned(),
+        operation: "run".to_owned(),
+        inputs: BTreeMap::from_iter([(String::from("symbol"), json!("ETHUSDT"))]),
+        runtime_namespaces: chainbot::workflow::RuntimeVariableNamespaces {
+            run_scoped: BTreeMap::from([(String::from("workflow"), json!("alpha"))]),
+            ..Default::default()
+        },
+    };
+
+    let identity = registry
+        .dispatch("builtin.identity", &request)
+        .expect("seeded test builtin should remain dispatchable after extension registration");
+    assert_eq!(identity.outputs.get("symbol"), Some(&json!("ETHUSDT")));
+
+    let subflow = registry
+        .dispatch("builtin.emit_subflow_output", &request)
+        .expect("seeded subflow emitter builtin should remain dispatchable");
+    assert_eq!(
+        subflow.subflow_output.get("symbol"),
+        Some(&json!("ETHUSDT"))
+    );
+
+    let custom = registry
+        .dispatch("builtin.capture_runtime", &request)
+        .expect("custom builtin registration should coexist with defaults");
+    assert_eq!(custom.outputs.get("workflow"), Some(&json!("alpha")));
+}
+
+#[test]
+fn builtin_node_registry_test_handlers_only_seed_scheduler_basics() {
+    let registry = BuiltinNodeRegistry::with_test_handlers();
+    let request = BuiltinNodeRequest {
+        run_id: "run-registry".to_owned(),
+        workflow_id: "wf-registry".to_owned(),
+        workflow_package_root: PathBuf::new(),
+        node_id: "node-registry".to_owned(),
+        operation: "run".to_owned(),
+        inputs: BTreeMap::from_iter([(String::from("symbol"), json!("ETHUSDT"))]),
+        runtime_namespaces: Default::default(),
+    };
+
+    registry
+        .dispatch("builtin.identity", &request)
+        .expect("seeded test registry should include builtin.identity");
+    registry
+        .dispatch("builtin.emit_subflow_output", &request)
+        .expect("seeded test registry should include builtin.emit_subflow_output");
+
+    let error = registry
+        .dispatch("builtin.http", &request)
+        .expect_err("seeded test registry should not imply production-complete builtins");
+    assert!(matches!(
+        error,
+        ContractError::UnknownBuiltinNodeKind { kind, .. } if kind == "builtin.http"
     ));
 }
 
