@@ -14,8 +14,6 @@ pub mod config;
 pub mod errors;
 pub mod executor;
 pub mod plugin;
-mod plugin_contract;
-mod plugin_host;
 pub mod script_protocol;
 pub mod secrets;
 pub mod state;

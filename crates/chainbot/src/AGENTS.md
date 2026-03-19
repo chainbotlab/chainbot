@@ -14,9 +14,7 @@
 - `workflow.rs`: Workflow package semantic contract with nested manifest-header parsing, DAG/cycle validation, typed runtime variable namespaces and precedence layers, explicit subflow input/output boundaries, and deterministic `when` evaluators.
 - `trigger.rs`: Trigger-package runtime contract plus trigger-plane orchestration for builtin/external trigger sources, workflow binding, input mapping, dedup/cooldown coordination, restart-safe duplicate suppression, and normalized run-request emission through builtin trigger dispatch helpers.
 - `executor.rs`: Rust-owned execution plane with scheduler node states, dependency/condition/subflow orchestration, and canonical builtin node registry dispatch contracts.
-- `plugin.rs`: Stable public facade that re-exports shared plugin contract and external node-plugin host surfaces.
-- `plugin_contract.rs`: Internal plugin contract module that backs the public `plugin.rs` facade with manifest and external-node protocol validation helpers.
-- `plugin_host.rs`: Internal plugin host module that backs the public `plugin.rs` facade with executable-path policy, process execution, and environment guards.
+- `plugin/`: Encapsulated plugin subsystem containing the stable public facade plus internal contract and host implementation modules.
 - `script_protocol.rs`: Versioned script-worker request/response envelope contract shared by config loading, builtin script execution, and protocol tests.
 - `builtins/nodes/script_worker.rs`: Bounded subprocess host for Python/JavaScript builtin script nodes plus timeout cleanup and runtime failure mapping.
 - `state.rs`: Run summary schema plus state-tree layout, crash-safe file persistence, append-only workflow/trigger artifacts, minimal SQLite coordination, deterministic run-summary listing, and restart recovery.

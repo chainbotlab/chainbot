@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::errors::ContractError;
-use crate::plugin_contract::{
+
+use super::contract::{
     validate_output_schema, ExternalNodePluginRequest, ExternalNodePluginResponse, PluginKind,
     PluginManifest,
 };
