@@ -2,5 +2,5 @@ manifest_version = "2.0.0"
 plugin_id = "trigger-e2e-plugin"
 kind = "external_trigger"
 entrypoint = "trigger.exec.v1"
-capabilities = ["trigger.emit.run_request"]
+capabilities = ["trigger.listen.event"]
 executable = "../bin/external_trigger.sh"
