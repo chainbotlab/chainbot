@@ -119,6 +119,25 @@ target = "symbol"
 [nodes.inputs.source]
 namespace = "run_scoped"
 key = "symbol"
+
+[[nodes]]
+id = "call-strategy"
+kind = "subflow"
+depends_on = ["script-node"]
+
+[nodes.when]
+source = "run.enabled"
+operator = "truthy"
+
+[nodes.call]
+workflow = "strategy-child"
+
+[nodes.call.with]
+symbol = "trigger.symbol"
+dry_run = "manual.dry_run"
+
+[nodes.call.returns]
+decision = "strategy_decision"
 ```
 
 ### Workflow 约束
@@ -128,10 +147,37 @@ key = "symbol"
 - workflow 内所有相对路径都相对 workflow package root 解析
 - workflow identity 只由 `workflow.id` 定义
 - workflow node graph 必须是 DAG
+- `kind = "subflow"` 的节点必须使用 `[nodes.call]` 声明 child workflow、输入映射与输出导出边界
+- `VariableReference` 支持结构化 `{ namespace, key }` 与 `<namespace_alias>.<key>` 简写两种写法；简写 alias 为 `cli`、`manual`、`trigger`、`workflow`、`config`、`node`、`run`，适用于 `nodes.when.source`、`nodes.call.with` 等变量引用位置
+- `nodes.call.with` 不允许引用 `subflow_input` 或 `subflow_output`
+- `kind = "subflow"` 的节点不得定义 `[[nodes.inputs]]`；subflow 的 author-facing 输入面只有 `nodes.call.with`
+- `kind = "subflow"` 的节点若显式声明 `plugin` 与 `operation`，其值必须分别是 `builtin-subflow` 与 `run`
+- `depends_mode = "all"` 表示所有依赖节点都必须成功；`depends_mode = "any"` 表示所有依赖节点进入终态后，只要任一成功即可继续
+- node 调度顺序固定为：先依据依赖状态判断是否 ready/skip，再对 ready 节点评估 `when`
+
+### Workflow Author Guide
+
+- `depends_mode = "all"` 适合严格 DAG gate；任何依赖失败都会让当前节点变为 `skipped`
+- `depends_mode = "any"` 不是 short-circuit OR；它会等待所有依赖进入终态，再根据“是否至少一个成功”决定是否继续
+- `when` 是节点级二次 gate：只有节点先通过依赖判定后，才会评估 `when`
+- `when` 只支持单条件 `source/operator/expected`，不支持多条件组合、变量对变量比较或嵌套表达式
+- `when.operator = "falsy"` 在 source 缺失时也会返回 true；配置作者不能把它理解为单纯的 `!truthy(existing_value)`
+- `run.*` 是可变执行态，不是静态输入快照；它会先由优先级层初始化，再在节点执行过程中被新的 `run_scoped` 输出覆盖
+- 需要稳定 gating 时，应优先引用 `manual.*`、`trigger.*`、`workflow.*`、`config.*`，而不是 `run.*`
+- `node.*` 表示跨节点写入的普通输出命名空间；后写入的同名 key 会覆盖先前值
+- `subflow` 的 parent-visible 返回值来自 child workflow 的 `subflow_output` 命名空间，而不是 child 的普通 `node_outputs`
+- child workflow 若希望向 parent 返回值，必须显式写入 `subflow_output`，例如通过 `builtin.emit_subflow_output`
 
 ## `triggers/<trigger_id>/config.toml`
 
 trigger package 定义事件来源与目标 workflow 的绑定关系，以及 trigger 自己的长时间运行资源。它不承载 DAG、node 或 workflow 内部结构。
+
+为避免每个 builtin trigger 新增参数时都扩展公共顶层 contract，trigger manifest 采用固定 core 字段加 `[params]` 扩展槽：
+
+- core 字段承载稳定路由与运行 contract
+- `[params]` 承载 trigger subtype 私有参数
+- subtype 私有参数必须由对应 builtin handler 或 external trigger host contract 校验
+- `input_mapping` 仍然独立，只负责把 trigger event payload 映射到 workflow run input
 
 示例：
 
@@ -147,6 +193,24 @@ enabled = true
 symbol = "payload.symbol"
 ```
 
+builtin cron 示例：
+
+```toml
+manifest_version = "2.0.0"
+trigger_id = "cron-rebalance"
+kind = "builtin"
+source = "cron"
+workflow_id = "rebalance"
+enabled = true
+
+[params]
+schedule = "*/15 * * * *"
+timezone = "UTC"
+
+[input_mapping]
+scheduled_at = "payload.slot_start_ms"
+```
+
 external trigger 示例：
 
 ```toml
@@ -158,10 +222,20 @@ source = "market_tick"
 workflow_id = "rebalance"
 enabled = true
 
+[params]
+symbol = "ETHUSDT"
+
 [input_mapping]
 symbol = "payload.symbol"
 price = "payload.price"
 ```
+
+兼容性说明：
+
+- canonical builtin 形式是 `kind = "builtin"` + `source = <subtype>`
+- canonical external 形式是 `kind = "external_plugin"` + `plugin = <plugin_id>`
+- 当前实现仍接受历史 alias 作为兼容输入：builtin 侧包括 `manual`、`market_tick`、`cron`；external 侧包括 `external_trigger` 与 `plugin`
+- 新配置应优先使用 canonical 形式，alias 只用于兼容已有 roots
 
 典型 trigger package 目录如下：
 
@@ -190,12 +264,44 @@ triggers/
 - 每个 trigger 必须显式声明 `workflow_id`
 - trigger 的 canonical identity 是 `trigger_id`
 - trigger 必须引用一个已存在的 `workflow_id`
+- trigger top-level schema 保持固定；新增 subtype 私有配置应优先写入 `[params]`
 - `input_mapping` 只负责把 trigger payload 映射到 workflow run input
 - trigger 不得定义 node、subflow 或 workflow runtime defaults
 - canonical entrypoint 是 `triggers/<trigger_id>/config.toml`
 - 目录名必须与 `trigger_id` 完全一致
 - trigger package 内所有相对路径都相对 trigger package root 解析
 - trigger 私有脚本或插件只属于当前 trigger package，不形成全局共享 contract
+
+### Builtin Trigger Params Contract
+
+- builtin trigger subtype 继续由 `kind = "builtin"` + `source = <subtype>` 决定
+- `[params]` 是 subtype 私有配置区；不同 subtype 可拥有不同 schema
+- `[params]` 中的字段必须在 subtype handler 中做加载期校验，避免把拼写错误或缺失必填项推迟到 `serve`
+- `manual` 当前不需要任何 params
+- `market_tick` 当前支持可选 `params.symbol`，默认值为 `BTCUSDT`
+- `cron` 当前需要 `params.schedule`，并可选 `params.timezone = "UTC"`
+- `cron` schedule 语法当前支持五段 UTC cron：`minute hour day month weekday`
+  - 支持 `*`
+  - 支持 `*/n`
+  - 支持 `a,b,c`
+  - 支持 `a-b`
+  - 支持 `a-b/n`
+  - `weekday` 取值为 `0-6`，其中 `0` 表示 Sunday；`7` 也可写作 Sunday alias
+- `cron` trigger 只评估当前 serve snapshot 对应的 UTC minute slot，不做 missed-slot backfill
+- `cron` trigger 必须基于稳定 slot 生成 `event_id`，以便 restart-safe duplicate suppression 继续成立
+
+### External Trigger Host Contract
+
+- external trigger host keeps the existing stdout output contract: plugin stdout must decode as `TriggerPluginOutput`
+- external trigger host keeps `--trigger-id <trigger_id>` argv for compatibility with older plugins
+- external trigger host now also writes a JSON `TriggerPluginInput` envelope to plugin stdin
+- `TriggerPluginInput` currently contains:
+  - `api_version`
+  - `trigger_id`
+  - `source`
+  - `params`
+- external trigger plugins may ignore stdin and still work when they only depend on legacy argv-based behavior
+- external trigger plugins that want params-aware behavior should read stdin and decode `TriggerPluginInput`
 
 ## Workflow Run Model
 
