@@ -6,5 +6,8 @@ source = "external-trigger-plugin"
 workflow_id = "wf-e2e"
 enabled = true
 
+[params]
+symbol = "ETHUSDT"
+
 [input_mapping]
 symbol = "payload.symbol"

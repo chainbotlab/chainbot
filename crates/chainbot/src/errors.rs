@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Centralizes failure taxonomy shared across the crate's validation, execution, and command surfaces.
 
-
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
@@ -168,6 +167,10 @@ pub enum ContractError {
         node_id: String,
         detail: String,
     },
+    UnexpectedSubflowNodeInputs {
+        workflow_id: String,
+        node_id: String,
+    },
     MissingSubflowContract {
         workflow_id: String,
         node_id: String,
@@ -221,10 +224,19 @@ pub enum ContractError {
         path: PathBuf,
         source: std::io::Error,
     },
+    TriggerPluginProcessIo {
+        plugin_id: String,
+        operation: &'static str,
+        source: std::io::Error,
+    },
     TriggerPluginProcessFailed {
         plugin_id: String,
         status: i32,
         stderr: String,
+    },
+    TriggerPluginProtocolEncode {
+        plugin_id: String,
+        source: serde_json::Error,
     },
     TriggerPluginOutputDecode {
         plugin_id: String,
@@ -553,6 +565,13 @@ impl Display for ContractError {
                 f,
                 "workflow {workflow_id} node {node_id} failed while executing child workflow {child_workflow_id}"
             ),
+            Self::UnexpectedSubflowNodeInputs {
+                workflow_id,
+                node_id,
+            } => write!(
+                f,
+                "workflow {workflow_id} node {node_id} must not define node.inputs; subflow nodes only accept inputs through nodes.call.with"
+            ),
             Self::DuplicateNodeId {
                 workflow_id,
                 node_id,
@@ -686,6 +705,11 @@ impl Display for ContractError {
                 "failed to spawn trigger plugin {plugin_id} at {}: {source}",
                 path.display()
             ),
+            Self::TriggerPluginProcessIo {
+                plugin_id,
+                operation,
+                source,
+            } => write!(f, "trigger plugin {plugin_id} failed to {operation}: {source}"),
             Self::TriggerPluginProcessFailed {
                 plugin_id,
                 status,
@@ -693,6 +717,10 @@ impl Display for ContractError {
             } => write!(
                 f,
                 "trigger plugin {plugin_id} exited with status {status}: {stderr}"
+            ),
+            Self::TriggerPluginProtocolEncode { plugin_id, source } => write!(
+                f,
+                "failed to encode trigger plugin {plugin_id} input JSON: {source}"
             ),
             Self::TriggerPluginOutputDecode { plugin_id, source } => write!(
                 f,
@@ -823,6 +851,8 @@ impl Error for ContractError {
             Self::TomlDecode { source, .. } => Some(source),
             Self::Io { source, .. } => Some(source),
             Self::TriggerPluginSpawnFailed { source, .. } => Some(source),
+            Self::TriggerPluginProcessIo { source, .. } => Some(source),
+            Self::TriggerPluginProtocolEncode { source, .. } => Some(source),
             Self::TriggerPluginOutputDecode { source, .. } => Some(source),
             Self::NodePluginSpawnFailed { source, .. } => Some(source),
             Self::NodePluginProcessIo { source, .. } => Some(source),

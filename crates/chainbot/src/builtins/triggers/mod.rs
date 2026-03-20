@@ -1,8 +1,8 @@
 //! [INPUT]
-//! Trigger definitions, builtin trigger aliases, and accepted-at timestamps from the serve path.
+//! Trigger definitions, builtin trigger aliases, params payloads, and accepted-at timestamps from the serve path.
 //!
 //! [OUTPUT]
-//! Exposes the builtin-trigger contract, dispatch helpers, registry assembly, and per-emitter modules.
+//! Exposes builtin-trigger validation, dispatch helpers, registry assembly, and per-emitter modules.
 //!
 //! [ROLE]
 //! Owns the trigger builtin subsystem beneath the unified builtin namespace.
@@ -14,3 +14,4 @@ pub mod emitters;
 pub mod registry;
 
 pub use registry::build_builtin_trigger_emissions;
+pub use registry::validate_builtin_trigger_definition;

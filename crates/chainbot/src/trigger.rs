@@ -1,8 +1,8 @@
 //! [INPUT]
-//! Trigger package definitions, workflow bindings, state coordination, builtin trigger events, and external trigger plugin manifests.
+//! Trigger package definitions, workflow bindings, params payloads, state coordination, builtin trigger events, and external trigger plugin manifests.
 //!
 //! [OUTPUT]
-//! Validates trigger packages, normalizes accepted events into run requests, and dispatches builtin or external trigger sources.
+//! Validates trigger packages, normalizes accepted events into run requests, and dispatches builtin or external trigger sources with restart-safe event suppression.
 //!
 //! [ROLE]
 //! Implements the trigger plane that feeds workflow execution without owning DAG node dispatch.
@@ -13,11 +13,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::builtins::triggers::validate_builtin_trigger_definition;
 use crate::errors::{assert_supported_major, ContractError};
 use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifest};
 use crate::state::{
@@ -28,6 +30,7 @@ use crate::state::{
 pub const CURRENT_API_MAJOR: u64 = 2;
 pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.emit.run_request";
 pub const TRIGGER_KIND_BUILTIN: &str = "builtin";
+pub const TRIGGER_KIND_CRON_ALIAS: &str = "cron";
 pub const TRIGGER_KIND_MANUAL_ALIAS: &str = "manual";
 pub const TRIGGER_KIND_MARKET_TICK_ALIAS: &str = "market_tick";
 pub const TRIGGER_KIND_EXTERNAL_PLUGIN: &str = "external_plugin";
@@ -52,6 +55,8 @@ pub struct TriggerDefinition {
     pub plugin: Option<String>,
     pub workflow_id: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub params: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub input_mapping: BTreeMap<String, String>,
     #[serde(skip)]
@@ -80,6 +85,15 @@ pub struct TriggerEmission {
 pub struct TriggerPluginOutput {
     pub api_version: String,
     pub events: Vec<TriggerEmission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerPluginInput {
+    pub api_version: String,
+    pub trigger_id: String,
+    pub source: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,7 +150,7 @@ impl TriggerDefinition {
         validate_non_empty_field(&self.source, "trigger.source", &self.trigger_id)?;
         validate_non_empty_field(&self.workflow_id, "trigger.workflow_id", &self.trigger_id)?;
         match self.kind()? {
-            TriggerKind::Builtin => {}
+            TriggerKind::Builtin => validate_builtin_trigger_definition(self)?,
             TriggerKind::ExternalPlugin => validate_non_empty_field(
                 self.plugin.as_deref().unwrap_or_default(),
                 "trigger.plugin",
@@ -148,9 +162,10 @@ impl TriggerDefinition {
 
     pub fn kind(&self) -> Result<TriggerKind, ContractError> {
         match self.kind.as_str() {
-            TRIGGER_KIND_BUILTIN | TRIGGER_KIND_MANUAL_ALIAS | TRIGGER_KIND_MARKET_TICK_ALIAS => {
-                Ok(TriggerKind::Builtin)
-            }
+            TRIGGER_KIND_BUILTIN
+            | TRIGGER_KIND_CRON_ALIAS
+            | TRIGGER_KIND_MANUAL_ALIAS
+            | TRIGGER_KIND_MARKET_TICK_ALIAS => Ok(TriggerKind::Builtin),
             TRIGGER_KIND_EXTERNAL_PLUGIN
             | TRIGGER_KIND_EXTERNAL_TRIGGER_ALIAS
             | TRIGGER_KIND_PLUGIN_ALIAS => Ok(TriggerKind::ExternalPlugin),
@@ -182,6 +197,17 @@ impl TriggerPluginOutput {
             &self.api_version,
             CURRENT_API_MAJOR,
         )
+    }
+}
+
+impl TriggerPluginInput {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        assert_supported_major(
+            "trigger_plugin_input.api_version",
+            &self.api_version,
+            CURRENT_API_MAJOR,
+        )?;
+        Ok(())
     }
 }
 
@@ -268,7 +294,7 @@ impl TriggerPlane {
                             plugin_id: plugin_id.to_owned(),
                         }
                     })?;
-                    plugin.emit(&definition.trigger_id)?
+                    plugin.emit(&definition)?
                 }
             };
 
@@ -593,19 +619,57 @@ fn validate_non_empty_field(
 }
 
 impl ExternalTriggerPlugin {
-    fn emit(&self, trigger_id: &str) -> Result<Vec<TriggerEmission>, ContractError> {
+    fn emit(&self, definition: &TriggerDefinition) -> Result<Vec<TriggerEmission>, ContractError> {
         validate_existing_executable(&self.plugin_id, &self.executable_path)?;
 
+        let input = TriggerPluginInput {
+            api_version: String::from("2.0.0"),
+            trigger_id: definition.trigger_id.clone(),
+            source: definition.source.clone(),
+            params: definition.params.clone(),
+        };
+        input.validate()?;
+        let encoded_input = serde_json::to_vec(&input).map_err(|source| {
+            ContractError::TriggerPluginProtocolEncode {
+                plugin_id: self.plugin_id.clone(),
+                source,
+            }
+        })?;
+
         let mut command = Command::new(&self.executable_path);
-        command.arg("--trigger-id").arg(trigger_id);
+        command
+            .arg("--trigger-id")
+            .arg(&definition.trigger_id)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         configure_plugin_host_environment(&mut command);
 
-        let output =
+        let mut child =
             command
-                .output()
+                .spawn()
                 .map_err(|source| ContractError::TriggerPluginSpawnFailed {
                     plugin_id: self.plugin_id.clone(),
                     path: self.executable_path.clone(),
+                    source,
+                })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&encoded_input).map_err(|source| {
+                ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "write stdin",
+                    source,
+                }
+            })?;
+        }
+
+        let output =
+            child
+                .wait_with_output()
+                .map_err(|source| ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "wait for process",
                     source,
                 })?;
 

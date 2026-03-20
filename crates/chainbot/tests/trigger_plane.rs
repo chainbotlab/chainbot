@@ -19,7 +19,7 @@ use chainbot::plugin::PluginManifest;
 use chainbot::state::{StateLayout, TriggerEventRecord};
 use chainbot::trigger::{
     TriggerDefinition, TriggerEmission, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy,
-    REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+    TriggerPluginInput, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use rusqlite::Connection;
 
@@ -81,8 +81,8 @@ fn trigger_plugin_manifest_validation() {
     let duplicate_trigger_error = TriggerPlane::open(
         state_layout.clone(),
         vec![
-            trigger_definition("dup-trigger", "builtin", "market-feed"),
-            trigger_definition("dup-trigger", "builtin", "market-feed-two"),
+            trigger_definition("dup-trigger", "builtin", "market_tick"),
+            trigger_definition("dup-trigger", "builtin", "market_tick"),
         ],
         Vec::new(),
         policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]),
@@ -119,7 +119,7 @@ fn trigger_plugin_manifest_validation() {
         vec![trigger_definition(
             "bad-kind",
             "builtin_typo",
-            "market-feed",
+            "market_tick",
         )],
         Vec::new(),
         policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]),
@@ -226,7 +226,7 @@ fn trigger_dedup_and_cooldown() {
     let definitions = vec![trigger_definition(
         "builtin-market",
         "builtin",
-        "market-feed",
+        "market_tick",
     )];
     let manifests = Vec::<PluginManifest>::new();
     let host_policy = policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]);
@@ -337,7 +337,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
     );
 
     let definitions = vec![
-        trigger_definition("builtin-trigger", "builtin", "market-feed"),
+        trigger_definition("builtin-trigger", "builtin", "market_tick"),
         trigger_definition("external-trigger", "external_plugin", "plugin-external"),
     ];
     let manifests = vec![plugin_manifest(
@@ -399,7 +399,7 @@ fn trigger_records_are_file_backed() {
     let definitions = vec![trigger_definition(
         "builtin-record",
         "builtin",
-        "market-feed",
+        "market_tick",
     )];
     let mut plane = TriggerPlane::open(
         state_layout.clone(),
@@ -574,12 +574,94 @@ fn builtin_trigger_generation_preserves_alias_payload_contract() {
 }
 
 #[test]
+fn builtin_cron_trigger_uses_params_and_restarts_without_duplicate_events() {
+    let (state_layout, plugin_root) = unique_layout("builtin-cron-trigger-restart-safe");
+    let mut definition = trigger_definition("cron-trigger", "builtin", "cron");
+    definition.params =
+        BTreeMap::from([(String::from("schedule"), serde_json::json!("*/15 * * * *"))]);
+
+    let accepted_at_ms = 1_736_172_900_123;
+    let builtin_events = build_builtin_trigger_emissions(&[definition.clone()], accepted_at_ms)
+        .expect("cron builtin events should build from params");
+    let mut first_plane = TriggerPlane::open(
+        state_layout.clone(),
+        vec![definition.clone()],
+        Vec::new(),
+        policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]),
+        builtin_events,
+        accepted_at_ms,
+    )
+    .expect("trigger plane should open for cron trigger");
+
+    let first_requests = first_plane
+        .collect_run_requests(accepted_at_ms)
+        .expect("cron trigger should emit one accepted request for due slot");
+    assert_eq!(first_requests.len(), 1);
+    assert_eq!(
+        first_requests[0].event_id,
+        "cron:cron-trigger:1736172900000"
+    );
+    assert_eq!(
+        first_requests[0].payload,
+        serde_json::json!({
+            "kind": "cron",
+            "source": "cron",
+            "schedule": "*/15 * * * *",
+            "slot_start_ms": 1736172900000_i64,
+            "timezone": "UTC"
+        })
+    );
+
+    let repeat_events = build_builtin_trigger_emissions(&[definition.clone()], accepted_at_ms)
+        .expect("same-slot cron builtin events should still build");
+    let mut reopened_plane = TriggerPlane::open(
+        state_layout,
+        vec![definition],
+        Vec::new(),
+        policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]),
+        repeat_events,
+        accepted_at_ms,
+    )
+    .expect("reopened trigger plane should open for duplicate suppression");
+
+    let repeated_requests = reopened_plane
+        .collect_run_requests(accepted_at_ms)
+        .expect("same cron slot should be suppressed after restart");
+    assert!(repeated_requests.is_empty());
+}
+
+#[test]
+fn builtin_cron_trigger_requires_schedule_param() {
+    let (state_layout, plugin_root) = unique_layout("builtin-cron-trigger-validation");
+    let definition = trigger_definition("cron-trigger-invalid", "builtin", "cron");
+
+    let error = TriggerPlane::open(
+        state_layout,
+        vec![definition],
+        Vec::new(),
+        policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]),
+        BTreeMap::new(),
+        1_736_172_900_123,
+    )
+    .expect_err("cron trigger without schedule params should fail validation");
+
+    assert!(matches!(
+        error,
+        TriggerPlaneError::Contract(ContractError::InvalidTriggerDefinitionField {
+            trigger_id,
+            field: "trigger.params",
+            ..
+        }) if trigger_id == "cron-trigger-invalid"
+    ));
+}
+
+#[test]
 fn trigger_coordination_rebuilds_from_file_records_after_restart() {
     let (state_layout, plugin_root) = unique_layout("trigger-coordination-rebuild-after-restart");
     let definitions = vec![trigger_definition(
         "builtin-market",
         "builtin",
-        "market-feed",
+        "market_tick",
     )];
     let policy = policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]);
 
@@ -685,6 +767,56 @@ fn trigger_plugin_host_uses_default_deny_environment() {
     );
 }
 
+#[test]
+fn external_trigger_plugin_receives_params_via_stdin_protocol() {
+    let (state_layout, plugin_root) = unique_layout("trigger-plugin-stdin-params");
+    let input_capture_path = plugin_root.join("plugin-input.json");
+    let executable = plugin_root.join("plugin-params-probe.sh");
+    write_trigger_input_capture_script(&executable, &input_capture_path);
+
+    let mut definition = trigger_definition("external-trigger", "external_plugin", "plugin-params");
+    definition.params = BTreeMap::from([
+        (String::from("region"), serde_json::json!("apac")),
+        (String::from("threshold"), serde_json::json!(12)),
+    ]);
+    let manifests = vec![plugin_manifest(
+        "plugin-params",
+        "2.0.0",
+        "trigger",
+        "plugin-params-probe.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let mut plane = TriggerPlane::open(
+        state_layout,
+        vec![definition],
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-params"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+        1_710_100_070_000,
+    )
+    .expect("trigger plane should open for params-aware external plugin");
+
+    let requests = plane
+        .collect_run_requests(1_710_100_070_010)
+        .expect("external trigger plugin should receive params and emit a request");
+    assert_eq!(requests.len(), 1);
+
+    let captured_input: TriggerPluginInput = serde_json::from_str(
+        &fs::read_to_string(&input_capture_path)
+            .expect("captured trigger plugin input should be readable"),
+    )
+    .expect("captured trigger plugin input should decode");
+    assert_eq!(captured_input.trigger_id, "external-trigger");
+    assert_eq!(captured_input.source, "plugin-params");
+    assert_eq!(captured_input.params["region"], serde_json::json!("apac"));
+    assert_eq!(captured_input.params["threshold"], serde_json::json!(12));
+}
+
 fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefinition {
     TriggerDefinition {
         api_version: "2.0.0".to_string(),
@@ -697,10 +829,12 @@ fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefi
             "external-trigger" => "wf-external",
             "manual-trigger" => "wf-manual",
             "market-trigger" => "wf-market",
+            "cron-trigger" => "wf-cron",
             _ => "wf-test",
         }
         .to_string(),
         enabled: true,
+        params: BTreeMap::new(),
         input_mapping: BTreeMap::new(),
         package_root: PathBuf::new(),
     }
@@ -815,6 +949,24 @@ fn write_trigger_env_probe_script(path: &Path, probe_key: &str, marker_path: &Pa
     let script = format!(
         "#!/bin/sh\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\ncat <<'JSON'\n{{\"api_version\":\"2.0.0\",\"events\":[{{\"event_id\":\"event-env\",\"occurred_at_ms\":1710100060000,\"source\":\"env-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
         marker_path.display()
+    );
+    fs::write(path, script).expect("script fixture should be writable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("script fixture metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("script fixture should become executable");
+    }
+}
+
+fn write_trigger_input_capture_script(path: &Path, input_capture_path: &Path) {
+    let script = format!(
+        "#!/bin/sh\ncat > \"{}\"\ncat <<'JSON'\n{{\"api_version\":\"2.0.0\",\"events\":[{{\"event_id\":\"event-params\",\"occurred_at_ms\":1710100070000,\"source\":\"params-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
+        input_capture_path.display()
     );
     fs::write(path, script).expect("script fixture should be writable");
 
