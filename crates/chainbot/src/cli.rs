@@ -38,6 +38,7 @@ use crate::trigger::{
 use crate::workflow::WorkflowDefinition;
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
+const SERVE_LEASE_RENEW_INTERVAL_MS: i64 = 10_000;
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
 const INIT_MANIFEST_VERSION: &str = "2.0.0";
@@ -106,6 +107,51 @@ struct SingleRunResult {
     run_id: String,
     workflow_id: String,
     status: RunStatus,
+}
+
+#[derive(Debug, Clone)]
+struct ServeLeaseSupervisor {
+    state_layout: StateLayout,
+    owner_id: String,
+    lease_ttl_ms: i64,
+    renew_interval_ms: i64,
+    next_renew_at_ms: i64,
+}
+
+impl ServeLeaseSupervisor {
+    fn new(state_layout: StateLayout, owner_id: String, acquired_at_ms: i64) -> Self {
+        Self {
+            state_layout,
+            owner_id,
+            lease_ttl_ms: SERVE_LEASE_TTL_MS,
+            renew_interval_ms: SERVE_LEASE_RENEW_INTERVAL_MS,
+            next_renew_at_ms: acquired_at_ms.saturating_add(SERVE_LEASE_RENEW_INTERVAL_MS),
+        }
+    }
+
+    fn maybe_renew(&mut self, now_ms: i64) -> Result<(), UserFacingError> {
+        if now_ms < self.next_renew_at_ms {
+            return Ok(());
+        }
+
+        let mut coordination = CoordinationStore::open(&self.state_layout, now_ms)
+            .map_err(|error| map_coordination_error("open serve coordination store", error))?;
+        match coordination
+            .try_acquire_serve_lease(&self.owner_id, now_ms, self.lease_ttl_ms)
+            .map_err(|error| map_coordination_error("renew serve lease", error))?
+        {
+            LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
+                self.next_renew_at_ms = now_ms.saturating_add(self.renew_interval_ms);
+                Ok(())
+            }
+            LeaseAcquireResult::Rejected {
+                current_owner,
+                expires_at_ms,
+            } => Err(UserFacingError::conflict(format!(
+                "Serve lease renewal was rejected (current owner: {current_owner}, expires_at_ms: {expires_at_ms})."
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -520,7 +566,12 @@ impl CliRequest {
             .map_err(|error| map_coordination_error("acquire serve lease", error))?
         {
             LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
-                let run_result = serve_once_with_lease(&runtime, now_ms);
+                let mut lease_supervisor = ServeLeaseSupervisor::new(
+                    state_layout.clone(),
+                    owner_id.clone(),
+                    now_ms,
+                );
+                let run_result = serve_once_with_lease(&runtime, now_ms, &mut lease_supervisor);
                 let released = coordination
                     .release_serve_lease(&owner_id)
                     .map_err(|error| map_coordination_error("release serve lease", error))?;
@@ -1283,7 +1334,9 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), std
 fn serve_once_with_lease(
     runtime: &RuntimeContext,
     accepted_at_ms: i64,
+    lease_supervisor: &mut ServeLeaseSupervisor,
 ) -> Result<CliOutput, UserFacingError> {
+    lease_supervisor.maybe_renew(accepted_at_ms)?;
     let state_layout = StateLayout::from_root_layout(&runtime.root_layout);
     let trigger_manifests = runtime
         .definitions
@@ -1312,8 +1365,22 @@ fn serve_once_with_lease(
     )
     .map_err(map_trigger_error)?;
 
+    let mut renew_progress = || {
+        let now_ms = current_time_ms().map_err(|error| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
+                trigger_id: String::from("serve"),
+                detail: error.to_string(),
+            })
+        })?;
+        lease_supervisor.maybe_renew(now_ms).map_err(|error| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
+                trigger_id: String::from("serve"),
+                detail: error.to_string(),
+            })
+        })
+    };
     let run_requests = trigger_plane
-        .collect_run_requests(accepted_at_ms)
+        .collect_run_requests_with_progress(accepted_at_ms, &mut renew_progress)
         .map_err(map_trigger_error)?;
     if run_requests.is_empty() {
         return Ok(CliOutput::text(
@@ -1325,6 +1392,7 @@ fn serve_once_with_lease(
     let mut failures = Vec::new();
 
     for trigger_request in &run_requests {
+        lease_supervisor.maybe_renew(current_time_ms()?)?;
         let normalized_request = normalized_request_from_trigger(trigger_request);
         match execute_single_run(runtime, normalized_request, accepted_at_ms) {
             Ok(run_result) => completed_runs.push((trigger_request, run_result)),
@@ -1626,8 +1694,14 @@ mod tests {
         )
         .expect("mutated trigger file should be writable");
 
-        let serve_output = serve_once_with_lease(&runtime, 1_710_300_000_000)
-            .expect("already loaded runtime should ignore on-disk config mutation");
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            StateLayout::from_root_layout(&runtime.root_layout),
+            String::from("test-owner"),
+            1_710_300_000_000,
+        );
+        let serve_output =
+            serve_once_with_lease(&runtime, 1_710_300_000_000, &mut lease_supervisor)
+                .expect("already loaded runtime should ignore on-disk config mutation");
         assert!(serve_output
             .stdout()
             .contains("serve completed: executed 1 accepted trigger event(s)"));
@@ -1677,8 +1751,14 @@ mod tests {
         let runtime = request
             .load_runtime_context()
             .expect("runtime load should succeed with builtin alias trigger");
-        let serve_output = serve_once_with_lease(&runtime, 1_710_300_100_000)
-            .expect("serve should execute every accepted request from the snapshot");
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            StateLayout::from_root_layout(&runtime.root_layout),
+            String::from("test-owner"),
+            1_710_300_100_000,
+        );
+        let serve_output =
+            serve_once_with_lease(&runtime, 1_710_300_100_000, &mut lease_supervisor)
+                .expect("serve should execute every accepted request from the snapshot");
 
         assert!(serve_output
             .stdout()
@@ -1700,6 +1780,36 @@ mod tests {
             std::env::remove_var("CHAINBOT_CONFIG_DIR");
             std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
         }
+    }
+
+    #[test]
+    fn serve_lease_supervisor_renews_same_owner_lease() {
+        let root = prepare_fixture_root("success", "cli-serve-lease-renewal");
+        let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(root));
+        let mut coordination = CoordinationStore::open(&state_layout, 1_710_300_200_000)
+            .expect("coordination store should open");
+        assert!(matches!(
+            coordination
+                .try_acquire_serve_lease("owner-renew", 1_710_300_200_000, SERVE_LEASE_TTL_MS)
+                .expect("initial lease should acquire"),
+            LeaseAcquireResult::Acquired
+        ));
+
+        let mut supervisor = ServeLeaseSupervisor::new(
+            state_layout.clone(),
+            String::from("owner-renew"),
+            1_710_300_200_000,
+        );
+        supervisor
+            .maybe_renew(1_710_300_210_100)
+            .expect("lease renewal should succeed for same owner");
+
+        let snapshot =
+            CoordinationStore::inspect_existing_serve_lease(&state_layout, 1_710_300_210_100)
+                .expect("lease snapshot should load after renewal");
+        assert!(matches!(snapshot.state, ServeLeaseState::Active));
+        assert_eq!(snapshot.owner_id.as_deref(), Some("owner-renew"));
+        assert_eq!(snapshot.expires_at_ms, Some(1_710_300_240_100));
     }
 
     fn prepare_fixture_root(case_name: &str, root_name: &str) -> PathBuf {
