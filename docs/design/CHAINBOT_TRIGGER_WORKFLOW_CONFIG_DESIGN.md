@@ -17,8 +17,7 @@
 
 ```text
 <root>/
-|- config/
-|  `- root.toml
+|- chainbot.toml
 |- workflows/
 |  |- e2e/
 |  |  |- config.toml
@@ -43,16 +42,19 @@
 
 ## 加载顺序
 
-1. `config/root.toml`
+1. `chainbot.toml`
 2. `workflows/*/config.toml`
 3. `triggers/*/config.toml`
 4. `plugins/manifests/*.toml`
 
-## `config/root.toml`
+兼容性说明：loader 优先读取 `<root>/chainbot.toml`，当该文件缺失时回退读取旧路径 `<root>/config/root.toml`。若两个文件同时存在，则 `<root>/chainbot.toml` 作为唯一生效配置源。
 
-`config/root.toml` 只承载根级稳定配置：
+## `chainbot.toml`
+
+`chainbot.toml` 只承载根级稳定配置：
 
 - manifest version
+- running ChainBot version
 - root profile
 - path overrides
 - runtime defaults
@@ -64,6 +66,7 @@
 
 ```toml
 manifest_version = "2.0.0"
+chainbot_version = "2.1.4"
 profile = "prod"
 secret_refs = ["secret://ops/slack/webhook#token"]
 
@@ -355,7 +358,7 @@ executable = "../bin/market_feed.sh"
 
 ## Root Plugin Discovery
 
-`config/root.toml` 的 `[plugins].manifest_globs` 定义共享 plugin manifest 的发现入口。
+`chainbot.toml` 的 `[plugins].manifest_globs` 定义共享 plugin manifest 的发现入口。
 
 - 默认值是 `["plugins/manifests/*.toml"]`
 - 每一项都必须是 root-relative `<dir>/*.toml` 形式
