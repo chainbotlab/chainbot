@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Covers the durable runtime-state boundary as an integration test.
 
-
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -196,12 +195,16 @@ fn file_backed_runtime_logs() {
     assert!(second_log_path.exists());
 
     let trigger_record = TriggerEventRecord {
+        schema_version: "1.0.0".to_string(),
         run_id: "run-alpha".to_string(),
         sequence: 7,
         trigger_id: "market.tick".to_string(),
+        workflow_id: "wf-alpha".to_string(),
         event_id: "btc/usdt@1m".to_string(),
+        checkpoint: None,
         source: "feed-A".to_string(),
         accepted_at_ms: 1_710_000_100_020,
+        payload: serde_json::json!({"symbol": "BTCUSDT"}),
         dedup_key: None,
         dedup_expires_at_ms: None,
         cooldown_key: None,
@@ -337,12 +340,16 @@ fn file_log_recovery_and_rotation_policy() {
         occurred_at_ms: 1_710_500_000_000,
     };
     let trigger_record = TriggerEventRecord {
+        schema_version: "1.0.0".to_string(),
         run_id: "run-log".to_string(),
         sequence: 1,
         trigger_id: "trigger-log".to_string(),
+        workflow_id: "wf-log".to_string(),
         event_id: "event-log".to_string(),
+        checkpoint: None,
         source: "fixture".to_string(),
         accepted_at_ms: 1_710_500_000_010,
+        payload: serde_json::json!({"event": 1}),
         dedup_key: None,
         dedup_expires_at_ms: None,
         cooldown_key: None,
@@ -384,12 +391,16 @@ fn file_log_recovery_and_rotation_policy() {
     write_json_file(
         &layout.staged_trigger_record_path("run-log", 2, "trigger-log", "event-log-2"),
         &TriggerEventRecord {
+            schema_version: "1.0.0".to_string(),
             run_id: "run-log".to_string(),
             sequence: 2,
             trigger_id: "trigger-log".to_string(),
+            workflow_id: "wf-log".to_string(),
             event_id: "event-log-2".to_string(),
+            checkpoint: None,
             source: "fixture".to_string(),
             accepted_at_ms: 1_710_500_000_021,
+            payload: serde_json::json!({"event": 2}),
             dedup_key: None,
             dedup_expires_at_ms: None,
             cooldown_key: None,
@@ -425,12 +436,16 @@ fn file_log_recovery_and_rotation_policy() {
     write_json_file(
         &layout.staged_trigger_record_path("run-log", 1, "trigger-log", "event-log"),
         &TriggerEventRecord {
+            schema_version: "1.0.0".to_string(),
             run_id: "run-log".to_string(),
             sequence: 1,
             trigger_id: "trigger-log".to_string(),
+            workflow_id: "wf-log".to_string(),
             event_id: "event-log".to_string(),
+            checkpoint: None,
             source: "fixture".to_string(),
             accepted_at_ms: 1_710_500_000_031,
+            payload: serde_json::json!({"event": 1}),
             dedup_key: None,
             dedup_expires_at_ms: None,
             cooldown_key: None,

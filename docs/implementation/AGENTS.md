@@ -12,3 +12,4 @@
 - `CHAINBOT_V212_CLI_IMPLEMENTATION.md`: Records the v2.1.2 CLI root-resolution contract update and release-version alignment.
 - `CHAINBOT_V213_CLI_IMPLEMENTATION.md`: Records the v2.1.3 CLI init bootstrap, trigger list command, and release-version alignment.
 - `CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`: Records the unified builtin namespace refactor, trait-backed registries, and final public API layout.
+- `CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`: Records the params-backed trigger extension model, builtin cron implementation, and validation coverage.

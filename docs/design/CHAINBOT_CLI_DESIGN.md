@@ -73,6 +73,9 @@ chainbot serve
 
 - 执行一次手动 workflow run。
 - 仅适用于可唯一确定 workflow 的 root。
+- 当 root 中只有一个 workflow package 时，直接执行该 workflow。
+- 当 root 中存在多个 workflow package 时，若只能推导出一个未被任何 subflow 引用的 top-level workflow，则执行该 workflow。
+- 若 top-level workflow 仍然不唯一，则返回 usage error，而不是猜测执行目标。
 
 ### `serve`
 

@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Covers workflow semantic rules before execution-plane scheduling begins.
 
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -194,13 +193,7 @@ fn subflow_contract_boundaries() {
             operation: "run".to_owned(),
             depends_mode: DependsMode::All,
             depends_on: vec![],
-            inputs: vec![VariableBinding {
-                target: "ticker".to_owned(),
-                source: VariableReference {
-                    namespace: RuntimeVariableNamespace::TriggerPayloadMapping,
-                    key: "symbol".to_owned(),
-                },
-            }],
+            inputs: vec![],
             when: Some(WhenCondition {
                 source: VariableReference {
                     namespace: RuntimeVariableNamespace::ManualInvocationInput,
@@ -282,6 +275,148 @@ fn invalid_dag_and_variable_fixtures_rejected() {
             key
         } if workflow_id == "wf-invalid-namespace" && node_id == "subflow-node" && namespace == "subflow_output" && key == "x"
     ));
+
+    let subflow_inputs_ignored_today = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-subflow-inputs".to_owned(),
+        name: "subflow-inputs".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![NodeDefinition {
+            api_version: "2.0.0".to_owned(),
+            node_id: "subflow-node".to_owned(),
+            kind: "subflow".to_owned(),
+            plugin_id: "builtin-subflow".to_owned(),
+            operation: "run".to_owned(),
+            depends_mode: DependsMode::All,
+            depends_on: vec![],
+            inputs: vec![VariableBinding {
+                target: "noop".to_owned(),
+                source: VariableReference {
+                    namespace: RuntimeVariableNamespace::RunScoped,
+                    key: "enabled".to_owned(),
+                },
+            }],
+            when: None,
+            subflow: Some(SubflowContract {
+                workflow_id: "wf-child".to_owned(),
+                imports: vec![],
+                exports: vec![],
+            }),
+        }],
+        package_root: PathBuf::new(),
+    };
+    let subflow_input_error = subflow_inputs_ignored_today
+        .validate()
+        .expect_err("subflow node.inputs should be rejected as misleading DSL");
+    assert!(matches!(
+        subflow_input_error,
+        ContractError::UnexpectedSubflowNodeInputs { workflow_id, node_id }
+            if workflow_id == "wf-subflow-inputs" && node_id == "subflow-node"
+    ));
+}
+
+#[test]
+fn subflow_call_dsl_and_variable_reference_shorthand_deserialize() {
+    let workflow: WorkflowDefinition = toml::from_str(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.when]\nsource = \"run.enabled\"\noperator = \"truthy\"\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = \"trigger.symbol\"\ndry_run = \"manual.dry_run\"\n\n[nodes.call.returns]\ndecision = \"subflow_decision\"\n",
+    )
+    .expect("subflow call DSL should deserialize");
+
+    let node = &workflow.nodes[0];
+    assert_eq!(node.kind, "subflow");
+    assert_eq!(node.plugin_id, "builtin-subflow");
+    assert_eq!(node.operation, "run");
+    assert_eq!(
+        node.when.as_ref().expect("when should deserialize").source,
+        VariableReference {
+            namespace: RuntimeVariableNamespace::RunScoped,
+            key: "enabled".to_owned(),
+        }
+    );
+
+    let contract = node
+        .subflow
+        .as_ref()
+        .expect("subflow contract should be lowered");
+    assert_eq!(contract.workflow_id, "wf-child");
+    assert_eq!(contract.imports.len(), 2);
+    assert_eq!(contract.exports.len(), 1);
+    assert_eq!(contract.imports[0].child_key, "dry_run");
+    assert_eq!(
+        contract.imports[0].source.namespace,
+        RuntimeVariableNamespace::ManualInvocationInput
+    );
+    assert_eq!(contract.imports[0].source.key, "dry_run");
+    assert_eq!(contract.imports[1].child_key, "ticker");
+    assert_eq!(
+        contract.imports[1].source.namespace,
+        RuntimeVariableNamespace::TriggerPayloadMapping
+    );
+    assert_eq!(contract.imports[1].source.key, "symbol");
+    assert_eq!(contract.exports[0].child_key, "decision");
+    assert_eq!(contract.exports[0].parent_key, "subflow_decision");
+}
+
+#[test]
+fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
+    let missing_workflow = toml::from_str::<WorkflowDefinition>(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call.with]\nticker = \"trigger.symbol\"\n",
+    )
+    .expect_err("missing subflow workflow should fail deserialization");
+    assert!(missing_workflow
+        .to_string()
+        .contains("missing field `workflow`"));
+
+    let invalid_reference = toml::from_str::<WorkflowDefinition>(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = \"trigger.symbol.price\"\n",
+    )
+    .expect_err("multi-segment shorthand keys should fail deserialization");
+    assert!(invalid_reference
+        .to_string()
+        .contains("key must be a single segment"));
+
+    let invalid_subflow_plugin = toml::from_str::<WorkflowDefinition>(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin.identity\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
+    )
+    .expect_err("non-canonical subflow plugin should fail deserialization");
+    assert!(invalid_subflow_plugin
+        .to_string()
+        .contains("must use plugin `builtin-subflow`"));
+
+    let invalid_subflow_operation = toml::from_str::<WorkflowDefinition>(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\noperation = \"custom\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
+    )
+    .expect_err("non-canonical subflow operation should fail deserialization");
+    assert!(invalid_subflow_operation
+        .to_string()
+        .contains("must use operation `run`"));
+
+    let legacy_subflow = toml::from_str::<WorkflowDefinition>(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin-subflow\"\noperation = \"run\"\ndepends_on = []\n\n[nodes.subflow]\nworkflow_id = \"wf-child\"\n",
+    )
+    .expect_err("legacy subflow syntax should be rejected");
+    assert!(legacy_subflow
+        .to_string()
+        .contains("unknown field `subflow`"));
+}
+
+#[test]
+fn structured_call_references_still_work() {
+    let structured_call: WorkflowDefinition = toml::from_str(
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = { namespace = \"trigger_payload_mapping\", key = \"symbol\" }\n",
+    )
+    .expect("structured call.with references should still deserialize");
+    let import = &structured_call.nodes[0]
+        .subflow
+        .as_ref()
+        .expect("contract")
+        .imports[0];
+    assert_eq!(import.child_key, "ticker");
+    assert_eq!(
+        import.source.namespace,
+        RuntimeVariableNamespace::TriggerPayloadMapping
+    );
+    assert_eq!(import.source.key, "symbol");
 }
 
 fn node(node_id: &str, depends_on: Vec<&str>) -> NodeDefinition {

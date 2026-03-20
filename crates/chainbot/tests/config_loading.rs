@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Covers the configuration loading boundary as an integration test.
 
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -17,6 +16,7 @@ use chainbot::config::{
     RootDefinitionBundle, RootLayout, CHAINBOT_CONFIG_DIR_ENV, DEFAULT_ROOT_DIR_NAME,
 };
 use chainbot::errors::ContractError;
+use chainbot::workflow::RuntimeVariableNamespace;
 
 #[test]
 fn config_root_layout() {
@@ -166,6 +166,53 @@ fn root_paths_overrides_and_plugin_discovery_are_applied() {
     assert_eq!(bundle.triggers[0].workflow_id, "wf-alpha");
 }
 
+#[test]
+fn workflow_subflow_call_dsl_is_lowered_during_loading() {
+    let root = unique_test_root("workflow-subflow-call-dsl");
+    write_subflow_call_fixture(&root);
+
+    let layout = RootLayout::from_root(root);
+    let bundle = RootDefinitionBundle::load(&layout).expect("subflow call fixture should load");
+    let workflow = bundle
+        .workflows
+        .iter()
+        .find(|workflow| workflow.workflow_id == "wf-parent")
+        .expect("parent workflow should load");
+    let node = workflow
+        .nodes
+        .iter()
+        .find(|node| node.node_id == "call-strategy")
+        .expect("subflow node should load");
+
+    assert_eq!(node.kind, "subflow");
+    assert_eq!(node.plugin_id, "builtin-subflow");
+    assert_eq!(node.operation, "run");
+
+    let contract = node
+        .subflow
+        .as_ref()
+        .expect("subflow call DSL should lower into canonical contract");
+    assert_eq!(contract.workflow_id, "wf-child");
+    assert_eq!(contract.imports.len(), 2);
+    assert_eq!(contract.exports.len(), 2);
+    assert_eq!(contract.imports[0].child_key, "dry_run");
+    assert_eq!(
+        contract.imports[0].source.namespace,
+        RuntimeVariableNamespace::ManualInvocationInput
+    );
+    assert_eq!(contract.imports[0].source.key, "dry_run");
+    assert_eq!(contract.imports[1].child_key, "symbol");
+    assert_eq!(
+        contract.imports[1].source.namespace,
+        RuntimeVariableNamespace::TriggerPayloadMapping
+    );
+    assert_eq!(contract.imports[1].source.key, "symbol");
+    assert_eq!(contract.exports[0].child_key, "decision");
+    assert_eq!(contract.exports[0].parent_key, "strategy_decision");
+    assert_eq!(contract.exports[1].child_key, "reason");
+    assert_eq!(contract.exports[1].parent_key, "strategy_reason");
+}
+
 fn unique_test_root(prefix: &str) -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -269,4 +316,48 @@ fn write_valid_fixture_with_overrides(root: &Path) {
         "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
     )
     .expect("override plugin fixture should be writable");
+}
+
+fn write_subflow_call_fixture(root: &Path) {
+    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
+    fs::create_dir_all(root.join("workflows").join("wf-parent"))
+        .expect("parent workflow package directory should be creatable");
+    fs::create_dir_all(root.join("workflows").join("wf-child"))
+        .expect("child workflow package directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("tr-market"))
+        .expect("trigger package directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("manifests"))
+        .expect("plugin manifests directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"subflow\"\n",
+    )
+    .expect("root config fixture should be writable");
+
+    fs::write(
+        root.join("workflows").join("wf-parent").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-strategy\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.when]\nsource = \"run.enabled\"\noperator = \"truthy\"\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nsymbol = \"trigger.symbol\"\ndry_run = \"manual.dry_run\"\n\n[nodes.call.returns]\ndecision = \"strategy_decision\"\nreason = \"strategy_reason\"\n",
+    )
+    .expect("parent workflow fixture should be writable");
+
+    fs::write(
+        root.join("workflows").join("wf-child").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-child\"\nname = \"child\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"emit\"\nkind = \"plugin\"\nplugin = \"quote-plugin\"\noperation = \"normalize\"\ndepends_on = []\n",
+    )
+    .expect("child workflow fixture should be writable");
+
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-parent\"\nenabled = true\n",
+    )
+    .expect("trigger fixture should be writable");
+
+    fs::write(
+        root.join("plugins").join("manifests").join("quote_plugin.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
+    )
+    .expect("plugin fixture should be writable");
 }

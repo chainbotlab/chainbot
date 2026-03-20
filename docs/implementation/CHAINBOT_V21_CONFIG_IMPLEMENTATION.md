@@ -27,7 +27,7 @@
 ## Implemented Contract Changes
 
 - `WorkflowDefinition` now parses v2.1 package manifests with `[workflow]` headers and no embedded triggers.
-- `TriggerDefinition` now owns `workflow_id`, optional `plugin`, and `input_mapping`.
+- `TriggerDefinition` now owns `workflow_id`, optional `plugin`, `params`, and `input_mapping`.
 - `PluginManifest` now resolves executable paths relative to the manifest file while enforcing containment under the shared `plugins/` root.
 - `RootDefinitionBundle::load` now validates cross-manifest invariants during load:
   - unique workflow ids

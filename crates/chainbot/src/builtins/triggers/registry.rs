@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::BuiltinTriggerRegistry;
 use crate::builtins::triggers::emitters::{
-    manual::ManualTriggerHandler, market_tick::MarketTickTriggerHandler,
+    cron::CronTriggerHandler, manual::ManualTriggerHandler, market_tick::MarketTickTriggerHandler,
 };
 use crate::errors::ContractError;
 use crate::trigger::{TriggerDefinition, TriggerEmission, TriggerKind};
@@ -30,8 +30,19 @@ pub fn build_builtin_trigger_emissions(
     Ok(emissions)
 }
 
+pub fn validate_builtin_trigger_definition(
+    definition: &TriggerDefinition,
+) -> Result<(), ContractError> {
+    if !matches!(definition.kind(), Ok(TriggerKind::Builtin)) {
+        return Ok(());
+    }
+
+    default_builtin_trigger_registry().validate_definition(definition)
+}
+
 pub(crate) fn default_builtin_trigger_registry() -> BuiltinTriggerRegistry {
     let mut registry = BuiltinTriggerRegistry::new();
+    registry.register_handler(CronTriggerHandler);
     registry.register_handler(ManualTriggerHandler);
     registry.register_handler(MarketTickTriggerHandler);
     registry
@@ -55,6 +66,7 @@ mod tests {
             TriggerEmission {
                 event_id: format!("fanout-a-{}", definition.trigger_id),
                 occurred_at_ms: context.now_ms,
+                checkpoint: None,
                 source: Some(definition.source.clone()),
                 payload: serde_json::json!({"kind": "fanout", "index": 1}),
                 dedup_key: None,
@@ -65,6 +77,7 @@ mod tests {
             TriggerEmission {
                 event_id: format!("fanout-b-{}", definition.trigger_id),
                 occurred_at_ms: context.now_ms,
+                checkpoint: None,
                 source: Some(definition.source.clone()),
                 payload: serde_json::json!({"kind": "fanout", "index": 2}),
                 dedup_key: None,
@@ -84,6 +97,7 @@ mod tests {
             plugin: None,
             workflow_id: format!("wf-{trigger_id}"),
             enabled: true,
+            params: BTreeMap::new(),
             input_mapping: BTreeMap::new(),
             package_root: PathBuf::new(),
         }
@@ -107,6 +121,30 @@ mod tests {
         assert_eq!(
             emissions["market-trigger"][0].payload,
             serde_json::json!({"kind": "market_tick", "source": "market_tick", "symbol": "BTCUSDT"})
+        );
+    }
+
+    #[test]
+    fn build_builtin_trigger_emissions_supports_params_backed_subtypes() {
+        let mut cron_trigger = trigger_definition("cron-trigger", "builtin", "cron");
+        cron_trigger.params =
+            BTreeMap::from([(String::from("schedule"), serde_json::json!("*/15 * * * *"))]);
+
+        let mut market_trigger = trigger_definition("market-trigger", "builtin", "market_tick");
+        market_trigger.params =
+            BTreeMap::from([(String::from("symbol"), serde_json::json!("ETHUSDT"))]);
+
+        let emissions =
+            build_builtin_trigger_emissions(&[cron_trigger, market_trigger], 1_736_172_900_123)
+                .expect("params-backed builtin triggers should emit events");
+
+        assert_eq!(
+            emissions["cron-trigger"][0].event_id,
+            "cron:cron-trigger:1736172900000"
+        );
+        assert_eq!(
+            emissions["market-trigger"][0].payload,
+            serde_json::json!({"kind": "market_tick", "source": "market_tick", "symbol": "ETHUSDT"})
         );
     }
 

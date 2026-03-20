@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
+
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::errors::ContractError;
 use crate::trigger::{TriggerDefinition, TriggerEmission};
@@ -10,6 +12,10 @@ pub type BuiltinTriggerEmitter =
 
 pub trait BuiltinTriggerHandler: Send + Sync {
     fn kind(&self) -> &str;
+
+    fn validate(&self, _definition: &TriggerDefinition) -> Result<(), ContractError> {
+        Ok(())
+    }
 
     fn emit(
         &self,
@@ -56,6 +62,7 @@ impl BuiltinTriggerRegistry {
         context: &BuiltinTriggerContext,
         definition: &TriggerDefinition,
     ) -> Result<Vec<TriggerEmission>, ContractError> {
+        self.validate_definition(definition)?;
         let builtin_kind = crate::builtins::triggers::dispatch::builtin_trigger_kind(definition)?;
         let emitter = self.emitters.get(builtin_kind).ok_or_else(|| {
             ContractError::InvalidTriggerDefinitionField {
@@ -66,6 +73,38 @@ impl BuiltinTriggerRegistry {
         })?;
         emitter.emit(context, definition)
     }
+
+    pub fn validate_definition(&self, definition: &TriggerDefinition) -> Result<(), ContractError> {
+        let builtin_kind = crate::builtins::triggers::dispatch::builtin_trigger_kind(definition)?;
+        let emitter = self.emitters.get(builtin_kind).ok_or_else(|| {
+            ContractError::InvalidTriggerDefinitionField {
+                trigger_id: definition.trigger_id.clone(),
+                field: "trigger.source",
+                detail: format!("unknown builtin trigger source {builtin_kind}"),
+            }
+        })?;
+        emitter.validate(definition)
+    }
+}
+
+pub(crate) fn decode_builtin_trigger_params<T>(
+    definition: &TriggerDefinition,
+) -> Result<T, ContractError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(serde_json::to_value(&definition.params).map_err(|source| {
+        ContractError::InvalidTriggerDefinitionField {
+            trigger_id: definition.trigger_id.clone(),
+            field: "trigger.params",
+            detail: format!("failed to serialize trigger params: {source}"),
+        }
+    })?)
+    .map_err(|source| ContractError::InvalidTriggerDefinitionField {
+        trigger_id: definition.trigger_id.clone(),
+        field: "trigger.params",
+        detail: source.to_string(),
+    })
 }
 
 struct FunctionBuiltinTriggerHandler {
