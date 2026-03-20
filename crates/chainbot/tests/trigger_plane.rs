@@ -18,8 +18,8 @@ use chainbot::errors::ContractError;
 use chainbot::plugin::PluginManifest;
 use chainbot::state::{StateLayout, TriggerEventRecord};
 use chainbot::trigger::{
-    TriggerDefinition, TriggerEmission, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy,
-    TriggerPluginInput, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+    TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlane, TriggerPlaneError,
+    TriggerPluginHostPolicy, TriggerStartCommand, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use rusqlite::Connection;
 
@@ -29,7 +29,7 @@ fn trigger_plugin_manifest_validation() {
     let valid_plugin_path = plugin_root.join("valid-trigger.sh");
     write_executable_script(
         &valid_plugin_path,
-        "{\"api_version\":\"2.0.0\",\"events\":[]}",
+        "{\"type\":\"heartbeat\",\"at_ms\":1710100000000}",
     );
 
     let definitions = vec![trigger_definition(
@@ -333,7 +333,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
     let external_plugin_path = plugin_root.join("plugin-external.sh");
     write_executable_script(
         &external_plugin_path,
-        "{\"api_version\":\"2.0.0\",\"events\":[{\"event_id\":\"event/ext\",\"occurred_at_ms\":1710100020000,\"source\":\"plugin-source\",\"payload\":{\"side\":\"sell\"}}]}",
+        "{\"type\":\"event\",\"checkpoint\":\"cp-ext\",\"event_key\":\"event/ext\",\"occurred_at_ms\":1710100020000,\"payload\":{\"side\":\"sell\"}}",
     );
 
     let definitions = vec![
@@ -361,6 +361,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
             vec![TriggerEmission {
                 event_id: "event-builtin".to_string(),
                 occurred_at_ms: 1_710_100_020_000,
+                checkpoint: None,
                 source: Some("builtin-source".to_string()),
                 payload: serde_json::json!({"side": "buy"}),
                 dedup_key: None,
@@ -389,7 +390,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
         request.workflow_id == "wf-builtin" && request.event_id == "event-builtin"
     }));
     assert!(requests.iter().any(|request| {
-        request.workflow_id == "wf-external" && request.event_id == "event/ext"
+        request.workflow_id == "wf-external" && request.event_id == "external-trigger:event/ext"
     }));
 }
 
@@ -411,6 +412,7 @@ fn trigger_records_are_file_backed() {
             vec![TriggerEmission {
                 event_id: "btc/usdt@1m".to_string(),
                 occurred_at_ms: 1_710_100_030_000,
+                checkpoint: None,
                 source: Some("builtin-feed".to_string()),
                 payload: serde_json::json!({"price": 64000}),
                 dedup_key: None,
@@ -475,6 +477,7 @@ fn builtin_trigger_kind_aliases_are_accepted() {
                 vec![TriggerEmission {
                     event_id: "manual-event".to_string(),
                     occurred_at_ms: 1_710_100_040_000,
+                    checkpoint: None,
                     source: Some("manual-source".to_string()),
                     payload: serde_json::json!({"kind": "manual"}),
                     dedup_key: None,
@@ -488,6 +491,7 @@ fn builtin_trigger_kind_aliases_are_accepted() {
                 vec![TriggerEmission {
                     event_id: "market-event".to_string(),
                     occurred_at_ms: 1_710_100_040_001,
+                    checkpoint: None,
                     source: Some("market-feed".to_string()),
                     payload: serde_json::json!({"kind": "market_tick"}),
                     dedup_key: None,
@@ -806,15 +810,69 @@ fn external_trigger_plugin_receives_params_via_stdin_protocol() {
         .expect("external trigger plugin should receive params and emit a request");
     assert_eq!(requests.len(), 1);
 
-    let captured_input: TriggerPluginInput = serde_json::from_str(
+    let captured_input: TriggerHostMessage = serde_json::from_str(
         &fs::read_to_string(&input_capture_path)
             .expect("captured trigger plugin input should be readable"),
     )
     .expect("captured trigger plugin input should decode");
-    assert_eq!(captured_input.trigger_id, "external-trigger");
-    assert_eq!(captured_input.source, "plugin-params");
-    assert_eq!(captured_input.params["region"], serde_json::json!("apac"));
-    assert_eq!(captured_input.params["threshold"], serde_json::json!(12));
+    let TriggerHostMessage::Start(TriggerStartCommand {
+        trigger_id,
+        source,
+        params,
+        ..
+    }) = captured_input
+    else {
+        panic!("expected start message");
+    };
+    assert_eq!(trigger_id, "external-trigger");
+    assert_eq!(source, "plugin-params");
+    assert_eq!(params["region"], serde_json::json!("apac"));
+    assert_eq!(params["threshold"], serde_json::json!(12));
+}
+
+#[test]
+fn external_trigger_plugin_rejects_event_before_ready() {
+    let (state_layout, plugin_root) = unique_layout("trigger-plugin-event-before-ready");
+    let executable = plugin_root.join("plugin-bad-order.sh");
+    write_protocol_script(
+        &executable,
+        "printf '%s\n' '{\"type\":\"event\",\"checkpoint\":\"cp-bad\",\"event_key\":\"bad-order\",\"occurred_at_ms\":1710100080000,\"payload\":{\"kind\":\"probe\"}}'\nprintf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
+    );
+
+    let manifests = vec![plugin_manifest(
+        "plugin-bad-order",
+        "2.0.0",
+        "trigger",
+        "plugin-bad-order.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+    let definitions = vec![trigger_definition(
+        "external-trigger",
+        "external_plugin",
+        "plugin-bad-order",
+    )];
+
+    let mut plane = TriggerPlane::open(
+        state_layout,
+        definitions,
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-bad-order"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+        1_710_100_080_000,
+    )
+    .expect("trigger plane should open for protocol-order validation");
+
+    let error = plane
+        .collect_run_requests(1_710_100_080_010)
+        .expect_err("event before ready should fail");
+    assert!(matches!(
+        error,
+        TriggerPlaneError::Contract(ContractError::TriggerPluginProtocolContractViolation { .. })
+    ));
 }
 
 fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefinition {
@@ -889,6 +947,7 @@ fn builtin_event(
     TriggerEmission {
         event_id: event_id.to_string(),
         occurred_at_ms: 1_710_100_010_000,
+        checkpoint: None,
         source: Some("builtin-source".to_string()),
         payload: serde_json::json!({"event": event_id}),
         dedup_key: Some(dedup_key.to_string()),
@@ -931,7 +990,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn write_executable_script(path: &Path, json_payload: &str) {
-    let script = format!("#!/bin/sh\ncat <<'JSON'\n{json_payload}\nJSON\n");
+    let script = format!(
+        "#!/bin/sh\nIFS= read -r _start_line\nprintf '%s\n' '{{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}}'\nprintf '%s\n' '{json_payload}'\n"
+    );
     fs::write(path, script).expect("script fixture should be writable");
 
     #[cfg(unix)]
@@ -947,7 +1008,7 @@ fn write_executable_script(path: &Path, json_payload: &str) {
 
 fn write_trigger_env_probe_script(path: &Path, probe_key: &str, marker_path: &Path) {
     let script = format!(
-        "#!/bin/sh\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\ncat <<'JSON'\n{{\"api_version\":\"2.0.0\",\"events\":[{{\"event_id\":\"event-env\",\"occurred_at_ms\":1710100060000,\"source\":\"env-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
+        "#!/bin/sh\nIFS= read -r _start_line\nif [ -n \"$(printenv '{probe_key}' 2>/dev/null)\" ]; then\n  printf 'leaked' > \"{}\"\nfi\nprintf '%s\n' '{{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}}'\nprintf '%s\n' '{{\"type\":\"event\",\"checkpoint\":\"cp-env\",\"event_key\":\"event-env\",\"occurred_at_ms\":1710100060000,\"payload\":{{\"kind\":\"probe\"}}}}'\n",
         marker_path.display()
     );
     fs::write(path, script).expect("script fixture should be writable");
@@ -965,7 +1026,7 @@ fn write_trigger_env_probe_script(path: &Path, probe_key: &str, marker_path: &Pa
 
 fn write_trigger_input_capture_script(path: &Path, input_capture_path: &Path) {
     let script = format!(
-        "#!/bin/sh\ncat > \"{}\"\ncat <<'JSON'\n{{\"api_version\":\"2.0.0\",\"events\":[{{\"event_id\":\"event-params\",\"occurred_at_ms\":1710100070000,\"source\":\"params-probe\",\"payload\":{{\"kind\":\"probe\"}}}}]}}\nJSON\n",
+        "#!/bin/sh\nIFS= read -r first_line\nprintf '%s' \"$first_line\" > \"{}\"\nprintf '%s\n' '{{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}}'\nprintf '%s\n' '{{\"type\":\"event\",\"checkpoint\":\"cp-params\",\"event_key\":\"event-params\",\"occurred_at_ms\":1710100070000,\"payload\":{{\"kind\":\"probe\"}}}}'\n",
         input_capture_path.display()
     );
     fs::write(path, script).expect("script fixture should be writable");
@@ -978,6 +1039,21 @@ fn write_trigger_input_capture_script(path: &Path, input_capture_path: &Path) {
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).expect("script fixture should become executable");
+    }
+}
+
+fn write_protocol_script(path: &Path, body: &str) {
+    let script = format!("#!/bin/sh\nIFS= read -r _start_line\n{body}");
+    fs::write(path, script).expect("protocol script should be writable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("protocol script metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("protocol script should become executable");
     }
 }
 

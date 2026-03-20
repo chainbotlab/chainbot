@@ -78,6 +78,7 @@ impl BuiltinTriggerHandler for CronTriggerHandler {
         Ok(vec![TriggerEmission {
             event_id: event_id.clone(),
             occurred_at_ms: slot_start_ms,
+            checkpoint: None,
             source: Some(definition.source.clone()),
             payload: serde_json::json!({
                 "kind": BUILTIN_TRIGGER_CRON_KIND,

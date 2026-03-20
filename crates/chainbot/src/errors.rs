@@ -242,6 +242,14 @@ pub enum ContractError {
         plugin_id: String,
         source: serde_json::Error,
     },
+    TriggerPluginProtocolContractViolation {
+        plugin_id: String,
+        detail: String,
+    },
+    TriggerPluginReturnedFailure {
+        plugin_id: String,
+        message: String,
+    },
     NodePluginInvalidField {
         plugin_id: String,
         field: &'static str,
@@ -726,6 +734,13 @@ impl Display for ContractError {
                 f,
                 "failed to decode trigger plugin {plugin_id} output JSON: {source}"
             ),
+            Self::TriggerPluginProtocolContractViolation { plugin_id, detail } => write!(
+                f,
+                "trigger plugin {plugin_id} protocol contract violation: {detail}"
+            ),
+            Self::TriggerPluginReturnedFailure { plugin_id, message } => {
+                write!(f, "trigger plugin {plugin_id} returned failure: {message}")
+            }
             Self::NodePluginInvalidField {
                 plugin_id,
                 field,

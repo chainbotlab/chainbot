@@ -10,7 +10,6 @@
 //! [INVARIANTS]
 //! Persisted run and trigger artifacts remain append-only, and state paths stay deterministic across restarts.
 
-
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File};
@@ -31,6 +30,7 @@ pub const COORDINATION_DB_FILE_NAME: &str = "coordination.sqlite3";
 pub const RUNS_DIR_NAME: &str = "runs";
 pub const WORKFLOW_LOGS_DIR_NAME: &str = "workflow-logs";
 pub const TRIGGER_RECORDS_DIR_NAME: &str = "trigger-records";
+pub const TRIGGER_CHECKPOINTS_DIR_NAME: &str = "trigger-checkpoints";
 pub const SERVE_OWNER_ID_PREFIX: &str = "chainbot-serve-pid-";
 
 const RUN_SUMMARY_FILE_NAME: &str = "summary.json";
@@ -68,12 +68,20 @@ pub struct WorkflowRuntimeLogEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerEventRecord {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
     pub run_id: String,
     pub sequence: u64,
     pub trigger_id: String,
+    #[serde(default)]
+    pub workflow_id: String,
     pub event_id: String,
+    #[serde(default)]
+    pub checkpoint: Option<String>,
     pub source: String,
     pub accepted_at_ms: i64,
+    #[serde(default)]
+    pub payload: serde_json::Value,
     #[serde(default)]
     pub dedup_key: Option<String>,
     #[serde(default)]
@@ -84,6 +92,15 @@ pub struct TriggerEventRecord {
     pub cooldown_expires_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerCheckpointRecord {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
+    pub trigger_id: String,
+    pub checkpoint: String,
+    pub acked_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateLayout {
     pub state_root: PathBuf,
@@ -91,6 +108,7 @@ pub struct StateLayout {
     pub runs_dir: PathBuf,
     pub workflow_logs_dir: PathBuf,
     pub trigger_records_dir: PathBuf,
+    pub trigger_checkpoints_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +225,10 @@ impl RunRecordSummary {
     }
 }
 
+fn default_schema_version() -> String {
+    String::from("1.0.0")
+}
+
 impl StateLayout {
     pub fn from_root_layout(root_layout: &RootLayout) -> Self {
         Self::from_state_root(root_layout.state_dir.clone())
@@ -218,6 +240,7 @@ impl StateLayout {
             runs_dir: state_root.join(RUNS_DIR_NAME),
             workflow_logs_dir: state_root.join(WORKFLOW_LOGS_DIR_NAME),
             trigger_records_dir: state_root.join(TRIGGER_RECORDS_DIR_NAME),
+            trigger_checkpoints_dir: state_root.join(TRIGGER_CHECKPOINTS_DIR_NAME),
             state_root,
         }
     }
@@ -227,6 +250,7 @@ impl StateLayout {
         create_dir_all_file_state(&self.runs_dir)?;
         create_dir_all_file_state(&self.workflow_logs_dir)?;
         create_dir_all_file_state(&self.trigger_records_dir)?;
+        create_dir_all_file_state(&self.trigger_checkpoints_dir)?;
         Ok(())
     }
 
@@ -272,6 +296,15 @@ impl StateLayout {
         event_id: &str,
     ) -> PathBuf {
         staged_path(&self.trigger_record_path(run_id, sequence, trigger_id, event_id))
+    }
+
+    pub fn trigger_checkpoint_path(&self, trigger_id: &str) -> PathBuf {
+        self.trigger_checkpoints_dir
+            .join(format!("{}.json", sanitize_path_component(trigger_id)))
+    }
+
+    pub fn staged_trigger_checkpoint_path(&self, trigger_id: &str) -> PathBuf {
+        staged_path(&self.trigger_checkpoint_path(trigger_id))
     }
 }
 
@@ -399,6 +432,7 @@ impl FileBackedStateStore {
         &self,
         entry: &TriggerEventRecord,
     ) -> Result<PathBuf, FileStateError> {
+        self.layout.ensure_state_tree()?;
         let path = self.layout.trigger_record_path(
             &entry.run_id,
             entry.sequence,
@@ -408,6 +442,31 @@ impl FileBackedStateStore {
         let staged = staged_path(&path);
         atomic_write_json_append_only(&path, &staged, entry, "append trigger record")?;
         Ok(path)
+    }
+
+    pub fn write_trigger_checkpoint(
+        &self,
+        entry: &TriggerCheckpointRecord,
+    ) -> Result<PathBuf, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let path = self.layout.trigger_checkpoint_path(&entry.trigger_id);
+        let staged = self
+            .layout
+            .staged_trigger_checkpoint_path(&entry.trigger_id);
+        atomic_write_json_file(&path, &staged, entry, "write trigger checkpoint")?;
+        Ok(path)
+    }
+
+    pub fn read_trigger_checkpoint(
+        &self,
+        trigger_id: &str,
+    ) -> Result<Option<TriggerCheckpointRecord>, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let path = self.layout.trigger_checkpoint_path(trigger_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        load_json_file(&path).map(Some)
     }
 
     pub fn recover_workflow_logs(&self) -> Result<FileArtifactRecoveryReport, FileStateError> {
@@ -1352,6 +1411,18 @@ where
         });
     }
 
+    atomic_write_json(path, staged_path, value)
+}
+
+fn atomic_write_json_file<T>(
+    path: &Path,
+    staged_path: &Path,
+    value: &T,
+    _operation: &'static str,
+) -> Result<(), FileStateError>
+where
+    T: Serialize,
+{
     atomic_write_json(path, staged_path, value)
 }
 

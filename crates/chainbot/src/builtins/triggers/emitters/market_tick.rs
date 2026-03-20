@@ -43,6 +43,7 @@ impl BuiltinTriggerHandler for MarketTickTriggerHandler {
         Ok(vec![TriggerEmission {
             event_id: format!("builtin-event-{}", definition.trigger_id),
             occurred_at_ms: context.now_ms,
+            checkpoint: None,
             source: Some(definition.source.clone()),
             payload: serde_json::json!({
                 "kind": BUILTIN_TRIGGER_MARKET_TICK_KIND,

@@ -13,9 +13,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +28,11 @@ use crate::errors::{assert_supported_major, ContractError};
 use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifest};
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
-    FileStateError, StateLayout, TriggerEventRecord,
+    FileStateError, StateLayout, TriggerCheckpointRecord, TriggerEventRecord,
 };
 
 pub const CURRENT_API_MAJOR: u64 = 2;
-pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.emit.run_request";
+pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.listen.event";
 pub const TRIGGER_KIND_BUILTIN: &str = "builtin";
 pub const TRIGGER_KIND_CRON_ALIAS: &str = "cron";
 pub const TRIGGER_KIND_MANUAL_ALIAS: &str = "manual";
@@ -68,6 +72,8 @@ pub struct TriggerEmission {
     pub event_id: String,
     pub occurred_at_ms: i64,
     #[serde(default)]
+    pub checkpoint: Option<String>,
+    #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
     pub payload: serde_json::Value,
@@ -82,18 +88,76 @@ pub struct TriggerEmission {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TriggerPluginOutput {
-    pub api_version: String,
-    pub events: Vec<TriggerEmission>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TriggerPluginInput {
-    pub api_version: String,
+pub struct TriggerStartCommand {
+    pub protocol_version: String,
     pub trigger_id: String,
     pub source: String,
     #[serde(default)]
     pub params: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub resume_checkpoint: Option<String>,
+    pub heartbeat_interval_ms: i64,
+    pub shutdown_grace_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerAck {
+    pub checkpoint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerStop {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerHostMessage {
+    Start(TriggerStartCommand),
+    Ack(TriggerAck),
+    Stop(TriggerStop),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerReady {
+    pub protocol_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerEventFrame {
+    pub checkpoint: String,
+    pub event_key: String,
+    pub occurred_at_ms: i64,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub dedup_key: Option<String>,
+    #[serde(default)]
+    pub dedup_window_ms: Option<i64>,
+    #[serde(default)]
+    pub cooldown_key: Option<String>,
+    #[serde(default)]
+    pub cooldown_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerHeartbeat {
+    pub at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerFatal {
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerPluginMessage {
+    Ready(TriggerReady),
+    Event(TriggerEventFrame),
+    Heartbeat(TriggerHeartbeat),
+    Fatal(TriggerFatal),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +201,21 @@ pub enum TriggerPlaneError {
 struct ExternalTriggerPlugin {
     plugin_id: String,
     executable_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenerSessionState {
+    WaitingReady,
+    Active,
+    Draining,
+    Stopped,
+}
+
+#[derive(Debug)]
+enum ListenerFrame {
+    Stdout(String),
+    StdoutClosed,
+    StdoutError(std::io::Error),
 }
 
 impl TriggerDefinition {
@@ -190,24 +269,60 @@ impl TriggerDefinition {
     }
 }
 
-impl TriggerPluginOutput {
+impl TriggerStartCommand {
     pub fn validate(&self) -> Result<(), ContractError> {
         assert_supported_major(
-            "trigger_plugin_output.api_version",
-            &self.api_version,
+            "trigger_start_command.protocol_version",
+            &self.protocol_version,
             CURRENT_API_MAJOR,
         )
     }
 }
 
-impl TriggerPluginInput {
+impl TriggerHostMessage {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
-            "trigger_plugin_input.api_version",
-            &self.api_version,
-            CURRENT_API_MAJOR,
-        )?;
-        Ok(())
+        match self {
+            Self::Start(start) => start.validate(),
+            Self::Ack(_) | Self::Stop(_) => Ok(()),
+        }
+    }
+}
+
+impl ListenerSessionState {
+    fn protocol_error(self, plugin_id: &str, detail: impl Into<String>) -> ContractError {
+        ContractError::TriggerPluginProtocolContractViolation {
+            plugin_id: plugin_id.to_owned(),
+            detail: detail.into(),
+        }
+    }
+
+    fn handle_message(
+        self,
+        plugin_id: &str,
+        message: &TriggerPluginMessage,
+    ) -> Result<Self, ContractError> {
+        match (self, message) {
+            (Self::WaitingReady, TriggerPluginMessage::Ready(_)) => Ok(Self::Active),
+            (Self::WaitingReady, TriggerPluginMessage::Heartbeat(_)) => {
+                Err(self.protocol_error(plugin_id, "received heartbeat before ready"))
+            }
+            (Self::WaitingReady, TriggerPluginMessage::Event(_)) => {
+                Err(self.protocol_error(plugin_id, "received event before ready"))
+            }
+            (Self::WaitingReady, TriggerPluginMessage::Fatal(_)) => Ok(Self::Draining),
+            (Self::Active, TriggerPluginMessage::Ready(_)) => {
+                Err(self.protocol_error(plugin_id, "received duplicate ready message"))
+            }
+            (Self::Active, TriggerPluginMessage::Heartbeat(_))
+            | (Self::Active, TriggerPluginMessage::Event(_)) => Ok(Self::Active),
+            (Self::Active, TriggerPluginMessage::Fatal(_)) => Ok(Self::Draining),
+            (Self::Draining | Self::Stopped, TriggerPluginMessage::Ready(_))
+            | (Self::Draining | Self::Stopped, TriggerPluginMessage::Heartbeat(_))
+            | (Self::Draining | Self::Stopped, TriggerPluginMessage::Event(_))
+            | (Self::Draining | Self::Stopped, TriggerPluginMessage::Fatal(_)) => {
+                Err(self.protocol_error(plugin_id, "received message after listener stopped"))
+            }
+        }
     }
 }
 
@@ -267,10 +382,22 @@ impl TriggerPlane {
         &mut self,
         accepted_at_ms: i64,
     ) -> Result<Vec<TriggerRunRequest>, TriggerPlaneError> {
+        self.collect_run_requests_with_progress(accepted_at_ms, &mut || Ok(()))
+    }
+
+    pub fn collect_run_requests_with_progress<F>(
+        &mut self,
+        accepted_at_ms: i64,
+        on_progress: &mut F,
+    ) -> Result<Vec<TriggerRunRequest>, TriggerPlaneError>
+    where
+        F: FnMut() -> Result<(), TriggerPlaneError>,
+    {
         let mut run_requests = Vec::new();
 
         let definitions = self.definitions.clone();
         for definition in definitions {
+            on_progress()?;
             if !definition.enabled {
                 continue;
             }
@@ -294,7 +421,7 @@ impl TriggerPlane {
                             plugin_id: plugin_id.to_owned(),
                         }
                     })?;
-                    plugin.emit(&definition)?
+                    plugin.stream_emissions(&self.state_store, &definition, on_progress)?
                 }
             };
 
@@ -394,13 +521,19 @@ impl TriggerPlane {
             ));
         }
 
+        let payload = map_trigger_payload(definition, &emission.payload);
+        let checkpoint = emission.checkpoint.clone();
         let trigger_record = TriggerEventRecord {
+            schema_version: String::from("1.0.0"),
             run_id: run_id.clone(),
             sequence: self.accepted_sequence,
             trigger_id: definition.trigger_id.clone(),
+            workflow_id: definition.workflow_id.clone(),
             event_id: emission.event_id.clone(),
+            checkpoint: checkpoint.clone(),
             source: source.clone(),
             accepted_at_ms,
+            payload: payload.clone(),
             dedup_key,
             dedup_expires_at_ms,
             cooldown_key,
@@ -410,6 +543,15 @@ impl TriggerPlane {
         let trigger_record_path = self.state_store.write_trigger_record(&trigger_record)?;
         self.coordination_store
             .apply_trigger_record_coordination(&trigger_record, accepted_at_ms)?;
+        if let Some(checkpoint) = checkpoint {
+            self.state_store
+                .write_trigger_checkpoint(&TriggerCheckpointRecord {
+                    schema_version: String::from("1.0.0"),
+                    trigger_id: definition.trigger_id.clone(),
+                    checkpoint,
+                    acked_at_ms: accepted_at_ms,
+                })?;
+        }
         self.accepted_event_keys.insert(accepted_event_key);
 
         Ok(Some(TriggerRunRequest {
@@ -419,7 +561,7 @@ impl TriggerPlane {
             event_id: emission.event_id,
             source,
             accepted_at_ms,
-            payload: map_trigger_payload(definition, &emission.payload),
+            payload,
             trigger_record_path,
         }))
     }
@@ -619,17 +761,34 @@ fn validate_non_empty_field(
 }
 
 impl ExternalTriggerPlugin {
-    fn emit(&self, definition: &TriggerDefinition) -> Result<Vec<TriggerEmission>, ContractError> {
+    fn stream_emissions<F>(
+        &self,
+        state_store: &FileBackedStateStore,
+        definition: &TriggerDefinition,
+        on_progress: &mut F,
+    ) -> Result<Vec<TriggerEmission>, ContractError>
+    where
+        F: FnMut() -> Result<(), TriggerPlaneError>,
+    {
         validate_existing_executable(&self.plugin_id, &self.executable_path)?;
 
-        let input = TriggerPluginInput {
-            api_version: String::from("2.0.0"),
+        let input = TriggerHostMessage::Start(TriggerStartCommand {
+            protocol_version: String::from("2.0.0"),
             trigger_id: definition.trigger_id.clone(),
             source: definition.source.clone(),
             params: definition.params.clone(),
-        };
+            resume_checkpoint: state_store
+                .read_trigger_checkpoint(&definition.trigger_id)
+                .map_err(|error| ContractError::InvalidTriggerEmission {
+                    trigger_id: definition.trigger_id.clone(),
+                    detail: error.to_string(),
+                })?
+                .map(|record| record.checkpoint),
+            heartbeat_interval_ms: 5_000,
+            shutdown_grace_ms: 10_000,
+        });
         input.validate()?;
-        let encoded_input = serde_json::to_vec(&input).map_err(|source| {
+        let encoded_input = serde_json::to_string(&input).map_err(|source| {
             ContractError::TriggerPluginProtocolEncode {
                 plugin_id: self.plugin_id.clone(),
                 source,
@@ -655,42 +814,320 @@ impl ExternalTriggerPlugin {
                 })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&encoded_input).map_err(|source| {
-                ContractError::TriggerPluginProcessIo {
+            stdin
+                .write_all(encoded_input.as_bytes())
+                .map_err(|source| ContractError::TriggerPluginProcessIo {
                     plugin_id: self.plugin_id.clone(),
                     operation: "write stdin",
                     source,
-                }
-            })?;
-        }
+                })?;
+            stdin
+                .write_all(b"\n")
+                .map_err(|source| ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "write stdin delimiter",
+                    source,
+                })?;
+            stdin
+                .flush()
+                .map_err(|source| ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "flush stdin",
+                    source,
+                })?;
 
-        let output =
-            child
-                .wait_with_output()
+            let stdout =
+                child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| ContractError::TriggerPluginProcessIo {
+                        plugin_id: self.plugin_id.clone(),
+                        operation: "capture stdout",
+                        source: std::io::Error::other("missing stdout pipe"),
+                    })?;
+            let stderr =
+                child
+                    .stderr
+                    .take()
+                    .ok_or_else(|| ContractError::TriggerPluginProcessIo {
+                        plugin_id: self.plugin_id.clone(),
+                        operation: "capture stderr",
+                        source: std::io::Error::other("missing stderr pipe"),
+                    })?;
+
+            let stderr_handle = thread::spawn(move || -> std::io::Result<String> {
+                let mut reader = BufReader::new(stderr);
+                let mut output = String::new();
+                reader.read_to_string(&mut output)?;
+                Ok(output)
+            });
+
+            let (stdout_tx, stdout_rx) = mpsc::channel();
+            let stdout_handle = thread::spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            let _ = stdout_tx.send(ListenerFrame::StdoutClosed);
+                            break;
+                        }
+                        Ok(_) => {
+                            let _ = stdout_tx.send(ListenerFrame::Stdout(line));
+                        }
+                        Err(source) => {
+                            let _ = stdout_tx.send(ListenerFrame::StdoutError(source));
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let mut emissions = Vec::new();
+            let mut state = ListenerSessionState::WaitingReady;
+            let heartbeat_interval_ms = input_heartbeat_interval_ms(&input);
+            let mut last_activity_ms = contract_now_ms(definition)?;
+
+            loop {
+                let now_ms = contract_now_ms(definition)?;
+                let timeout_ms = match state {
+                    ListenerSessionState::WaitingReady => heartbeat_interval_ms,
+                    ListenerSessionState::Active => {
+                        let deadline = last_activity_ms.saturating_add(heartbeat_interval_ms * 2);
+                        deadline
+                            .saturating_sub(now_ms)
+                            .clamp(1, heartbeat_interval_ms)
+                    }
+                    ListenerSessionState::Draining | ListenerSessionState::Stopped => 1,
+                };
+
+                match stdout_rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
+                    Ok(ListenerFrame::Stdout(line)) => {
+                        on_progress().map_err(progress_to_contract_error(definition))?;
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let message: TriggerPluginMessage =
+                            serde_json::from_str(trimmed).map_err(|source| {
+                                ContractError::TriggerPluginOutputDecode {
+                                    plugin_id: self.plugin_id.clone(),
+                                    source,
+                                }
+                            })?;
+                        state = state.handle_message(&self.plugin_id, &message)?;
+                        last_activity_ms = contract_now_ms(definition)?;
+
+                        match message {
+                            TriggerPluginMessage::Ready(_) | TriggerPluginMessage::Heartbeat(_) => {
+                            }
+                            TriggerPluginMessage::Fatal(fatal) => {
+                                let _ = request_plugin_stop(
+                                    &self.plugin_id,
+                                    &mut stdin,
+                                    TriggerStop {
+                                        reason: String::from("plugin_fatal"),
+                                    },
+                                );
+                                let _ = child.kill();
+                                let _ = stdout_handle.join();
+                                return Err(ContractError::TriggerPluginReturnedFailure {
+                                    plugin_id: self.plugin_id.clone(),
+                                    message: fatal.message,
+                                });
+                            }
+                            TriggerPluginMessage::Event(event) => {
+                                emissions.push(TriggerEmission {
+                                    event_id: format!(
+                                        "{}:{}",
+                                        definition.trigger_id, event.event_key
+                                    ),
+                                    occurred_at_ms: event.occurred_at_ms,
+                                    checkpoint: Some(event.checkpoint.clone()),
+                                    source: Some(definition.source.clone()),
+                                    payload: event.payload,
+                                    dedup_key: event.dedup_key,
+                                    dedup_window_ms: event.dedup_window_ms,
+                                    cooldown_key: event.cooldown_key,
+                                    cooldown_ms: event.cooldown_ms,
+                                });
+
+                                let ack = TriggerHostMessage::Ack(TriggerAck {
+                                    checkpoint: event.checkpoint,
+                                });
+                                let encoded_ack =
+                                    serde_json::to_string(&ack).map_err(|source| {
+                                        ContractError::TriggerPluginProtocolEncode {
+                                            plugin_id: self.plugin_id.clone(),
+                                            source,
+                                        }
+                                    })?;
+                                if let Err(source) = stdin
+                                    .write_all(encoded_ack.as_bytes())
+                                    .and_then(|_| stdin.write_all(b"\n"))
+                                    .and_then(|_| stdin.flush())
+                                {
+                                    if source.kind() != std::io::ErrorKind::BrokenPipe {
+                                        return Err(ContractError::TriggerPluginProcessIo {
+                                            plugin_id: self.plugin_id.clone(),
+                                            operation: "write ack to plugin stdin",
+                                            source,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(ListenerFrame::StdoutClosed) => {
+                        state = ListenerSessionState::Stopped;
+                        break;
+                    }
+                    Ok(ListenerFrame::StdoutError(source)) => {
+                        return Err(ContractError::TriggerPluginProcessIo {
+                            plugin_id: self.plugin_id.clone(),
+                            operation: "read stdout",
+                            source,
+                        });
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        on_progress().map_err(progress_to_contract_error(definition))?;
+                        let now_ms = contract_now_ms(definition)?;
+                        if heartbeat_timed_out(
+                            state,
+                            last_activity_ms,
+                            now_ms,
+                            heartbeat_interval_ms,
+                        ) {
+                            let _ = request_plugin_stop(
+                                &self.plugin_id,
+                                &mut stdin,
+                                TriggerStop {
+                                    reason: String::from("heartbeat_timeout"),
+                                },
+                            );
+                            let _ = child.kill();
+                            let _ = stdout_handle.join();
+                            return Err(ContractError::TriggerPluginProtocolContractViolation {
+                                plugin_id: self.plugin_id.clone(),
+                                detail: String::from("heartbeat timed out after ready"),
+                            });
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        state = ListenerSessionState::Stopped;
+                        break;
+                    }
+                }
+            }
+
+            let _ = stdout_handle.join();
+
+            if state == ListenerSessionState::WaitingReady {
+                return Err(ContractError::TriggerPluginProtocolContractViolation {
+                    plugin_id: self.plugin_id.clone(),
+                    detail: String::from("listener exited before ready"),
+                });
+            }
+
+            let status = child
+                .wait()
                 .map_err(|source| ContractError::TriggerPluginProcessIo {
                     plugin_id: self.plugin_id.clone(),
                     operation: "wait for process",
                     source,
                 })?;
+            let stderr = stderr_handle
+                .join()
+                .map_err(|_| ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "join stderr reader",
+                    source: std::io::Error::other("stderr reader panicked"),
+                })?
+                .map_err(|source| ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "read stderr",
+                    source,
+                })?;
 
-        if !output.status.success() {
-            return Err(ContractError::TriggerPluginProcessFailed {
-                plugin_id: self.plugin_id.clone(),
-                status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
+            if !status.success() {
+                return Err(ContractError::TriggerPluginProcessFailed {
+                    plugin_id: self.plugin_id.clone(),
+                    status: status.code().unwrap_or(-1),
+                    stderr: stderr.trim().to_owned(),
+                });
+            }
+
+            return Ok(emissions);
         }
 
-        let decoded: TriggerPluginOutput =
-            serde_json::from_slice(&output.stdout).map_err(|source| {
-                ContractError::TriggerPluginOutputDecode {
-                    plugin_id: self.plugin_id.clone(),
-                    source,
-                }
-            })?;
-        decoded.validate()?;
-        Ok(decoded.events)
+        Err(ContractError::TriggerPluginProcessIo {
+            plugin_id: self.plugin_id.clone(),
+            operation: "open stdin",
+            source: std::io::Error::other("missing stdin pipe"),
+        })
     }
+}
+
+fn input_heartbeat_interval_ms(input: &TriggerHostMessage) -> i64 {
+    match input {
+        TriggerHostMessage::Start(command) => command.heartbeat_interval_ms.max(1),
+        TriggerHostMessage::Ack(_) | TriggerHostMessage::Stop(_) => 1,
+    }
+}
+
+fn heartbeat_timed_out(
+    state: ListenerSessionState,
+    last_activity_ms: i64,
+    now_ms: i64,
+    heartbeat_interval_ms: i64,
+) -> bool {
+    state == ListenerSessionState::Active
+        && now_ms >= last_activity_ms.saturating_add(heartbeat_interval_ms.saturating_mul(2))
+}
+
+fn contract_now_ms(definition: &TriggerDefinition) -> Result<i64, ContractError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|source| ContractError::InvalidTriggerEmission {
+            trigger_id: definition.trigger_id.clone(),
+            detail: format!("system time before UNIX_EPOCH: {source}"),
+        })?;
+    i64::try_from(duration.as_millis()).map_err(|source| ContractError::InvalidTriggerEmission {
+        trigger_id: definition.trigger_id.clone(),
+        detail: format!("system time overflowed i64 millis: {source}"),
+    })
+}
+
+fn progress_to_contract_error<'a>(
+    definition: &'a TriggerDefinition,
+) -> impl FnOnce(TriggerPlaneError) -> ContractError + 'a {
+    move |error| ContractError::InvalidTriggerEmission {
+        trigger_id: definition.trigger_id.clone(),
+        detail: error.to_string(),
+    }
+}
+
+fn request_plugin_stop(
+    plugin_id: &str,
+    stdin: &mut dyn Write,
+    stop: TriggerStop,
+) -> Result<(), ContractError> {
+    let encoded_stop =
+        serde_json::to_string(&TriggerHostMessage::Stop(stop)).map_err(|source| {
+            ContractError::TriggerPluginProtocolEncode {
+                plugin_id: plugin_id.to_owned(),
+                source,
+            }
+        })?;
+    stdin
+        .write_all(encoded_stop.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|source| ContractError::TriggerPluginProcessIo {
+            plugin_id: plugin_id.to_owned(),
+            operation: "write stop to plugin stdin",
+            source,
+        })
 }
 
 fn accepted_event_key(trigger_id: &str, event_id: &str) -> String {
@@ -721,6 +1158,68 @@ fn entrypoint_escapes_root(base_dir: &Path, root_dir: &Path, entrypoint_path: &P
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_state_requires_ready_before_event() {
+        let error = ListenerSessionState::WaitingReady
+            .handle_message(
+                "plugin-test",
+                &TriggerPluginMessage::Event(TriggerEventFrame {
+                    checkpoint: String::from("cp-1"),
+                    event_key: String::from("evt-1"),
+                    occurred_at_ms: 1,
+                    payload: serde_json::json!({}),
+                    dedup_key: None,
+                    dedup_window_ms: None,
+                    cooldown_key: None,
+                    cooldown_ms: None,
+                }),
+            )
+            .expect_err("event before ready should fail");
+
+        assert!(matches!(
+            error,
+            ContractError::TriggerPluginProtocolContractViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn listener_state_rejects_duplicate_ready() {
+        let error = ListenerSessionState::Active
+            .handle_message(
+                "plugin-test",
+                &TriggerPluginMessage::Ready(TriggerReady {
+                    protocol_version: String::from("2.0.0"),
+                }),
+            )
+            .expect_err("duplicate ready should fail");
+
+        assert!(matches!(
+            error,
+            ContractError::TriggerPluginProtocolContractViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn heartbeat_timeout_only_applies_after_ready() {
+        assert!(!heartbeat_timed_out(
+            ListenerSessionState::WaitingReady,
+            100,
+            250,
+            50,
+        ));
+        assert!(heartbeat_timed_out(
+            ListenerSessionState::Active,
+            100,
+            250,
+            50,
+        ));
+    }
 }
 
 fn map_trigger_payload(

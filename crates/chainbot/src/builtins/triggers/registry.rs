@@ -66,6 +66,7 @@ mod tests {
             TriggerEmission {
                 event_id: format!("fanout-a-{}", definition.trigger_id),
                 occurred_at_ms: context.now_ms,
+                checkpoint: None,
                 source: Some(definition.source.clone()),
                 payload: serde_json::json!({"kind": "fanout", "index": 1}),
                 dedup_key: None,
@@ -76,6 +77,7 @@ mod tests {
             TriggerEmission {
                 event_id: format!("fanout-b-{}", definition.trigger_id),
                 occurred_at_ms: context.now_ms,
+                checkpoint: None,
                 source: Some(definition.source.clone()),
                 payload: serde_json::json!({"kind": "fanout", "index": 2}),
                 dedup_key: None,

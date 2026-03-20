@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Exercises the crate's vertical slice across config, trigger, execution, worker, secret, and state boundaries.
 
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -180,12 +179,16 @@ fn serve_restart_recovery() {
             "recovery-event",
         ),
         &TriggerEventRecord {
+            schema_version: "1.0.0".to_string(),
             run_id: "run-incomplete".to_string(),
             sequence: 99,
             trigger_id: "recovery-trigger".to_string(),
+            workflow_id: "wf-alpha".to_string(),
             event_id: "recovery-event".to_string(),
+            checkpoint: None,
             source: "restart-recovery".to_string(),
             accepted_at_ms: 1_710_400_000_030,
+            payload: serde_json::json!({"recovered": true}),
             dedup_key: None,
             dedup_expires_at_ms: None,
             cooldown_key: None,
