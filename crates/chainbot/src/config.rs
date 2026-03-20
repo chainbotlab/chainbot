@@ -26,7 +26,8 @@ use crate::workflow::WorkflowDefinition;
 pub const CURRENT_SCHEMA_MAJOR: u64 = 2;
 pub const DEFAULT_ROOT_DIR_NAME: &str = ".chainbot";
 pub const CHAINBOT_CONFIG_DIR_ENV: &str = "CHAINBOT_CONFIG_DIR";
-pub const ROOT_CONFIG_FILE_NAME: &str = "root.toml";
+pub const ROOT_CONFIG_FILE_NAME: &str = "chainbot.toml";
+pub const LEGACY_ROOT_CONFIG_FILE_NAME: &str = "root.toml";
 pub const PACKAGE_CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +50,8 @@ pub struct WorkerTemplate {
 pub struct RootConfigDefinition {
     #[serde(rename = "manifest_version", alias = "schema_version")]
     pub schema_version: String,
+    #[serde(default)]
+    pub chainbot_version: Option<String>,
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
@@ -206,7 +209,25 @@ impl RootLayout {
     }
 
     pub fn root_config_path(&self) -> PathBuf {
-        self.config_dir.join(ROOT_CONFIG_FILE_NAME)
+        self.root.join(ROOT_CONFIG_FILE_NAME)
+    }
+
+    pub fn legacy_root_config_path(&self) -> PathBuf {
+        self.config_dir.join(LEGACY_ROOT_CONFIG_FILE_NAME)
+    }
+
+    pub fn existing_root_config_path(&self) -> Option<PathBuf> {
+        let primary_path = self.root_config_path();
+        if primary_path.is_file() {
+            return Some(primary_path);
+        }
+
+        let legacy_path = self.legacy_root_config_path();
+        if legacy_path.is_file() {
+            return Some(legacy_path);
+        }
+
+        None
     }
 
     pub fn plugin_manifests_dir(&self) -> PathBuf {
@@ -215,13 +236,19 @@ impl RootLayout {
 
     pub fn validate_bootstrap_paths_exist(&self) -> Result<(), ContractError> {
         validate_directory_exists(&self.root, "root")?;
-        validate_directory_exists(&self.config_dir, "config")?;
+        let root_config_path = self
+            .existing_root_config_path()
+            .unwrap_or_else(|| self.root_config_path());
+        validate_file_exists(&root_config_path, "root config")?;
         Ok(())
     }
 
     pub fn validate_paths_exist(&self) -> Result<(), ContractError> {
         validate_directory_exists(&self.root, "root")?;
-        validate_directory_exists(&self.config_dir, "config")?;
+        let root_config_path = self
+            .existing_root_config_path()
+            .unwrap_or_else(|| self.root_config_path());
+        validate_file_exists(&root_config_path, "root config")?;
         validate_directory_exists(&self.workflows_dir, "workflows")?;
         validate_directory_exists(&self.triggers_dir, "triggers")?;
         validate_directory_exists(&self.plugins_dir, "plugins")?;
@@ -236,8 +263,10 @@ impl RootDefinitionBundle {
         let effective_layout = load_effective_root_layout(layout)?;
         effective_layout.validate_paths_exist()?;
 
-        let root_config: RootConfigDefinition =
-            decode_required_toml(&effective_layout.root_config_path(), "root config")?;
+        let root_config: RootConfigDefinition = decode_required_toml(
+            &resolve_existing_root_config_path(&effective_layout)?,
+            "root config",
+        )?;
         root_config.validate()?;
 
         let workflows: Vec<WorkflowDefinition> =
@@ -320,7 +349,7 @@ pub fn load_trigger_definitions(
 ) -> Result<Vec<TriggerDefinition>, ContractError> {
     let effective_layout = load_effective_root_layout(layout)?;
     validate_directory_exists(&effective_layout.root, "root")?;
-    validate_directory_exists(&effective_layout.config_dir, "config")?;
+    let _ = resolve_existing_root_config_path(&effective_layout)?;
     validate_directory_exists(&effective_layout.triggers_dir, "triggers")?;
     let triggers: Vec<TriggerDefinition> =
         decode_package_collection(&effective_layout.triggers_dir)?;
@@ -400,10 +429,19 @@ pub fn resolve_root_layout() -> Result<RootLayout, ContractError> {
 
 pub fn load_effective_root_layout(base_layout: &RootLayout) -> Result<RootLayout, ContractError> {
     base_layout.validate_bootstrap_paths_exist()?;
-    let root_config: RootConfigDefinition =
-        decode_required_toml(&base_layout.root_config_path(), "root config")?;
+    let root_config_path = resolve_existing_root_config_path(base_layout)?;
+    let root_config: RootConfigDefinition = decode_required_toml(&root_config_path, "root config")?;
     root_config.validate()?;
     base_layout.apply_root_config(&root_config)
+}
+
+fn resolve_existing_root_config_path(layout: &RootLayout) -> Result<PathBuf, ContractError> {
+    layout
+        .existing_root_config_path()
+        .ok_or_else(|| ContractError::MissingFile {
+            path: layout.root_config_path(),
+            kind: "root config",
+        })
 }
 
 impl RootLayout {
@@ -472,6 +510,25 @@ fn validate_directory_exists(path: &Path, kind: &'static str) -> Result<(), Cont
                 kind,
             })
         }
+        Err(err) => Err(ContractError::Io {
+            path: path.to_path_buf(),
+            operation: "inspect metadata",
+            source: err,
+        }),
+    }
+}
+
+fn validate_file_exists(path: &Path, kind: &'static str) -> Result<(), ContractError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(ContractError::MissingFile {
+            path: path.to_path_buf(),
+            kind,
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(ContractError::MissingFile {
+            path: path.to_path_buf(),
+            kind,
+        }),
         Err(err) => Err(ContractError::Io {
             path: path.to_path_buf(),
             operation: "inspect metadata",

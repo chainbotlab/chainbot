@@ -18,8 +18,8 @@ chainbot init
 # Check status
 chainbot status
 
-# Run a workflow
-chainbot run <workflow-name>
+# Run the inferred top-level workflow
+chainbot run
 
 # Serve the web interface
 chainbot serve
@@ -36,7 +36,7 @@ When you run `chainbot init`, it creates this layout:
 
 ```text
 <root>/
-|- config/        # Configuration files
+|- chainbot.toml  # Root configuration file
 |- workflows/    # Workflow definitions
 |- triggers/     # Trigger state persistence
 |- plugins/      # Plugin binaries and configs
@@ -51,6 +51,7 @@ The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to overr
 | Command | Description |
 |---------|-------------|
 | `chainbot help` | Show help information |
+| `chainbot version` | Show the running ChainBot version |
 | `chainbot init` | Initialize a new workspace |
 | `chainbot status` | Show workspace status (use `--json` for structured output) |
 | `chainbot trigger` | Manage triggers: `list`, `enable`, `disable` |
@@ -61,11 +62,11 @@ The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to overr
 
 ## Configuration
 
-Main configuration file: `config/root.toml`
+Main configuration file: `chainbot.toml`
 
 ## Version
 
-Current version: **2.1.3**
+Current version: **2.1.4**
 
 ## Links
 

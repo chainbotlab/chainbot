@@ -396,7 +396,7 @@ impl UserFacingError {
                 let mut message = format!("Root is missing required {kind} file: {}", path.display());
                 if kind == "root config" {
                     message.push_str(
-                        " Check CHAINBOT_CONFIG_DIR or ensure ~/.chainbot/config/root.toml exists.",
+                        " Check CHAINBOT_CONFIG_DIR or ensure ~/.chainbot/chainbot.toml exists (or migrate legacy ~/.chainbot/config/root.toml).",
                     );
                 }
                 Self::validation(message)
