@@ -484,19 +484,7 @@ impl CliRequest {
 
     fn execute_run(&self) -> Result<CliOutput, UserFacingError> {
         let runtime = self.load_runtime_context()?;
-        let workflow = match runtime.definitions.workflows.as_slice() {
-            [] => {
-                return Err(UserFacingError::validation(
-                    "No workflows were found in the configured workflows directory.",
-                ));
-            }
-            [workflow] => workflow,
-            _ => {
-                return Err(UserFacingError::usage(
-                    "chainbot run requires exactly one workflow package in the root; use a dedicated root or add workflow selection support.",
-                ));
-            }
-        };
+        let workflow = select_manual_run_workflow(&runtime.definitions.workflows)?;
 
         let mut request = NormalizedRunRequest::new(
             format!(
@@ -597,6 +585,40 @@ impl CliRequest {
             secret_mode: secret_decrypt_mode_from_env(),
             worker_host: WorkerHost::new(WorkerHostLimits::default()),
         })
+    }
+}
+
+fn select_manual_run_workflow<'a>(
+    workflows: &'a [WorkflowDefinition],
+) -> Result<&'a WorkflowDefinition, UserFacingError> {
+    match workflows {
+        [] => Err(UserFacingError::validation(
+            "No workflows were found in the configured workflows directory.",
+        )),
+        [workflow] => Ok(workflow),
+        _ => {
+            let referenced_child_ids = workflows
+                .iter()
+                .flat_map(|workflow| workflow.nodes.iter())
+                .filter_map(|node| node.subflow.as_ref())
+                .map(|contract| contract.workflow_id.as_str())
+                .collect::<BTreeSet<_>>();
+
+            let top_level_workflows = workflows
+                .iter()
+                .filter(|workflow| !referenced_child_ids.contains(workflow.workflow_id.as_str()))
+                .collect::<Vec<_>>();
+
+            match top_level_workflows.as_slice() {
+                [workflow] => Ok(*workflow),
+                [] => Err(UserFacingError::usage(
+                    "chainbot run could not infer a top-level workflow from the configured subflow graph; use a dedicated root or add workflow selection support.",
+                )),
+                _ => Err(UserFacingError::usage(
+                    "chainbot run found multiple top-level workflows in the root; use a dedicated root or add workflow selection support.",
+                )),
+            }
+        }
     }
 }
 

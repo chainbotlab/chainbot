@@ -210,6 +210,63 @@ fn scheduler_when_and_depends_mode() {
 }
 
 #[test]
+fn depends_mode_any_waits_for_all_dependencies_to_finish() {
+    let mut registry = BuiltinNodeRegistry::with_test_handlers();
+    registry.register("builtin.fail", |_request| {
+        Err(ContractError::CliUsage {
+            message: "forced node failure".to_owned(),
+        })
+    });
+
+    let workflow = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-any-waits".to_owned(),
+        name: "any-waits".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![
+            builtin_node("fast-ok", "builtin.identity", vec![], DependsMode::All),
+            builtin_node("prep", "builtin.identity", vec![], DependsMode::All),
+            builtin_node("late-fail", "builtin.fail", vec!["prep"], DependsMode::All),
+            builtin_node(
+                "any-after",
+                "builtin.identity",
+                vec!["fast-ok", "late-fail"],
+                DependsMode::Any,
+            ),
+        ],
+        package_root: PathBuf::new(),
+    };
+
+    let execution_plane =
+        ExecutionPlane::new(vec![workflow], BTreeMap::new(), registry).expect("plane");
+    let report = execution_plane
+        .execute(&NormalizedRunRequest::new("run-any-waits", "wf-any-waits"))
+        .expect("workflow should complete with bounded failure");
+
+    assert_eq!(report.status, WorkflowRunStatus::Failed);
+    assert_eq!(
+        report.schedule_waves,
+        vec![
+            vec!["fast-ok".to_owned(), "prep".to_owned()],
+            vec!["late-fail".to_owned()],
+            vec!["any-after".to_owned()],
+        ]
+    );
+    assert_eq!(
+        report.node_states.get("fast-ok"),
+        Some(&ScheduledNodeState::Succeeded)
+    );
+    assert_eq!(
+        report.node_states.get("late-fail"),
+        Some(&ScheduledNodeState::Failed)
+    );
+    assert_eq!(
+        report.node_states.get("any-after"),
+        Some(&ScheduledNodeState::Succeeded)
+    );
+}
+
+#[test]
 fn builtin_node_registry_dispatch() {
     let registry = BuiltinNodeRegistry::with_test_handlers();
     let request = BuiltinNodeRequest {

@@ -1,0 +1,63 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-e2e-child"
+name = "wf-e2e-child"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "script-node"
+kind = "builtin"
+plugin = "builtin.script"
+operation = "python:scripts/e2e_worker.py"
+depends_on = []
+
+[[nodes.inputs]]
+target = "symbol"
+
+[nodes.inputs.source]
+namespace = "subflow_input"
+key = "symbol"
+
+[[nodes.inputs]]
+target = "token"
+
+[nodes.inputs.source]
+namespace = "subflow_input"
+key = "token"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "external-node"
+kind = "builtin"
+plugin = "builtin.external_node"
+operation = "node-e2e-plugin"
+depends_on = ["script-node"]
+
+[[nodes.inputs]]
+target = "symbol"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "symbol"
+
+[[nodes.inputs]]
+target = "token"
+
+[nodes.inputs.source]
+namespace = "subflow_input"
+key = "token"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "emit-result"
+kind = "builtin"
+plugin = "builtin.emit_subflow_output"
+operation = "run"
+depends_on = ["external-node"]
+
+[[nodes.inputs]]
+target = "decision"
+
+[nodes.inputs.source]
+namespace = "run_scoped"
+key = "decision"

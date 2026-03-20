@@ -24,47 +24,19 @@ key = "symbol"
 
 [[nodes]]
 manifest_version = "2.0.0"
-id = "script-node"
-kind = "builtin"
-plugin = "builtin.script"
-operation = "python:scripts/e2e_worker.py"
+id = "call-execution"
+kind = "subflow"
 depends_on = ["builtin-start"]
 
-[[nodes.inputs]]
-target = "symbol"
+[nodes.call]
+workflow = "wf-e2e-child"
 
-[nodes.inputs.source]
-namespace = "run_scoped"
-key = "symbol"
+[nodes.call.with]
+symbol = "run.symbol"
+token = "run.secret_token_ref"
 
-[[nodes.inputs]]
-target = "token"
-
-[nodes.inputs.source]
-namespace = "run_scoped"
-key = "secret_token_ref"
-
-[[nodes]]
-manifest_version = "2.0.0"
-id = "external-node"
-kind = "builtin"
-plugin = "builtin.external_node"
-operation = "node-e2e-plugin"
-depends_on = ["script-node"]
-
-[[nodes.inputs]]
-target = "symbol"
-
-[nodes.inputs.source]
-namespace = "run_scoped"
-key = "symbol"
-
-[[nodes.inputs]]
-target = "token"
-
-[nodes.inputs.source]
-namespace = "run_scoped"
-key = "secret_token_ref"
+[nodes.call.returns]
+decision = "decision"
 
 [[nodes]]
 manifest_version = "2.0.0"
@@ -72,11 +44,11 @@ id = "builtin-finish"
 kind = "builtin"
 plugin = "builtin.identity"
 operation = "run"
-depends_on = ["external-node"]
+depends_on = ["call-execution"]
 
 [[nodes.inputs]]
 target = "decision"
 
 [nodes.inputs.source]
-namespace = "run_scoped"
+namespace = "subflow_output"
 key = "decision"

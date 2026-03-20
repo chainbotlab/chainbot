@@ -60,10 +60,35 @@ impl RuntimeVariableNamespace {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VariableReference {
     pub namespace: RuntimeVariableNamespace,
     pub key: String,
+}
+
+impl<'de> Deserialize<'de> for VariableReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawVariableReference {
+            Structured {
+                namespace: RuntimeVariableNamespace,
+                key: String,
+            },
+            Shorthand(String),
+        }
+
+        match RawVariableReference::deserialize(deserializer)? {
+            RawVariableReference::Structured { namespace, key } => {
+                Ok(Self { namespace, key })
+            }
+            RawVariableReference::Shorthand(value) => Self::from_shorthand(&value)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 impl VariableReference {
@@ -73,6 +98,42 @@ impl VariableReference {
 
     pub fn as_string(&self) -> String {
         format!("{}:{}", self.namespace.as_str(), self.key)
+    }
+
+    fn from_shorthand(value: &str) -> Result<Self, String> {
+        let (namespace_alias, key) = value.split_once('.').ok_or_else(|| {
+            format!(
+                "invalid variable reference `{value}`; expected <namespace>.<key>"
+            )
+        })?;
+
+        let namespace = match namespace_alias {
+            "cli" => RuntimeVariableNamespace::CliArgs,
+            "manual" => RuntimeVariableNamespace::ManualInvocationInput,
+            "trigger" => RuntimeVariableNamespace::TriggerPayloadMapping,
+            "workflow" => RuntimeVariableNamespace::WorkflowDefaults,
+            "config" => RuntimeVariableNamespace::ConfigDefaults,
+            "node" => RuntimeVariableNamespace::NodeOutputs,
+            "run" => RuntimeVariableNamespace::RunScoped,
+            "subflow_input" => RuntimeVariableNamespace::SubflowInput,
+            "subflow_output" => RuntimeVariableNamespace::SubflowOutput,
+            other => {
+                return Err(format!(
+                    "invalid variable namespace alias `{other}` in `{value}`"
+                ));
+            }
+        };
+
+        if key.trim().is_empty() || key.contains('.') {
+            return Err(format!(
+                "invalid variable reference `{value}`; key must be a single segment"
+            ));
+        }
+
+        Ok(Self {
+            namespace,
+            key: key.to_owned(),
+        })
     }
 }
 
@@ -412,6 +473,155 @@ struct RawWorkflowRuntime {
     config_defaults: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSubflowCallDefinition {
+    workflow: String,
+    #[serde(default, rename = "with")]
+    imports: BTreeMap<String, VariableReference>,
+    #[serde(default, rename = "returns")]
+    exports: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawNodeDefinition {
+    #[serde(rename = "manifest_version", alias = "api_version")]
+    pub api_version: String,
+    #[serde(rename = "id", alias = "node_id")]
+    pub node_id: String,
+    pub kind: String,
+    #[serde(rename = "plugin", alias = "plugin_id")]
+    #[serde(default)]
+    pub plugin_id: Option<String>,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub depends_mode: DependsMode,
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub inputs: Vec<VariableBinding>,
+    #[serde(default)]
+    pub when: Option<WhenCondition>,
+    #[serde(default)]
+    pub call: Option<RawSubflowCallDefinition>,
+}
+
+impl RawNodeDefinition {
+    fn lower(self) -> Result<NodeDefinition, String> {
+        let Self {
+            api_version,
+            node_id,
+            kind,
+            plugin_id,
+            operation,
+            depends_mode,
+            depends_on,
+            inputs,
+            when,
+            call,
+        } = self;
+
+        let lowered_subflow = call.map(|call| call.lower(&node_id, &kind)).transpose()?;
+
+        if kind != "subflow" && lowered_subflow.is_some() {
+            return Err(format!(
+                "node {node_id}: only kind `subflow` may define `call`"
+            ));
+        }
+
+        if kind == "subflow" && lowered_subflow.is_none() {
+            return Err(format!(
+                "node {node_id}: kind `subflow` requires a `call.workflow` definition"
+            ));
+        }
+
+        let plugin_id = match (kind.as_str(), plugin_id) {
+            ("subflow", Some(value)) => {
+                if value != "builtin-subflow" {
+                    return Err(format!(
+                        "node {node_id}: subflow nodes must use plugin `builtin-subflow`"
+                    ));
+                }
+                value
+            }
+            ("subflow", None) => String::from("builtin-subflow"),
+            (_, Some(value)) => value,
+            (_, None) => {
+                return Err(format!(
+                    "node {node_id}: missing required field `plugin`"
+                ));
+            }
+        };
+
+        let operation = match (kind.as_str(), operation) {
+            ("subflow", Some(value)) => {
+                if value != "run" {
+                    return Err(format!(
+                        "node {node_id}: subflow nodes must use operation `run`"
+                    ));
+                }
+                value
+            }
+            ("subflow", None) => String::from("run"),
+            (_, Some(value)) => value,
+            (_, None) => {
+                return Err(format!(
+                    "node {node_id}: missing required field `operation`"
+                ));
+            }
+        };
+
+        Ok(NodeDefinition {
+            api_version,
+            node_id,
+            kind,
+            plugin_id,
+            operation,
+            depends_mode,
+            depends_on,
+            inputs,
+            when,
+            subflow: lowered_subflow,
+        })
+    }
+}
+
+impl RawSubflowCallDefinition {
+    fn lower(self, node_id: &str, kind: &str) -> Result<SubflowContract, String> {
+        if kind != "subflow" {
+            return Err(format!(
+                "node {node_id}: only kind `subflow` may define `call`"
+            ));
+        }
+
+        if self.workflow.trim().is_empty() {
+            return Err(format!(
+                "node {node_id}: subflow call.workflow is required"
+            ));
+        }
+
+        let mut imports = Vec::new();
+        for (child_key, source) in self.imports {
+            imports.push(SubflowImport { child_key, source });
+        }
+
+        let mut exports = Vec::new();
+        for (child_key, parent_key) in self.exports {
+            exports.push(SubflowExport {
+                child_key,
+                parent_key,
+            });
+        }
+
+        Ok(SubflowContract {
+            workflow_id: self.workflow,
+            imports,
+            exports,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWorkflowDefinition {
@@ -428,7 +638,7 @@ struct RawWorkflowDefinition {
     #[serde(default)]
     runtime: RawWorkflowRuntime,
     #[serde(default)]
-    nodes: Vec<NodeDefinition>,
+    nodes: Vec<RawNodeDefinition>,
 }
 
 impl RuntimeVariableLayers {
@@ -544,12 +754,18 @@ impl<'de> Deserialize<'de> for WorkflowDefinition {
         };
         runtime.config_defaults = raw.runtime.config_defaults;
 
+        let nodes = raw
+            .nodes
+            .into_iter()
+            .map(|node| node.lower().map_err(serde::de::Error::custom))
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self {
             api_version,
             workflow_id,
             name,
             runtime,
-            nodes: raw.nodes,
+            nodes,
             package_root: PathBuf::new(),
         })
     }
@@ -572,6 +788,13 @@ impl WorkflowDefinition {
     }
 
     fn validate_node_contract(&self, node: &NodeDefinition) -> Result<(), ContractError> {
+        if node.kind == "subflow" && !node.inputs.is_empty() {
+            return Err(ContractError::UnexpectedSubflowNodeInputs {
+                workflow_id: self.workflow_id.clone(),
+                node_id: node.node_id.clone(),
+            });
+        }
+
         for input in &node.inputs {
             if !input.validate() {
                 return Err(ContractError::InvalidVariableReference {
