@@ -113,7 +113,7 @@ fn toml_definition_validation() {
     let invalid_version_root = unique_test_root("toml-invalid-version");
     write_valid_fixture(&invalid_version_root);
     fs::write(
-        invalid_version_root.join("config").join("root.toml"),
+        invalid_version_root.join("chainbot.toml"),
         "manifest_version = \"3.0.0\"\nprofile = \"test\"\n",
     )
     .expect("invalid-version root fixture should be writable");
@@ -129,6 +129,21 @@ fn toml_definition_validation() {
             max_supported_major: 2
         }
     ));
+}
+
+#[test]
+fn legacy_root_config_path_is_still_loaded() {
+    let root = unique_test_root("legacy-root-config-path");
+    write_valid_legacy_fixture(&root);
+
+    let layout = RootLayout::from_root(root);
+    let bundle =
+        RootDefinitionBundle::load(&layout).expect("legacy root config fixture should load");
+
+    assert_eq!(bundle.root_config.profile.as_deref(), Some("basic"));
+    assert_eq!(bundle.workflows.len(), 1);
+    assert_eq!(bundle.triggers.len(), 1);
+    assert_eq!(bundle.plugins.len(), 1);
 }
 
 #[test]
@@ -235,7 +250,6 @@ fn workspace_root() -> PathBuf {
 }
 
 fn write_valid_fixture(root: &Path) {
-    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
     fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
     fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
     fs::create_dir_all(root.join("plugins").join("manifests"))
@@ -248,8 +262,11 @@ fn write_valid_fixture(root: &Path) {
         .expect("trigger package directory should be creatable");
 
     fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     )
     .expect("root config fixture should be writable");
 
@@ -272,8 +289,45 @@ fn write_valid_fixture(root: &Path) {
     .expect("plugin fixture should be writable");
 }
 
+fn write_valid_legacy_fixture(root: &Path) {
+    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
+    fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("manifests"))
+        .expect("plugin manifests directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+    fs::create_dir_all(root.join("workflows").join("wf-alpha"))
+        .expect("workflow package directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("tr-market"))
+        .expect("trigger package directory should be creatable");
+
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+    )
+    .expect("legacy root config fixture should be writable");
+
+    fs::write(
+        root.join("workflows").join("wf-alpha").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-alpha\"\nname = \"alpha\"\n\n[runtime.defaults]\nregion = \"us\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"node-1\"\nkind = \"plugin\"\nplugin = \"quote-plugin\"\noperation = \"normalize\"\ndepends_on = []\n",
+    )
+    .expect("legacy workflow fixture should be writable");
+
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-alpha\"\nenabled = true\n\n[input_mapping]\nregion = \"payload.region\"\n",
+    )
+    .expect("legacy trigger fixture should be writable");
+
+    fs::write(
+        root.join("plugins").join("manifests").join("quote_plugin.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
+    )
+    .expect("legacy plugin fixture should be writable");
+}
+
 fn write_valid_fixture_with_overrides(root: &Path) {
-    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
     fs::create_dir_all(root.join("defs").join("workflow-pkgs").join("wf-alpha"))
         .expect("workflow override directory should be creatable");
     fs::create_dir_all(root.join("defs").join("trigger-pkgs").join("tr-market"))
@@ -285,8 +339,11 @@ fn write_valid_fixture_with_overrides(root: &Path) {
         .expect("state override directory should be creatable");
 
     fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"override\"\n\n[paths]\nworkflows_dir = \"defs/workflow-pkgs\"\ntriggers_dir = \"defs/trigger-pkgs\"\nplugins_dir = \"shared/plugins\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime-state\"\n\n[plugins]\nmanifest_globs = [\"shared/plugins/catalog/*.toml\"]\n",
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"override\"\n\n[paths]\nworkflows_dir = \"defs/workflow-pkgs\"\ntriggers_dir = \"defs/trigger-pkgs\"\nplugins_dir = \"shared/plugins\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime-state\"\n\n[plugins]\nmanifest_globs = [\"shared/plugins/catalog/*.toml\"]\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     )
     .expect("override root config fixture should be writable");
 
@@ -319,7 +376,6 @@ fn write_valid_fixture_with_overrides(root: &Path) {
 }
 
 fn write_subflow_call_fixture(root: &Path) {
-    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
     fs::create_dir_all(root.join("workflows").join("wf-parent"))
         .expect("parent workflow package directory should be creatable");
     fs::create_dir_all(root.join("workflows").join("wf-child"))
@@ -332,8 +388,11 @@ fn write_subflow_call_fixture(root: &Path) {
     fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
 
     fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"subflow\"\n",
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"subflow\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     )
     .expect("root config fixture should be writable");
 

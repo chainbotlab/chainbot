@@ -41,12 +41,57 @@ fn help_lists_expected_commands() {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
     assert!(stdout.contains("validate"));
+    assert!(stdout.contains("version"));
     assert!(stdout.contains("init"));
     assert!(stdout.contains("status"));
     assert!(stdout.contains("trigger"));
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("list-runs"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn version_command_prints_running_release() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .arg("version")
+        .output()
+        .expect("chainbot version should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert_eq!(
+        stdout.trim(),
+        format!("chainbot {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn version_flag_prints_running_release() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .arg("--version")
+        .output()
+        .expect("chainbot --version should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert_eq!(
+        stdout.trim(),
+        format!("chainbot {}", env!("CARGO_PKG_VERSION"))
+    );
     assert!(stderr.is_empty());
 }
 
@@ -65,8 +110,29 @@ fn help_init_includes_bootstrap_guidance() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
+    assert!(stdout.contains("chainbot.toml"));
     assert!(stdout.contains("Bootstrap a minimal ChainBot root"));
     assert!(stdout.contains("CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot init"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_version_includes_release_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "version"])
+        .output()
+        .expect("chainbot help version should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Print the running ChainBot version"));
+    assert!(stdout.contains("chainbot --version"));
     assert!(stderr.is_empty());
 }
 
@@ -132,7 +198,7 @@ fn init_creates_minimal_root_and_validate_accepts_it() {
     assert!(init_stdout.contains(root.to_string_lossy().as_ref()));
     assert!(init_stderr.is_empty());
 
-    assert!(root.join("config").is_dir());
+    assert!(!root.join("config").exists());
     assert!(root.join("workflows").is_dir());
     assert!(root.join("triggers").is_dir());
     assert!(root.join("plugins").join("manifests").is_dir());
@@ -140,9 +206,13 @@ fn init_creates_minimal_root_and_validate_accepts_it() {
     assert!(root.join("secrets").is_dir());
     assert!(root.join("state").is_dir());
 
-    let root_config = fs::read_to_string(root.join("config").join("root.toml"))
+    let root_config = fs::read_to_string(root.join("chainbot.toml"))
         .expect("root config should be created by init");
     assert!(root_config.contains("manifest_version = \"2.0.0\""));
+    assert!(root_config.contains(&format!(
+        "chainbot_version = \"{}\"",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(root_config.contains("profile = \"default\""));
     assert!(root_config.contains("workflows_dir = \"workflows\""));
 
@@ -184,7 +254,7 @@ fn init_is_idempotent_when_root_already_exists() {
     let stdout = String::from_utf8(second_output.stdout).expect("stdout should be UTF-8");
     let stderr = String::from_utf8(second_output.stderr).expect("stderr should be UTF-8");
     assert!(stdout.contains("reused:"));
-    assert!(stdout.contains(root.join("config").to_string_lossy().as_ref()));
+    assert!(stdout.contains(root.join("chainbot.toml").to_string_lossy().as_ref()));
     assert!(stderr.is_empty());
 }
 
@@ -193,10 +263,13 @@ fn init_respects_existing_root_path_overrides() {
     let _lock = acquire_fixture_lock();
     let root = unique_root("init-overrides");
     let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
+    fs::create_dir_all(&root).expect("root directory should be creatable");
     fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n\n[plugins]\nmanifest_globs = [\"extensions/catalog/*.toml\"]\n",
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n\n[plugins]\nmanifest_globs = [\"extensions/catalog/*.toml\"]\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     )
     .expect("custom root config should be writable");
 
@@ -237,6 +310,65 @@ fn init_respects_existing_root_path_overrides() {
         .output()
         .expect("validate should execute after override init");
     assert!(validate_output.status.success());
+}
+
+#[test]
+fn init_reuses_legacy_root_config_without_creating_chainbot_toml() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("init-legacy-root-config");
+    let _ = fs::remove_dir_all(&root);
+
+    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"legacy\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"extensions\"\n",
+    )
+    .expect("legacy root config should be writable");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("init should execute with legacy root config");
+
+    assert!(output.status.success());
+    assert!(!root.join("chainbot.toml").exists());
+    assert!(root.join("config").join("root.toml").is_file());
+    assert!(root.join("extensions").join("manifests").is_dir());
+    assert!(root.join("extensions").join("bin").is_dir());
+}
+
+#[test]
+fn init_prefers_chainbot_toml_when_both_root_config_paths_exist() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("init-dual-root-config");
+    let _ = fs::remove_dir_all(&root);
+
+    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
+    fs::create_dir_all(&root).expect("root directory should be creatable");
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"new\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"new-plugins\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("new root config should be writable");
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"legacy\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"legacy-plugins\"\n",
+    )
+    .expect("legacy root config should be writable");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("init should execute with dual root configs");
+
+    assert!(output.status.success());
+    assert!(root.join("new-plugins").join("manifests").is_dir());
+    assert!(!root.join("legacy-plugins").exists());
 }
 
 #[test]
@@ -413,12 +545,14 @@ fn trigger_list_only_requires_trigger_root_inputs() {
     let root = unique_root("trigger-minimal");
     let _ = fs::remove_dir_all(&root);
 
-    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
     fs::create_dir_all(root.join("triggers").join("tr-market"))
         .expect("trigger directory should be creatable");
     fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"minimal\"\nsecret_refs = []\n",
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"minimal\"\nsecret_refs = []\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     )
     .expect("root config should be writable");
     fs::write(
@@ -452,6 +586,54 @@ fn trigger_list_only_requires_trigger_root_inputs() {
         fs::read_to_string(root.join("triggers").join("tr-market").join("config.toml"))
             .expect("trigger config should remain readable after enable");
     assert!(trigger_config.contains("enabled = true"));
+}
+
+#[test]
+fn validate_accepts_legacy_root_config_path() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("legacy-root-config");
+    let _ = fs::remove_dir_all(&root);
+
+    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
+    fs::create_dir_all(root.join("workflows").join("wf-alpha"))
+        .expect("workflow package directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("tr-market"))
+        .expect("trigger package directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("manifests"))
+        .expect("plugin manifests directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("config").join("root.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"legacy\"\nsecret_refs = []\n",
+    )
+    .expect("legacy root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-alpha").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-alpha\"\nname = \"alpha\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"node-1\"\nkind = \"plugin\"\nplugin = \"quote-plugin\"\noperation = \"normalize\"\ndepends_on = []\n",
+    )
+    .expect("legacy workflow fixture should be writable");
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
+    )
+    .expect("legacy trigger fixture should be writable");
+    fs::write(
+        root.join("plugins").join("manifests").join("quote_plugin.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
+    )
+    .expect("legacy plugin fixture should be writable");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("validate")
+        .output()
+        .expect("validate should execute for legacy root config path");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.is_empty());
 }
 
 #[test]
@@ -663,7 +845,6 @@ fn ensure_basic_root_fixture() {
     let _ = fs::remove_dir_all(state_root.join("trigger-records"));
     let _ = fs::remove_file(state_root.join("coordination.sqlite3"));
 
-    fs::create_dir_all(root.join("config")).expect("config directory should be creatable");
     fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
     fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
     fs::create_dir_all(root.join("plugins").join("manifests"))
@@ -676,8 +857,11 @@ fn ensure_basic_root_fixture() {
         .expect("trigger package directory should be creatable");
 
     fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     )
     .expect("root config fixture should be writable");
 
