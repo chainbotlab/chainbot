@@ -27,7 +27,7 @@ fn contract_versions() {
           },
           "nodes": [
             {
-              "api_version": "2.1.0",
+              "manifest_version": "2.1.0",
               "id": "node-quote",
               "kind": "plugin",
               "plugin": "quote-plugin",
@@ -39,7 +39,7 @@ fn contract_versions() {
       ],
       "plugins": [
         {
-          "api_version": "2.0.0",
+          "manifest_version": "2.0.0",
           "plugin_id": "quote-plugin",
           "kind": "builtin",
           "entrypoint": "plugins.quote",
@@ -87,7 +87,7 @@ fn contract_versions() {
 fn invalid_contract_fixtures_are_rejected() {
     let config_err = ConfigRoot::from_json_str(
         r#"{
-          "schema_version": "3.0.0",
+          "schema_version": "4.0.0",
           "workflows": [],
           "plugins": [],
           "worker_templates": [],
@@ -99,14 +99,14 @@ fn invalid_contract_fixtures_are_rejected() {
         config_err,
         ContractError::UnsupportedFutureMajorVersion {
             field: "config.schema_version",
-            major: 3,
+            major: 4,
             max_supported_major: 2
         }
     ));
 
     let plugin_err = PluginManifest::from_json_str(
         r#"{
-          "api_version": "9.0.0",
+          "manifest_version": "9.0.0",
           "plugin_id": "p1",
           "kind": "builtin",
           "entrypoint": "plugins.p1",
@@ -116,10 +116,10 @@ fn invalid_contract_fixtures_are_rejected() {
     .expect_err("future-major plugin api must be rejected");
     assert!(matches!(
         plugin_err,
-        ContractError::UnsupportedFutureMajorVersion {
+        ContractError::UnsupportedMajorVersion {
             field: "plugin.manifest_version",
             major: 9,
-            max_supported_major: 2
+            supported_major: 2
         }
     ));
 

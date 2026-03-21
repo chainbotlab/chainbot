@@ -56,11 +56,9 @@ fn end_to_end_vertical_slice() {
         .collect::<Vec<_>>();
     assert!(statuses.iter().all(|status| *status == "succeeded"));
 
+    assert!(directory_contains_files(&root.join("state").join("runs")));
     assert!(directory_contains_files(
-        &root.join("state").join("workflow-logs")
-    ));
-    assert!(directory_contains_files(
-        &root.join("state").join("trigger-records")
+        &root.join("state").join("triggers")
     ));
 
     let persisted_text = collect_text_files(&root.join("state"));
@@ -122,7 +120,7 @@ fn end_to_end_vertical_slice_failure_modes_redact_plugin_error_details() {
     assert!(stderr.contains("failed"));
     assert!(!stderr.contains(&secret_value));
 
-    let persisted_logs = collect_text_files(&root.join("state").join("workflow-logs"));
+    let persisted_logs = collect_text_files(&root.join("state").join("runs"));
     assert!(persisted_logs.contains("run_finished"));
     assert!(!persisted_logs.contains(&secret_value));
 }
@@ -274,7 +272,13 @@ fn duplicate_trigger_after_restart() {
         String::from_utf8_lossy(&first_serve.stderr)
     );
 
-    let first_trigger_count = count_json_files(&root.join("state").join("trigger-records"));
+    let first_trigger_count = count_json_files(
+        &root
+            .join("state")
+            .join("triggers")
+            .join("external-trigger-e2e")
+            .join("records"),
+    );
     let first_runs = read_run_summaries(&root);
     assert!(first_trigger_count >= 1);
     assert_eq!(first_runs.len(), 1);
@@ -289,7 +293,13 @@ fn duplicate_trigger_after_restart() {
     assert!(String::from_utf8_lossy(&second_serve.stdout)
         .contains("serve completed: no accepted trigger events"));
 
-    let second_trigger_count = count_json_files(&root.join("state").join("trigger-records"));
+    let second_trigger_count = count_json_files(
+        &root
+            .join("state")
+            .join("triggers")
+            .join("external-trigger-e2e")
+            .join("records"),
+    );
     let second_runs = read_run_summaries(&root);
     assert_eq!(second_trigger_count, first_trigger_count);
     assert_eq!(second_runs.len(), first_runs.len());

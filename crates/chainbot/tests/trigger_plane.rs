@@ -40,7 +40,7 @@ fn trigger_plugin_manifest_validation() {
     let valid_manifest = plugin_manifest(
         "plugin-ok",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "valid-trigger.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     );
@@ -76,7 +76,13 @@ fn trigger_plugin_manifest_validation() {
         BTreeMap::new(),
         1_710_100_000_000,
     );
-    alias_kind_open_result.expect("plugin alias kind should be accepted for trigger definitions");
+    let alias_kind_error = alias_kind_open_result
+        .expect_err("plugin alias kind should be rejected for trigger definitions");
+    assert!(matches!(
+        alias_kind_error,
+        TriggerPlaneError::Contract(ContractError::UnknownTriggerKind { trigger_id, kind })
+            if trigger_id == "trigger-external-alias" && kind == "plugin"
+    ));
 
     let duplicate_trigger_error = TriggerPlane::open(
         state_layout.clone(),
@@ -136,7 +142,7 @@ fn trigger_plugin_manifest_validation() {
     let missing_capability_manifest = plugin_manifest(
         "plugin-ok",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "valid-trigger.sh",
         &["trigger.observe"],
     );
@@ -164,7 +170,7 @@ fn trigger_plugin_manifest_validation() {
     let escaping_manifest = plugin_manifest(
         "plugin-ok",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "../escape.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     );
@@ -192,8 +198,8 @@ fn trigger_plugin_manifest_validation() {
 
     let unsupported_api_manifest = plugin_manifest(
         "plugin-ok",
-        "3.0.0",
-        "trigger",
+        "4.0.0",
+        "external_trigger",
         "valid-trigger.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     );
@@ -212,10 +218,10 @@ fn trigger_plugin_manifest_validation() {
     .expect_err("future-major plugin manifest must be rejected");
     assert!(matches!(
         unsupported_api_error,
-        TriggerPlaneError::Contract(ContractError::UnsupportedFutureMajorVersion {
+        TriggerPlaneError::Contract(ContractError::UnsupportedMajorVersion {
             field: "plugin.manifest_version",
-            major: 3,
-            max_supported_major: 2,
+            major: 4,
+            supported_major: 2,
         })
     ));
 }
@@ -343,7 +349,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
     let manifests = vec![plugin_manifest(
         "plugin-external",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "plugin-external.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
@@ -434,7 +440,7 @@ fn trigger_records_are_file_backed() {
     assert!(request.trigger_record_path.exists());
     assert!(request
         .trigger_record_path
-        .starts_with(&state_layout.trigger_records_dir));
+        .starts_with(&state_layout.trigger_state_dir));
     assert_eq!(
         request.trigger_record_path,
         state_layout.trigger_record_path(&request.run_id, 1, "builtin-record", "btc/usdt@1m")
@@ -462,8 +468,8 @@ fn trigger_records_are_file_backed() {
 fn builtin_trigger_kind_aliases_are_accepted() {
     let (state_layout, plugin_root) = unique_layout("builtin-trigger-kind-aliases");
     let definitions = vec![
-        trigger_definition("manual-trigger", "manual", "manual-source"),
-        trigger_definition("market-trigger", "market_tick", "market-feed"),
+        trigger_definition("manual-trigger", "builtin", "manual"),
+        trigger_definition("market-trigger", "builtin", "market_tick"),
     ];
 
     let mut plane = TriggerPlane::open(
@@ -503,11 +509,11 @@ fn builtin_trigger_kind_aliases_are_accepted() {
         ]),
         1_710_100_040_100,
     )
-    .expect("trigger plane should accept builtin trigger kind aliases");
+    .expect("trigger plane should accept canonical builtin trigger kinds");
 
     let requests = plane
         .collect_run_requests(1_710_100_040_110)
-        .expect("builtin trigger kind aliases should emit run requests");
+        .expect("canonical builtin trigger kinds should emit run requests");
 
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().any(
@@ -522,8 +528,8 @@ fn builtin_trigger_kind_aliases_are_accepted() {
 fn builtin_trigger_fanout_emits_multiple_run_requests_end_to_end() {
     let (state_layout, plugin_root) = unique_layout("builtin-trigger-fanout-end-to-end");
     let definitions = vec![
-        trigger_definition("manual-trigger-a", "manual", "manual-source-a"),
-        trigger_definition("manual-trigger-b", "manual", "manual-source-b"),
+        trigger_definition("manual-trigger-a", "builtin", "manual"),
+        trigger_definition("manual-trigger-b", "builtin", "manual"),
     ];
     let builtin_events = build_builtin_trigger_emissions(&definitions, 1_710_100_041_000)
         .expect("builtin trigger emission generation should succeed");
@@ -558,7 +564,7 @@ fn builtin_trigger_fanout_emits_multiple_run_requests_end_to_end() {
 #[test]
 fn builtin_trigger_generation_preserves_alias_payload_contract() {
     let definitions = vec![
-        trigger_definition("manual-trigger", "manual", "manual-source"),
+        trigger_definition("manual-trigger", "builtin", "manual"),
         trigger_definition("market-trigger", "builtin", "market_tick"),
     ];
 
@@ -568,7 +574,7 @@ fn builtin_trigger_generation_preserves_alias_payload_contract() {
     assert_eq!(emissions["manual-trigger"].len(), 1);
     assert_eq!(
         emissions["manual-trigger"][0].payload,
-        serde_json::json!({"kind": "manual", "source": "manual-source"})
+        serde_json::json!({"kind": "manual", "source": "manual"})
     );
     assert_eq!(emissions["market-trigger"].len(), 1);
     assert_eq!(
@@ -742,7 +748,7 @@ fn trigger_plugin_host_uses_default_deny_environment() {
     let manifests = vec![plugin_manifest(
         "plugin-env-probe",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "plugin-env-probe.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
@@ -786,7 +792,7 @@ fn external_trigger_plugin_receives_params_via_stdin_protocol() {
     let manifests = vec![plugin_manifest(
         "plugin-params",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "plugin-params-probe.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
@@ -842,7 +848,7 @@ fn external_trigger_plugin_rejects_event_before_ready() {
     let manifests = vec![plugin_manifest(
         "plugin-bad-order",
         "2.0.0",
-        "trigger",
+        "external_trigger",
         "plugin-bad-order.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
@@ -881,7 +887,7 @@ fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefi
         trigger_id: trigger_id.to_string(),
         kind: kind.to_string(),
         source: source.to_string(),
-        plugin: (kind == "external_plugin" || kind == "plugin").then(|| source.to_string()),
+        plugin: (kind == "external_plugin").then(|| source.to_string()),
         workflow_id: match trigger_id {
             "builtin-trigger" => "wf-builtin",
             "external-trigger" => "wf-external",
