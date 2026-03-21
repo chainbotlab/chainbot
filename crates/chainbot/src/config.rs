@@ -8,14 +8,13 @@
 //! Defines the configuration and package-loading boundary for ChainBot runtime state on disk.
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{assert_supported_major, ContractError};
+use crate::errors::{assert_required_major, assert_supported_major, ContractError};
 use crate::plugin::PluginManifest;
 use crate::script_protocol::{WorkerRequestEnvelope, WorkerResponseEnvelope};
 use crate::secrets::SecretReference;
@@ -27,7 +26,6 @@ pub const CURRENT_SCHEMA_MAJOR: u64 = 2;
 pub const DEFAULT_ROOT_DIR_NAME: &str = ".chainbot";
 pub const CHAINBOT_CONFIG_DIR_ENV: &str = "CHAINBOT_CONFIG_DIR";
 pub const ROOT_CONFIG_FILE_NAME: &str = "chainbot.toml";
-pub const LEGACY_ROOT_CONFIG_FILE_NAME: &str = "root.toml";
 pub const PACKAGE_CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,7 +46,7 @@ pub struct WorkerTemplate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootConfigDefinition {
-    #[serde(rename = "manifest_version", alias = "schema_version")]
+    #[serde(rename = "manifest_version")]
     pub schema_version: String,
     #[serde(default)]
     pub chainbot_version: Option<String>,
@@ -60,8 +58,6 @@ pub struct RootConfigDefinition {
     pub runtime_defaults: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub paths: RootPathOverrides,
-    #[serde(default)]
-    pub plugins: RootPluginDiscovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -76,12 +72,6 @@ pub struct RootPathOverrides {
     pub secrets_dir: Option<String>,
     #[serde(default)]
     pub state_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct RootPluginDiscovery {
-    #[serde(default)]
-    pub manifest_globs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,7 +140,7 @@ impl ConfigRoot {
 
 impl RootConfigDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
+        assert_required_major(
             "root_config.manifest_version",
             &self.schema_version,
             CURRENT_SCHEMA_MAJOR,
@@ -212,42 +202,16 @@ impl RootLayout {
         self.root.join(ROOT_CONFIG_FILE_NAME)
     }
 
-    pub fn legacy_root_config_path(&self) -> PathBuf {
-        self.config_dir.join(LEGACY_ROOT_CONFIG_FILE_NAME)
-    }
-
-    pub fn existing_root_config_path(&self) -> Option<PathBuf> {
-        let primary_path = self.root_config_path();
-        if primary_path.is_file() {
-            return Some(primary_path);
-        }
-
-        let legacy_path = self.legacy_root_config_path();
-        if legacy_path.is_file() {
-            return Some(legacy_path);
-        }
-
-        None
-    }
-
-    pub fn plugin_manifests_dir(&self) -> PathBuf {
-        self.plugins_dir.join("manifests")
-    }
-
     pub fn validate_bootstrap_paths_exist(&self) -> Result<(), ContractError> {
         validate_directory_exists(&self.root, "root")?;
-        let root_config_path = self
-            .existing_root_config_path()
-            .unwrap_or_else(|| self.root_config_path());
+        let root_config_path = self.root_config_path();
         validate_file_exists(&root_config_path, "root config")?;
         Ok(())
     }
 
     pub fn validate_paths_exist(&self) -> Result<(), ContractError> {
         validate_directory_exists(&self.root, "root")?;
-        let root_config_path = self
-            .existing_root_config_path()
-            .unwrap_or_else(|| self.root_config_path());
+        let root_config_path = self.root_config_path();
         validate_file_exists(&root_config_path, "root config")?;
         validate_directory_exists(&self.workflows_dir, "workflows")?;
         validate_directory_exists(&self.triggers_dir, "triggers")?;
@@ -263,10 +227,8 @@ impl RootDefinitionBundle {
         let effective_layout = load_effective_root_layout(layout)?;
         effective_layout.validate_paths_exist()?;
 
-        let root_config: RootConfigDefinition = decode_required_toml(
-            &resolve_existing_root_config_path(&effective_layout)?,
-            "root config",
-        )?;
+        let root_config: RootConfigDefinition =
+            decode_required_toml(&resolve_root_config_path(&effective_layout)?, "root config")?;
         root_config.validate()?;
 
         let workflows: Vec<WorkflowDefinition> =
@@ -281,11 +243,7 @@ impl RootDefinitionBundle {
             trigger.validate()?;
         }
 
-        let plugins: Vec<PluginManifest> = decode_plugin_manifests(
-            &effective_layout.root,
-            &effective_layout.plugins_dir,
-            &root_config.plugins,
-        )?;
+        let plugins: Vec<PluginManifest> = decode_plugin_manifests(&effective_layout.plugins_dir)?;
         for plugin in &plugins {
             plugin.validate()?;
         }
@@ -349,7 +307,7 @@ pub fn load_trigger_definitions(
 ) -> Result<Vec<TriggerDefinition>, ContractError> {
     let effective_layout = load_effective_root_layout(layout)?;
     validate_directory_exists(&effective_layout.root, "root")?;
-    let _ = resolve_existing_root_config_path(&effective_layout)?;
+    let _ = resolve_root_config_path(&effective_layout)?;
     validate_directory_exists(&effective_layout.triggers_dir, "triggers")?;
     let triggers: Vec<TriggerDefinition> =
         decode_package_collection(&effective_layout.triggers_dir)?;
@@ -429,19 +387,22 @@ pub fn resolve_root_layout() -> Result<RootLayout, ContractError> {
 
 pub fn load_effective_root_layout(base_layout: &RootLayout) -> Result<RootLayout, ContractError> {
     base_layout.validate_bootstrap_paths_exist()?;
-    let root_config_path = resolve_existing_root_config_path(base_layout)?;
+    let root_config_path = resolve_root_config_path(base_layout)?;
     let root_config: RootConfigDefinition = decode_required_toml(&root_config_path, "root config")?;
     root_config.validate()?;
     base_layout.apply_root_config(&root_config)
 }
 
-fn resolve_existing_root_config_path(layout: &RootLayout) -> Result<PathBuf, ContractError> {
-    layout
-        .existing_root_config_path()
-        .ok_or_else(|| ContractError::MissingFile {
-            path: layout.root_config_path(),
+fn resolve_root_config_path(layout: &RootLayout) -> Result<PathBuf, ContractError> {
+    let path = layout.root_config_path();
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(ContractError::MissingFile {
+            path,
             kind: "root config",
         })
+    }
 }
 
 impl RootLayout {
@@ -598,82 +559,31 @@ where
     Ok(definitions)
 }
 
-fn decode_plugin_manifests(
-    root: &Path,
-    plugins_dir: &Path,
-    discovery: &RootPluginDiscovery,
-) -> Result<Vec<PluginManifest>, ContractError> {
+fn decode_plugin_manifests(plugins_dir: &Path) -> Result<Vec<PluginManifest>, ContractError> {
     let mut definitions = Vec::new();
+    let mut plugin_ids = std::collections::BTreeSet::new();
 
-    for path in collect_plugin_manifest_files(root, plugins_dir, discovery)? {
+    for path in collect_plugin_package_config_files(plugins_dir)? {
         let mut definition = decode_required_toml::<PluginManifest>(&path, "definition")?;
-        definition.manifest_path = path;
+        definition.manifest_path = path.clone();
+        validate_package_identity(
+            "plugin",
+            path.parent().unwrap_or_else(|| Path::new("")),
+            &definition.plugin_id,
+        )?;
+        if !plugin_ids.insert(definition.plugin_id.clone()) {
+            return Err(ContractError::DuplicatePluginId {
+                plugin_id: definition.plugin_id,
+            });
+        }
         definitions.push(definition);
     }
 
     Ok(definitions)
 }
 
-fn collect_plugin_manifest_files(
-    root: &Path,
-    plugins_dir: &Path,
-    discovery: &RootPluginDiscovery,
-) -> Result<Vec<PathBuf>, ContractError> {
-    let manifest_globs = if discovery.manifest_globs.is_empty() {
-        vec![String::from("plugins/manifests/*.toml")]
-    } else {
-        discovery.manifest_globs.clone()
-    };
-
-    let mut files = Vec::new();
-    for pattern in manifest_globs {
-        let Some(directory_pattern) = pattern.strip_suffix("/*.toml") else {
-            return Err(ContractError::InvalidRootConfigField {
-                field: "root_config.plugins.manifest_globs",
-                detail: format!(
-                    "unsupported pattern `{pattern}`; expected a root-relative <dir>/*.toml form"
-                ),
-            });
-        };
-        let directory = if directory_pattern == "plugins/manifests" {
-            plugins_dir.join("manifests")
-        } else {
-            resolve_root_relative_dir(
-                root,
-                "root_config.plugins.manifest_globs",
-                directory_pattern,
-            )?
-        };
-        files.extend(collect_toml_files(&directory)?);
-    }
-
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
-fn collect_toml_files(directory: &Path) -> Result<Vec<PathBuf>, ContractError> {
-    let entries = fs::read_dir(directory).map_err(|source| ContractError::Io {
-        path: directory.to_path_buf(),
-        operation: "read directory",
-        source,
-    })?;
-
-    let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| ContractError::Io {
-            path: directory.to_path_buf(),
-            operation: "read directory entry",
-            source,
-        })?;
-        let path = entry.path();
-        if path.is_file() && path.extension() == Some(OsStr::new("toml")) {
-            files.push(path);
-        }
-    }
-
-    files.sort();
-    Ok(files)
+fn collect_plugin_package_config_files(plugins_dir: &Path) -> Result<Vec<PathBuf>, ContractError> {
+    collect_package_config_files(plugins_dir)
 }
 
 fn collect_package_config_files(directory: &Path) -> Result<Vec<PathBuf>, ContractError> {

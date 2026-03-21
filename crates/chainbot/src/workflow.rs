@@ -18,7 +18,7 @@ use petgraph::algo::tarjan_scc;
 use petgraph::graph::DiGraph;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::errors::{assert_supported_major, ContractError};
+use crate::errors::{assert_required_major, ContractError};
 use crate::executor::NodeDefinition;
 pub const CURRENT_API_MAJOR: u64 = 2;
 
@@ -455,7 +455,7 @@ pub struct RuntimeVariableLayers {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkflowHeader {
-    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(rename = "manifest_version")]
     manifest_version: String,
     #[serde(rename = "id", alias = "workflow_id")]
     id: String,
@@ -486,7 +486,7 @@ struct RawSubflowCallDefinition {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawNodeDefinition {
-    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(rename = "manifest_version")]
     pub api_version: String,
     #[serde(rename = "id", alias = "node_id")]
     pub node_id: String,
@@ -627,7 +627,7 @@ impl RawSubflowCallDefinition {
 struct RawWorkflowDefinition {
     #[serde(default)]
     workflow: Option<WorkflowHeader>,
-    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(rename = "manifest_version")]
     #[serde(default)]
     api_version: Option<String>,
     #[serde(rename = "id", alias = "workflow_id")]
@@ -773,7 +773,7 @@ impl<'de> Deserialize<'de> for WorkflowDefinition {
 
 impl WorkflowDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
+        assert_required_major(
             "workflow.manifest_version",
             &self.api_version,
             CURRENT_API_MAJOR,
