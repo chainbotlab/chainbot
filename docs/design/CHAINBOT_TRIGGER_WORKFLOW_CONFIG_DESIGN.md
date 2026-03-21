@@ -353,7 +353,7 @@ executable = "bin/market_feed.sh"
 - plugin package 目录名必须与 `plugin_id` 完全一致
 - plugin manifest 与 workflow / trigger 分离维护
 - `executable` 必须相对 manifest 文件自身解析
-- external trigger plugin 必须声明 `trigger.emit.run_request`
+- external trigger plugin 必须声明 `trigger.listen.event`
 - plugin package 内所有相对路径都相对 plugin package root 解析
 - 根级 plugin package 用于可复用共享插件；trigger package 私有脚本不要求提升为根级共享插件
 
