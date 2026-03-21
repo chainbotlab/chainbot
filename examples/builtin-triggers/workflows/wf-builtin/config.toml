@@ -1,0 +1,16 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-builtin"
+name = "wf-builtin"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "capture-trigger-kind"
+kind = "builtin"
+plugin = "builtin.identity"
+operation = "run"
+depends_on = []
+
+[[nodes.inputs]]
+target = "trigger_kind"
+source = "trigger.kind"

@@ -1,0 +1,36 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-plugin"
+name = "wf-plugin"
+
+[runtime.defaults]
+symbol = "BTCUSDT"
+token = "demo-token"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "external-node"
+kind = "builtin"
+plugin = "builtin.external_node"
+operation = "quote-node-plugin"
+depends_on = []
+
+[[nodes.inputs]]
+target = "symbol"
+source = "run.symbol"
+
+[[nodes.inputs]]
+target = "token"
+source = "run.token"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "capture-decision"
+kind = "builtin"
+plugin = "builtin.identity"
+operation = "run"
+depends_on = ["external-node"]
+
+[[nodes.inputs]]
+target = "decision"
+source = "run.decision"

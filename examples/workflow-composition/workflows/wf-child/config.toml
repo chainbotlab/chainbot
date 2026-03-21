@@ -1,0 +1,28 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-child"
+name = "wf-child"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "shape-decision"
+kind = "builtin"
+plugin = "builtin.identity"
+operation = "run"
+depends_on = []
+
+[[nodes.inputs]]
+target = "decision"
+source = "subflow_input.symbol"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "emit-result"
+kind = "builtin"
+plugin = "builtin.emit_subflow_output"
+operation = "run"
+depends_on = ["shape-decision"]
+
+[[nodes.inputs]]
+target = "decision"
+source = "run.decision"

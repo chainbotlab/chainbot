@@ -17,6 +17,7 @@ Initialize the repository as a Rust workspace rooted at `crates/` while keeping 
 ```text
 .
 |- .opencode/
+|- examples/
 |- crates/
 |  `- chainbot/
 |     `- src/

@@ -5,12 +5,13 @@
 ## Project Metadata
 - Current Phase: Implementation
 - Last Updated: 2026-03-21
-- Workspace Layout: `crates/`
-- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`, `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`, `CONTRIBUTING.md`
+- Workspace Layout: `crates/`, `examples/`
+- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_HELP_DIAGNOSTICS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`, `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`, `CONTRIBUTING.md`
 
 ## Documentation Topology
 ```text
 .agents/
+examples/
 
 docs/
 |- design/
@@ -36,6 +37,8 @@ crates/
 | `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md` | implementation | active | Records the v2.1 package-layout implementation, root-config overrides, and validation coverage. |
 | `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md` | implementation | active | Records the v2.1.2 CLI root-resolution contract update and release-version alignment. |
 | `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md` | implementation | active | Records the v2.1.3 CLI init bootstrap, trigger listing surface, and release-version alignment. |
+| `docs/implementation/CHAINBOT_HELP_DIAGNOSTICS_IMPLEMENTATION.md` | implementation | active | Records the richer help cards, canonical config examples, and precise TOML/argv diagnostics. |
+| `examples/README.md` | user-facing examples | active | Indexes curated single-workflow, builtin-triggers, workflow-composition, plugin-integrations, and custom-paths example roots. |
 | `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md` | implementation | active | Records the unified builtin namespace refactor, trait-backed registries, and final public API layout. |
 | `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md` | implementation | active | Records the params-backed trigger extension model, builtin cron subtype, and validation coverage. |
 | `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md` | implementation | active | Records the v3 canonical-only plugin/state layout cut, removed legacy compatibility, and validation coverage for the redesign. |
@@ -45,6 +48,7 @@ crates/
 
 ## Fractal Architecture
 - `.agents/`: Project-local agent assets and external skill catalog links.
+- `examples/`: Copyable root-level configuration cases aligned with the stable ChainBot root contract.
 - `crates/`: Rust workspace members and crate-local manifests.
 - `docs/`: Long-lived repository knowledge split by design, implementation, interfaces, research, user-facing behavior, and archive state.
 - `postmortem/`: Durable debugging and incident learnings.

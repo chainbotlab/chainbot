@@ -1,0 +1,6 @@
+manifest_version = "2.0.0"
+trigger_id = "tr-market"
+kind = "builtin"
+source = "market_tick"
+workflow_id = "wf-alpha"
+enabled = true

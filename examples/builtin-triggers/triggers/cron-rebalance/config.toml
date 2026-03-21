@@ -1,0 +1,14 @@
+manifest_version = "2.0.0"
+trigger_id = "cron-rebalance"
+kind = "builtin"
+source = "cron"
+workflow_id = "wf-builtin"
+enabled = true
+
+[params]
+schedule = "*/15 * * * *"
+timezone = "UTC"
+
+[input_mapping]
+kind = "payload.kind"
+scheduled_at = "payload.slot_start_ms"
