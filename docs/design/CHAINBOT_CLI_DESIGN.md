@@ -66,9 +66,10 @@ chainbot serve
 ### `init`
 
 - 初始化一个最小可校验的 ChainBot root。
-- 若目标 root 不存在则创建默认目录布局。
+- 若目标 root 不存在则创建默认 canonical 目录布局。
 - 若 `chainbot.toml` 缺失则写入默认模板。
-- 若两个 root config 同时存在，则优先使用 `<root>/chainbot.toml`，旧路径仅作为兼容回退。
+- `init` 只引导当前稳定 root contract：`chainbot.toml`、`workflows/`、`triggers/`、`plugins/bin/`、`secrets/`、`state/`。
+- `init` 不创建旧版 shared manifest 目录，也不把 legacy root-config 路径视为稳定 bootstrap 输出的一部分。
 - 已存在的目录与 root config 默认按幂等方式复用，不递归覆盖业务内容。
 
 ### `list-runs`
