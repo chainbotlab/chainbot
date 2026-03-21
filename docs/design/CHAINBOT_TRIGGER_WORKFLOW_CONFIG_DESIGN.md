@@ -34,8 +34,10 @@
 |     |- assets/
 |     `- plugins/
 |- plugins/
-|  |- manifests/
-|  `- bin/
+|  `- trigger-market-feed/
+|     |- config.toml
+|     |- bin/
+|     `- assets/
 |- secrets/
 `- state/
 ```
@@ -45,9 +47,9 @@
 1. `chainbot.toml`
 2. `workflows/*/config.toml`
 3. `triggers/*/config.toml`
-4. `plugins/manifests/*.toml`
+4. `plugins/<plugin_id>/config.toml`
 
-兼容性说明：loader 优先读取 `<root>/chainbot.toml`，当该文件缺失时回退读取旧路径 `<root>/config/root.toml`。若两个文件同时存在，则 `<root>/chainbot.toml` 作为唯一生效配置源。
+`chainbot.toml` 是唯一受支持的根配置入口；`config/root.toml` 不再属于受支持 contract。
 
 ## `chainbot.toml`
 
@@ -58,7 +60,6 @@
 - root profile
 - path overrides
 - runtime defaults
-- plugin discovery settings
 - secret references
 - all path settings must stay within `<root>` and use root-relative paths
 
@@ -66,7 +67,7 @@
 
 ```toml
 manifest_version = "2.0.0"
-chainbot_version = "2.1.4"
+chainbot_version = "2.1.5"
 profile = "prod"
 secret_refs = ["secret://ops/slack/webhook#token"]
 
@@ -76,9 +77,6 @@ triggers_dir = "triggers"
 plugins_dir = "plugins"
 secrets_dir = "secrets"
 state_dir = "state"
-
-[plugins]
-manifest_globs = ["plugins/manifests/*.toml"]
 
 [runtime_defaults]
 timezone = "UTC"
@@ -303,7 +301,7 @@ triggers/
   - `trigger_id`
   - `source`
   - `params`
-- external trigger plugins may ignore stdin and still work when they only depend on legacy argv-based behavior
+- external trigger plugins may rely on the current stdin envelope plus the retained `--trigger-id <trigger_id>` argv compatibility shim
 - external trigger plugins that want params-aware behavior should read stdin and decode `TriggerPluginInput`
 
 ## Workflow Run Model
@@ -334,9 +332,9 @@ triggers/
 
 这个优先级属于执行 contract，不因 trigger 是否存在而变化。
 
-## `plugins/manifests/*.toml`
+## `plugins/<plugin_id>/config.toml`
 
-plugin manifest 保持根级独立注册，用于共享插件与宿主级能力控制。它不属于 workflow 或 trigger 的业务配置。
+plugin manifest 保持根级独立注册，用于共享插件与宿主级能力控制。它不属于 workflow 或 trigger 的业务配置，但它本身采用 package/folder 结构管理。
 
 示例：
 
@@ -346,24 +344,18 @@ plugin_id = "trigger-market-feed"
 kind = "external_trigger"
 entrypoint = "trigger.exec.v1"
 capabilities = ["trigger.emit.run_request"]
-executable = "../bin/market_feed.sh"
+executable = "bin/market_feed.sh"
 ```
 
 ### Plugin 约束
 
+- canonical entrypoint 是 `plugins/<plugin_id>/config.toml`
+- plugin package 目录名必须与 `plugin_id` 完全一致
 - plugin manifest 与 workflow / trigger 分离维护
 - `executable` 必须相对 manifest 文件自身解析
 - external trigger plugin 必须声明 `trigger.emit.run_request`
-- 根级 plugin manifest 用于可复用共享插件；trigger package 私有脚本不要求提升为根级共享插件
-
-## Root Plugin Discovery
-
-`chainbot.toml` 的 `[plugins].manifest_globs` 定义共享 plugin manifest 的发现入口。
-
-- 默认值是 `["plugins/manifests/*.toml"]`
-- 每一项都必须是 root-relative `<dir>/*.toml` 形式
-- 每一项都必须保持在 `<root>` 内，不能使用绝对路径或 `..`
-- discovery 只影响共享 plugin manifests，不影响 workflow/trigger package discovery
+- plugin package 内所有相对路径都相对 plugin package root 解析
+- 根级 plugin package 用于可复用共享插件；trigger package 私有脚本不要求提升为根级共享插件
 
 ## 校验规则
 

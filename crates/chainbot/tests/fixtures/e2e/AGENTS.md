@@ -6,5 +6,5 @@
 - Constraints: Keep fixtures deterministic, local-only, and free of real credentials.
 
 ## Members
-- `success/`: Runnable v2.1 fixture root with one workflow package, one trigger package, shared plugin manifests, plugin executables, and a secret reference.
-- `failure_missing_secret/`: Runnable v2.1 fixture root that keeps package manifests valid but fails at runtime secret resolution.
+- `success/`: Runnable v3 canonical-only fixture root with one workflow package, one trigger package, one canonical plugin package, plugin executables, and a secret reference.
+- `failure_missing_secret/`: Runnable v3 canonical-only fixture root that keeps package manifests valid but fails at runtime secret resolution.

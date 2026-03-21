@@ -67,7 +67,7 @@ chainbot serve
 
 - 初始化一个最小可校验的 ChainBot root。
 - 若目标 root 不存在则创建默认目录布局。
-- 若 `chainbot.toml` 与兼容路径 `config/root.toml` 都缺失则写入默认模板。
+- 若 `chainbot.toml` 缺失则写入默认模板。
 - 若两个 root config 同时存在，则优先使用 `<root>/chainbot.toml`，旧路径仅作为兼容回退。
 - 已存在的目录与 root config 默认按幂等方式复用，不递归覆盖业务内容。
 
@@ -224,7 +224,7 @@ CLI 错误不仅描述失败，还必须给出下一步动作。
 
 - unsupported command -> 尽量给出最近命令建议，并引导 `chainbot help`
 - missing root directory -> 引导设置 `CHAINBOT_CONFIG_DIR` 或检查默认 `~/.chainbot` 是否指向有效 root
-- missing root config file -> 引导检查 `CHAINBOT_CONFIG_DIR` 指向的 root，确认 `chainbot.toml` 存在且可加载；旧 root 可回退使用 `config/root.toml`，但若两个文件同时存在则以 `chainbot.toml` 为准
+- missing root config file -> 引导检查 `CHAINBOT_CONFIG_DIR` 指向的 root，确认 `chainbot.toml` 存在且可加载
 - invalid config -> 返回 validation error，不降级为 partial status payload
 
 ## Output Strategy
@@ -251,7 +251,7 @@ CLI 假设 ChainBot root 继续遵守 `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CON
 - `chainbot.toml`
 - `workflows/*/config.toml`
 - `triggers/*/config.toml`
-- `plugins/manifests/*.toml`
+- `plugins/<plugin_id>/config.toml`
 
 `status`、`trigger`、`validate`、`run` 与 `serve` 都基于该 root contract 工作，并统一遵守 `CHAINBOT_CONFIG_DIR` 优先、`~/.chainbot` 回退的 root 解析顺序。
 
