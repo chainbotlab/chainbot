@@ -334,6 +334,68 @@ fn trigger_dedup_and_cooldown() {
 }
 
 #[test]
+fn trigger_sequence_continues_from_snapshot_after_restart() {
+    let (state_layout, plugin_root) = unique_layout("trigger-sequence-continues-from-snapshot");
+    let definitions = vec![trigger_definition(
+        "builtin-market",
+        "builtin",
+        "market_tick",
+    )];
+    let manifests = Vec::<PluginManifest>::new();
+    let host_policy = policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]);
+
+    let mut first_plane = TriggerPlane::open(
+        state_layout.clone(),
+        definitions.clone(),
+        manifests.clone(),
+        host_policy.clone(),
+        BTreeMap::from([(
+            "builtin-market".to_string(),
+            vec![builtin_event(
+                "event-a",
+                "wf-a",
+                "dedup-a",
+                1_000,
+                "cooldown-a",
+                5_000,
+            )],
+        )]),
+        1_710_100_020_000,
+    )
+    .expect("first trigger plane should open");
+    let first_requests = first_plane
+        .collect_run_requests(1_710_100_020_000)
+        .expect("first trigger pass should succeed");
+    assert_eq!(first_requests.len(), 1);
+    assert!(first_requests[0].run_id.ends_with("00000000000000000001"));
+
+    let mut second_plane = TriggerPlane::open(
+        state_layout,
+        definitions,
+        manifests,
+        host_policy,
+        BTreeMap::from([(
+            "builtin-market".to_string(),
+            vec![builtin_event(
+                "event-b",
+                "wf-a",
+                "dedup-b",
+                1_000,
+                "cooldown-b",
+                5_000,
+            )],
+        )]),
+        1_710_100_021_000,
+    )
+    .expect("second trigger plane should open from persisted snapshot");
+    let second_requests = second_plane
+        .collect_run_requests(1_710_100_021_000)
+        .expect("second trigger pass should succeed");
+    assert_eq!(second_requests.len(), 1);
+    assert!(second_requests[0].run_id.ends_with("00000000000000000002"));
+}
+
+#[test]
 fn builtin_and_external_trigger_emit_run_requests() {
     let (state_layout, plugin_root) = unique_layout("builtin-and-external-emit-run-requests");
     let external_plugin_path = plugin_root.join("plugin-external.sh");

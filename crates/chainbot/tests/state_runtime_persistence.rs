@@ -15,8 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chainbot::config::RootLayout;
 use chainbot::state::{
     CoordinationStore, FileBackedStateStore, FileStateError, LeaseAcquireResult, RunRecordSummary,
-    RunStatus, ServeLeaseState, StateLayout, TriggerEventRecord, WorkflowRuntimeLogEntry,
-    SERVE_OWNER_ID_PREFIX,
+    RunStatus, ServeLeaseState, StateLayout, TriggerEventRecord, TriggerSnapshotRecord,
+    WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
 };
 use rusqlite::Connection;
 
@@ -467,6 +467,72 @@ fn file_log_recovery_and_rotation_policy() {
     assert!(!layout
         .staged_trigger_record_path("run-log", 1, "trigger-log", "event-log")
         .exists());
+
+    fs::write(layout.workflow_log_sequence_cursor_path("run-log"), b"2")
+        .expect("cursor file should be writable");
+    let appended_path = store
+        .append_workflow_log_entry(
+            "run-log",
+            "run_finished",
+            "cursor-cached append",
+            1_710_500_000_040,
+        )
+        .expect("append should advance beyond stale cursor and existing files");
+    assert_eq!(appended_path, layout.workflow_log_entry_path("run-log", 3));
+}
+
+#[test]
+fn trigger_snapshot_roundtrip_and_recovery() {
+    let layout = unique_state_layout("trigger-snapshot-roundtrip-and-recovery");
+    let store = FileBackedStateStore::new(layout.clone());
+    store
+        .initialize()
+        .expect("file-backed state tree should initialize");
+
+    let trigger_record = TriggerEventRecord {
+        schema_version: "1.0.0".to_string(),
+        run_id: "run-snapshot".to_string(),
+        sequence: 7,
+        trigger_id: "trigger-snapshot".to_string(),
+        workflow_id: "wf-snapshot".to_string(),
+        event_id: "event-snapshot".to_string(),
+        checkpoint: Some("cp-7".to_string()),
+        source: "fixture".to_string(),
+        accepted_at_ms: 1_710_500_100_000,
+        payload: serde_json::json!({"event": 7}),
+        dedup_key: Some("dedup-snapshot".to_string()),
+        dedup_expires_at_ms: Some(1_710_500_110_000),
+        cooldown_key: Some("cooldown-snapshot".to_string()),
+        cooldown_expires_at_ms: Some(1_710_500_120_000),
+    };
+    let mut snapshot = TriggerSnapshotRecord::new("trigger-snapshot");
+    snapshot.apply_record(&trigger_record);
+
+    let snapshot_path = store
+        .write_trigger_snapshot(&snapshot)
+        .expect("trigger snapshot should persist");
+    assert_eq!(
+        snapshot_path,
+        layout.trigger_snapshot_path("trigger-snapshot")
+    );
+
+    let loaded = store
+        .read_trigger_snapshot("trigger-snapshot")
+        .expect("trigger snapshot should load")
+        .expect("trigger snapshot should exist");
+    assert_eq!(loaded, snapshot);
+
+    let staged_snapshot_path = layout.staged_trigger_snapshot_path("trigger-snapshot");
+    fs::remove_file(&snapshot_path)
+        .expect("committed snapshot should be removable for staged recovery");
+    write_json_file(&staged_snapshot_path, &snapshot);
+
+    let recovery = store
+        .recover_trigger_snapshots()
+        .expect("staged trigger snapshot should recover");
+    assert_eq!(recovery.promoted_staged_files, 1);
+    assert_eq!(recovery.removed_staged_files, 0);
+    assert!(snapshot_path.exists());
 }
 
 fn write_json_file<T>(path: &Path, value: &T)

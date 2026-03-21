@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chainbot::config::RootLayout;
 use chainbot::state::{
     CoordinationStore, FileBackedStateStore, RunRecordSummary, RunStatus, StateLayout,
-    SERVE_OWNER_ID_PREFIX,
+    TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX,
 };
 
 fn acquire_fixture_lock() -> MutexGuard<'static, ()> {
@@ -659,6 +659,111 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
         .run_dir("run-incomplete")
         .join("workflow-logs")
         .exists());
+}
+
+#[test]
+fn status_reads_trigger_snapshot_without_record_scan_side_effects() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(basic_root()));
+    let state_store = FileBackedStateStore::new(state_layout.clone());
+    state_store
+        .initialize()
+        .expect("state tree should initialize for trigger snapshot status test");
+
+    let mut snapshot = TriggerSnapshotRecord::new("tr-market");
+    snapshot.last_event_id = Some("event-snapshot".to_string());
+    snapshot.last_accepted_at_ms = Some(1_710_000_050_000);
+    snapshot.last_sequence = 4;
+    snapshot
+        .accepted_event_ids
+        .insert("event-snapshot".to_string());
+    state_store
+        .write_trigger_snapshot(&snapshot)
+        .expect("trigger snapshot should persist for status output");
+
+    let records_dir = state_layout
+        .trigger_state_dir
+        .join("tr-market")
+        .join("records");
+    assert!(!records_dir.exists());
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status json should execute with trigger snapshot only");
+
+    assert!(output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("status json payload should decode");
+    assert_eq!(payload["triggers"][0]["last_event_id"], "event-snapshot");
+    assert_eq!(
+        payload["triggers"][0]["last_accepted_at_ms"],
+        1_710_000_050_000_i64
+    );
+}
+
+#[test]
+fn list_runs_does_not_recover_or_promote_staged_summaries() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(basic_root()));
+    let state_store = FileBackedStateStore::new(state_layout.clone());
+    state_store
+        .initialize()
+        .expect("state tree should initialize for list-runs read-only test");
+
+    state_store
+        .write_run_summary(&RunRecordSummary {
+            schema_version: "1.0.0".to_string(),
+            run_id: "run-committed".to_string(),
+            workflow_id: "wf-alpha".to_string(),
+            status: RunStatus::Running,
+            started_at_ms: 1_710_000_060_000,
+            finished_at_ms: None,
+        })
+        .expect("committed run summary should persist");
+
+    let staged_summary_path = state_layout.staged_run_summary_path("run-staged");
+    fs::create_dir_all(
+        staged_summary_path
+            .parent()
+            .expect("staged run summary should have a parent directory"),
+    )
+    .expect("staged run summary directory should be creatable");
+    fs::write(
+        &staged_summary_path,
+        serde_json::to_vec_pretty(&RunRecordSummary {
+            schema_version: "1.0.0".to_string(),
+            run_id: "run-staged".to_string(),
+            workflow_id: "wf-alpha".to_string(),
+            status: RunStatus::Succeeded,
+            started_at_ms: 1_710_000_061_000,
+            finished_at_ms: Some(1_710_000_061_100),
+        })
+        .expect("staged run summary should serialize"),
+    )
+    .expect("staged run summary should be writable");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("list-runs")
+        .output()
+        .expect("list-runs should execute without recovery");
+
+    assert!(output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("list-runs payload should decode");
+    let runs = payload
+        .as_array()
+        .expect("list-runs should return a JSON array");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["run_id"], "run-committed");
+    assert_eq!(runs[0]["status"], "running");
+    assert!(staged_summary_path.exists());
 }
 
 #[test]
