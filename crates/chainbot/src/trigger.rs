@@ -29,6 +29,7 @@ use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifes
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
     FileStateError, StateLayout, TriggerCheckpointRecord, TriggerEventRecord,
+    TriggerSnapshotRecord,
 };
 
 pub const CURRENT_API_MAJOR: u64 = 2;
@@ -325,18 +326,6 @@ impl TriggerPlane {
         builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
         now_ms: i64,
     ) -> Result<Self, TriggerPlaneError> {
-        let state_store = FileBackedStateStore::new(state_layout.clone());
-        state_store.initialize()?;
-        let _ = state_store.recover_trigger_records()?;
-        let trigger_records = state_store.load_trigger_records()?;
-        let mut coordination_store = CoordinationStore::open(&state_layout, now_ms)?;
-        coordination_store.rebuild_trigger_record_coordination(&trigger_records, now_ms)?;
-        let accepted_event_keys = trigger_records
-            .iter()
-            .map(|record| accepted_event_key(&record.trigger_id, &record.event_id))
-            .into_iter()
-            .collect();
-
         let mut validated_definitions = Vec::with_capacity(definitions.len());
         let mut definition_ids = BTreeSet::new();
         for definition in definitions {
@@ -351,6 +340,48 @@ impl TriggerPlane {
             validated_definitions.push(definition);
         }
 
+        let state_store = FileBackedStateStore::new(state_layout.clone());
+        state_store.initialize()?;
+        let _ = state_store.recover_trigger_records()?;
+        let _ = state_store.recover_trigger_snapshots()?;
+        let mut snapshots_by_trigger = state_store
+            .load_committed_trigger_snapshots()?
+            .into_iter()
+            .map(|snapshot| (snapshot.trigger_id.clone(), snapshot))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut trigger_snapshots = Vec::with_capacity(validated_definitions.len());
+        let mut accepted_event_keys = BTreeSet::new();
+        let mut accepted_sequence = 0_u64;
+
+        for definition in &validated_definitions {
+            let mut snapshot = snapshots_by_trigger
+                .remove(&definition.trigger_id)
+                .unwrap_or_else(|| TriggerSnapshotRecord::new(definition.trigger_id.clone()));
+            let delta_records = state_store.load_trigger_records_after_sequence(
+                &definition.trigger_id,
+                snapshot.last_sequence,
+            )?;
+            if !delta_records.is_empty() {
+                for record in &delta_records {
+                    snapshot.apply_record(record);
+                }
+                let _ = state_store.write_trigger_snapshot(&snapshot);
+            }
+
+            accepted_sequence = accepted_sequence.max(snapshot.last_sequence);
+            accepted_event_keys.extend(
+                snapshot
+                    .accepted_event_ids
+                    .iter()
+                    .map(|event_id| accepted_event_key(&definition.trigger_id, event_id)),
+            );
+            trigger_snapshots.push(snapshot);
+        }
+
+        let mut coordination_store = CoordinationStore::open(&state_layout, now_ms)?;
+        coordination_store.rebuild_trigger_snapshot_coordination(&trigger_snapshots, now_ms)?;
+
         let mut external_plugins = BTreeMap::new();
         for manifest in plugin_manifests {
             let plugin = validate_trigger_plugin_manifest(&manifest, &policy)?;
@@ -363,7 +394,7 @@ impl TriggerPlane {
             external_plugins,
             state_store,
             coordination_store,
-            accepted_sequence: 0,
+            accepted_sequence,
             accepted_event_keys,
         })
     }
@@ -533,6 +564,12 @@ impl TriggerPlane {
         let trigger_record_path = self.state_store.write_trigger_record(&trigger_record)?;
         self.coordination_store
             .apply_trigger_record_coordination(&trigger_record, accepted_at_ms)?;
+        let mut snapshot = self
+            .state_store
+            .read_trigger_snapshot(&definition.trigger_id)?
+            .unwrap_or_else(|| TriggerSnapshotRecord::new(definition.trigger_id.clone()));
+        snapshot.apply_record(&trigger_record);
+        let _ = self.state_store.write_trigger_snapshot(&snapshot);
         if let Some(checkpoint) = checkpoint {
             self.state_store
                 .write_trigger_checkpoint(&TriggerCheckpointRecord {

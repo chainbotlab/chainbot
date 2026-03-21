@@ -28,7 +28,7 @@ use crate::plugin::{PluginKind, PluginManifest};
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
     FileStateError, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
-    ServeLeaseState, StateLayout, TriggerEventRecord, SERVE_OWNER_ID_PREFIX,
+    ServeLeaseState, StateLayout, TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX,
 };
 use crate::trigger::{
     TriggerDefinition, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
@@ -447,9 +447,9 @@ impl CliRequest {
         let run_summaries = state_store
             .list_committed_run_summaries()
             .map_err(|error| map_file_state_error("list committed run summaries", error))?;
-        let trigger_records = state_store
-            .load_committed_trigger_records()
-            .map_err(|error| map_file_state_error("load committed trigger records", error))?;
+        let trigger_snapshots = state_store
+            .load_committed_trigger_snapshots()
+            .map_err(|error| map_file_state_error("load committed trigger snapshots", error))?;
         let serve_lease =
             CoordinationStore::inspect_existing_serve_lease(&state_layout, observed_at_ms)
                 .map_err(|error| map_coordination_error("inspect existing serve lease", error))?;
@@ -460,7 +460,7 @@ impl CliRequest {
             &definitions.workflows,
             &definitions.triggers,
             &run_summaries,
-            &trigger_records,
+            &trigger_snapshots,
             serve_lease,
         );
 
@@ -518,16 +518,9 @@ impl CliRequest {
     fn execute_list_runs(&self) -> Result<CliOutput, UserFacingError> {
         let layout = self.resolve_existing_root()?;
         let store = FileBackedStateStore::new(StateLayout::from_root_layout(&layout));
-        store
-            .initialize()
-            .map_err(|error| map_file_state_error("initialize runtime state", error))?;
-        let recovered_at_ms = current_time_ms()?;
-        let _ = store
-            .recover_runtime_state(recovered_at_ms)
-            .map_err(|error| map_file_state_error("recover runtime state", error))?;
         let summaries = store
-            .list_run_summaries()
-            .map_err(|error| map_file_state_error("list persisted run summaries", error))?;
+            .list_committed_run_summaries()
+            .map_err(|error| map_file_state_error("list committed run summaries", error))?;
         let payload = serde_json::to_string_pretty(&summaries).map_err(|source| {
             UserFacingError::state(format!(
                 "Failed to serialize run summaries for output: {source}"
@@ -772,7 +765,7 @@ fn build_status_output(
     workflows: &[WorkflowDefinition],
     triggers: &[TriggerDefinition],
     run_summaries: &[RunRecordSummary],
-    trigger_records: &[TriggerEventRecord],
+    trigger_snapshots: &[TriggerSnapshotRecord],
     serve_lease: ServeLeaseSnapshot,
 ) -> StatusOutput {
     let mut latest_runs = BTreeMap::<String, RunRecordSummary>::new();
@@ -785,15 +778,10 @@ fn build_status_output(
         }
     }
 
-    let mut latest_trigger_events = BTreeMap::<String, TriggerEventRecord>::new();
-    for record in trigger_records {
-        match latest_trigger_events.get(&record.trigger_id) {
-            Some(current) if !trigger_record_is_newer(record, current) => {}
-            _ => {
-                latest_trigger_events.insert(record.trigger_id.clone(), record.clone());
-            }
-        }
-    }
+    let latest_trigger_events = trigger_snapshots
+        .iter()
+        .map(|snapshot| (snapshot.trigger_id.clone(), snapshot.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let workflow_views = workflows
         .iter()
@@ -817,8 +805,8 @@ fn build_status_output(
                 trigger_id: trigger.trigger_id.clone(),
                 enabled: trigger.enabled,
                 workflow_id: trigger.workflow_id.clone(),
-                last_event_id: latest_record.map(|record| record.event_id.clone()),
-                last_accepted_at_ms: latest_record.map(|record| record.accepted_at_ms),
+                last_event_id: latest_record.and_then(|record| record.last_event_id.clone()),
+                last_accepted_at_ms: latest_record.and_then(|record| record.last_accepted_at_ms),
             }
         })
         .collect::<Vec<_>>();
@@ -928,14 +916,6 @@ fn run_summary_is_newer(candidate: &RunRecordSummary, current: &RunRecordSummary
         current.finished_at_ms.unwrap_or(i64::MIN),
         &current.run_id,
     )
-}
-
-fn trigger_record_is_newer(candidate: &TriggerEventRecord, current: &TriggerEventRecord) -> bool {
-    (
-        candidate.accepted_at_ms,
-        candidate.sequence,
-        &candidate.event_id,
-    ) > (current.accepted_at_ms, current.sequence, &current.event_id)
 }
 
 fn render_serve_lease_state(state: ServeLeaseState) -> &'static str {
