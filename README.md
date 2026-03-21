@@ -21,7 +21,7 @@ chainbot status
 # Run the inferred top-level workflow
 chainbot run
 
-# Serve the web interface
+# Drain one trigger snapshot under a serve lease
 chainbot serve
 
 # Manage triggers
@@ -66,6 +66,85 @@ The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to overr
 ## Configuration
 
 Main configuration file: `chainbot.toml`
+
+For complete copyable roots, see [`examples/`](examples/README.md).
+
+Use `chainbot help validate`, `chainbot help trigger`, and `chainbot help run` for CLI-embedded config examples.
+
+### Root config example
+
+```toml
+manifest_version = "2.0.0"
+chainbot_version = "2.2.0"
+profile = "basic"
+secret_refs = ["secret://ops/slack/webhook#token"]
+
+[paths]
+workflows_dir = "workflows"
+triggers_dir = "triggers"
+plugins_dir = "plugins"
+secrets_dir = "secrets"
+state_dir = "state"
+
+[runtime_defaults]
+timezone = "UTC"
+```
+
+### Workflow package example
+
+`workflows/wf-alpha/config.toml`
+
+```toml
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-alpha"
+name = "alpha"
+description = "Normalize a quote payload"
+
+[runtime.defaults]
+symbol = "BTCUSDT"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "normalize"
+kind = "plugin"
+plugin = "quote-plugin"
+operation = "normalize"
+depends_on = []
+```
+
+### Trigger package example
+
+`triggers/tr-market/config.toml`
+
+```toml
+manifest_version = "2.0.0"
+trigger_id = "tr-market"
+kind = "builtin"
+source = "market_tick"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+symbol = "BTCUSDT"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+```
+
+### Plugin package example
+
+`plugins/quote-plugin/config.toml`
+
+```toml
+manifest_version = "2.0.0"
+plugin_id = "quote-plugin"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["normalize"]
+executable = "bin/quote-plugin.sh"
+```
 
 ## Version
 

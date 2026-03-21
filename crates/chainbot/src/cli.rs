@@ -42,6 +42,65 @@ const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
 const INIT_MANIFEST_VERSION: &str = "2.0.0";
 const CHAINBOT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const GENERAL_HELP_EXAMPLE_HINT: &str =
+    "Use `chainbot help validate` for end-to-end config examples.";
+const ROOT_CONFIG_EXAMPLE: &str = r#"# chainbot.toml
+manifest_version = "2.0.0"
+chainbot_version = "2.2.0"
+profile = "basic"
+secret_refs = ["secret://ops/slack/webhook#token"]
+
+[paths]
+workflows_dir = "workflows"
+triggers_dir = "triggers"
+plugins_dir = "plugins"
+secrets_dir = "secrets"
+state_dir = "state"
+
+[runtime_defaults]
+timezone = "UTC"
+"#;
+const WORKFLOW_CONFIG_EXAMPLE: &str = r#"# workflows/wf-alpha/config.toml
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-alpha"
+name = "alpha"
+description = "Normalize a quote payload"
+
+[runtime.defaults]
+symbol = "BTCUSDT"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "normalize"
+kind = "plugin"
+plugin = "quote-plugin"
+operation = "normalize"
+depends_on = []
+"#;
+const TRIGGER_CONFIG_EXAMPLE: &str = r#"# triggers/tr-market/config.toml
+manifest_version = "2.0.0"
+trigger_id = "tr-market"
+kind = "builtin"
+source = "market_tick"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+symbol = "BTCUSDT"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+"#;
+const PLUGIN_CONFIG_EXAMPLE: &str = r#"# plugins/quote-plugin/config.toml
+manifest_version = "2.0.0"
+plugin_id = "quote-plugin"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["normalize"]
+executable = "bin/quote-plugin.sh"
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliCommand {
@@ -277,7 +336,7 @@ impl CliRequest {
 
         if let Some(extra) = args.next() {
             return Err(UserFacingError::usage(format!(
-                "Unexpected argument for help: {}",
+                "Unexpected argument #2 for `chainbot help`: `{}`. Usage: `chainbot help [command]`.",
                 extra.to_string_lossy()
             )));
         }
@@ -294,7 +353,9 @@ impl CliRequest {
         I: Iterator<Item = OsString>,
     {
         let mut json_output = false;
+        let mut position = 0usize;
         while let Some(arg) = args.next() {
+            position += 1;
             let raw = arg.to_string_lossy().into_owned();
             match raw.as_str() {
                 "-h" | "--help" => {
@@ -310,13 +371,19 @@ impl CliRequest {
                 _ => {
                     if let Some((flag, value)) = raw.split_once('=') {
                         if flag == "--json" && matches!(command, CliCommand::Status) {
-                            json_output = parse_bool_flag_value(value)?;
+                            json_output = parse_bool_flag_value(
+                                "--json",
+                                value,
+                                position,
+                                &format!("chainbot {}", command_name(command)),
+                            )?;
                             continue;
                         }
                     }
 
                     return Err(UserFacingError::usage(format!(
-                        "Unexpected argument for {}: {raw}",
+                        "Unexpected argument #{position} after `chainbot {}`: `{raw}`. Run `chainbot help {}` for valid forms.",
+                        command_name(command),
                         command_name(command)
                     )));
                 }
@@ -350,7 +417,9 @@ impl CliRequest {
 
         if action == "list" {
             let mut json_output = false;
+            let mut position = 1usize;
             while let Some(arg) = args.next() {
+                position += 1;
                 let raw = arg.to_string_lossy().into_owned();
                 match raw.as_str() {
                     "--json" => {
@@ -359,13 +428,18 @@ impl CliRequest {
                     _ => {
                         if let Some((flag, value)) = raw.split_once('=') {
                             if flag == "--json" {
-                                json_output = parse_bool_flag_value(value)?;
+                                json_output = parse_bool_flag_value(
+                                    "--json",
+                                    value,
+                                    position,
+                                    "chainbot trigger list",
+                                )?;
                                 continue;
                             }
                         }
 
                         return Err(UserFacingError::usage(format!(
-                            "Unexpected argument for trigger list: {raw}"
+                            "Unexpected argument #{position} after `chainbot trigger list`: `{raw}`. Run `chainbot help trigger` for valid forms."
                         )));
                     }
                 }
@@ -383,13 +457,15 @@ impl CliRequest {
             "disable" => false,
             other => {
                 return Err(UserFacingError::usage(format!(
-                    "Unsupported trigger action `{other}`. Use `list`, `enable`, or `disable`."
+                    "Unsupported trigger action at argument #1 after `chainbot trigger`: `{other}`. Use `list`, `enable`, or `disable`."
                 )));
             }
         };
 
         let mut trigger_id = None;
+        let mut position = 1usize;
         while let Some(arg) = args.next() {
+            position += 1;
             let raw = arg.to_string_lossy().into_owned();
             match raw.as_str() {
                 "-h" | "--help" => {
@@ -406,7 +482,7 @@ impl CliRequest {
                     }
 
                     return Err(UserFacingError::usage(format!(
-                        "Unexpected argument for trigger {}: {raw}",
+                        "Unexpected argument #{position} after `chainbot trigger {}`: `{raw}`. Run `chainbot help trigger` for valid forms.",
                         if enabled { "enable" } else { "disable" }
                     )));
                 }
@@ -706,8 +782,7 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
         "serve" => Ok(HelpTopic::Serve),
         "list-runs" => Ok(HelpTopic::ListRuns),
         other => Err(UserFacingError::usage(format!(
-            "{}",
-            unsupported_command_message(other)
+            "Unsupported help topic at argument #1 after `chainbot help`: `{other}`. Run `chainbot help` to see available command skills."
         ))),
     }
 }
@@ -740,25 +815,397 @@ fn command_name(command: CliCommand) -> &'static str {
     }
 }
 
+fn push_help_list_section(lines: &mut Vec<String>, title: &str, items: &[&str]) {
+    if items.is_empty() {
+        return;
+    }
+
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push(format!("{title}:"));
+    for item in items {
+        lines.push(format!("  - {item}"));
+    }
+}
+
+fn push_help_code_block(lines: &mut Vec<String>, title: &str, language: &str, body: &str) {
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push(format!("{title}:"));
+    lines.push(format!("```{language}"));
+    lines.extend(body.lines().map(str::to_owned));
+    lines.push(String::from("```"));
+}
+
+fn render_help_card(
+    name: &str,
+    summary: &str,
+    usage: &[&str],
+    use_when: &[&str],
+    reads: &[&str],
+    writes: &[&str],
+    does_not_execute: &[&str],
+    outputs: &[&str],
+    root_resolution: &[&str],
+    config_examples: &[(&str, &str, &str)],
+    failure_navigation: &[&str],
+    examples: &[&str],
+    see_also: &[&str],
+) -> String {
+    let mut lines = vec![format!("{name} - {summary}")];
+    push_help_list_section(&mut lines, "Usage", usage);
+    push_help_list_section(&mut lines, "Use when", use_when);
+    push_help_list_section(&mut lines, "Reads", reads);
+    push_help_list_section(&mut lines, "Writes", writes);
+    push_help_list_section(&mut lines, "Does not execute", does_not_execute);
+    push_help_list_section(&mut lines, "Outputs", outputs);
+    push_help_list_section(&mut lines, "Root resolution", root_resolution);
+    for (title, language, body) in config_examples {
+        push_help_code_block(&mut lines, title, language, body);
+    }
+    push_help_list_section(&mut lines, "Failure navigation", failure_navigation);
+    push_help_list_section(&mut lines, "Examples", examples);
+    push_help_list_section(&mut lines, "See also", see_also);
+    lines.join("\n")
+}
+
 fn general_help_text() -> String {
-    format!(
-        "ChainBot command skills\n\nVersion:\n  {CHAINBOT_VERSION}\n\nUsage:\n  chainbot help [command]\n  chainbot version\n  chainbot init\n  chainbot status [--json]\n  chainbot trigger list [--json]\n  chainbot trigger <enable|disable> <trigger-id>\n  chainbot validate\n  chainbot list-runs\n  chainbot run\n  chainbot serve\n\nRoot resolution:\n  - use CHAINBOT_CONFIG_DIR when it is set to a non-empty path\n  - otherwise fall back to ~/.chainbot\n\nCommands:\n  version    Print the running ChainBot version.\n  init       Bootstrap a minimal ChainBot root.\n  status     Inspect runtime state without executing workflows.\n  trigger    Inspect or persist trigger package state.\n  validate   Validate config and package contracts.\n  list-runs  Print persisted run summaries as JSON.\n  run        Execute one single-shot manual run.\n  serve      Drain one trigger snapshot under a serve lease.\n\nUse `chainbot help <command>` for command-specific guidance."
-    )
+    let version_line = format!("chainbot {CHAINBOT_VERSION}");
+    let mut lines = vec![String::from("ChainBot command skills")];
+    push_help_list_section(&mut lines, "Version", &[version_line.as_str()]);
+    push_help_list_section(
+        &mut lines,
+        "Usage",
+        &[
+            "chainbot help [command]",
+            "chainbot version",
+            "chainbot init",
+            "chainbot status [--json]",
+            "chainbot trigger list [--json]",
+            "chainbot trigger <enable|disable> <trigger-id>",
+            "chainbot validate",
+            "chainbot list-runs",
+            "chainbot run",
+            "chainbot serve",
+        ],
+    );
+    push_help_list_section(
+        &mut lines,
+        "Root resolution",
+        &[
+            "use CHAINBOT_CONFIG_DIR when it is set to a non-empty path",
+            "otherwise fall back to ~/.chainbot",
+            "root config must be <root>/chainbot.toml",
+        ],
+    );
+    push_help_list_section(
+        &mut lines,
+        "Command catalog",
+        &[
+            "version    Print the running ChainBot version.",
+            "init       Bootstrap a minimal ChainBot root.",
+            "status     Inspect runtime state without executing workflows.",
+            "trigger    Inspect or persist trigger package state.",
+            "validate   Validate config and package contracts.",
+            "list-runs  Print persisted run summaries as JSON.",
+            "run        Execute one single-shot manual run.",
+            "serve      Drain one trigger snapshot under a serve lease.",
+        ],
+    );
+    push_help_list_section(
+        &mut lines,
+        "AI workflow hints",
+        &[
+            "start with `chainbot help <command>` before generating automation around a command",
+            GENERAL_HELP_EXAMPLE_HINT,
+            "prefer `chainbot status --json` and `chainbot trigger list --json` for machine-readable snapshots",
+        ],
+    );
+    lines.join("\n")
 }
 
 fn help_text(topic: HelpTopic) -> String {
     match topic {
         HelpTopic::General => general_help_text(),
-        HelpTopic::Version => format!(
-            "version - Print the running ChainBot version\n\nUse when:\n  - you need to confirm the installed CLI release\n  - you want to compare the binary version against root config metadata\n\nPrints:\n  - chainbot {CHAINBOT_VERSION}\n\nExamples:\n  chainbot version\n  chainbot --version\n\nSee also:\n  init, validate"
+        HelpTopic::Version => render_help_card(
+            "version",
+            "Print the running ChainBot version",
+            &["chainbot version", "chainbot --version"],
+            &[
+                "you need to confirm the installed CLI release",
+                "you want to compare the binary version against root config metadata",
+            ],
+            &[],
+            &[],
+            &[],
+            &["prints `chainbot <version>`"],
+            &[],
+            &[],
+            &["if the reported version mismatches your root metadata, run `chainbot validate` next"],
+            &["chainbot version", "chainbot --version"],
+            &["init", "validate"],
         ),
-        HelpTopic::Init => String::from("init - Bootstrap a minimal ChainBot root\n\nUse when:\n  - you need a new ChainBot root that validates immediately\n  - you want the default single-file root config without manual setup\n  - you are preparing a fresh local root for workflows and triggers\n\nWrites:\n  - resolved root directory\n  - chainbot.toml when no root config exists yet\n  - default package directories under the root\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot init\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot init\n\nCompatibility:\n  - reuses existing chainbot.toml when present\n  - falls back to config/root.toml for pre-migration roots\n\nSee also:\n  version, validate, status, trigger"),
-        HelpTopic::Status => String::from("status - Inspect runtime state without executing workflows\n\nUse when:\n  - you want to know whether serve is active\n  - you want the latest workflow run result\n  - you want trigger activity without opening state files\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured state runs directory\n  - configured trigger record directory\n  - configured coordination store\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot status\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot status\n  chainbot status --json\n\nSee also:\n  validate, list-runs, serve"),
-        HelpTopic::Trigger => String::from("trigger - Inspect or persist trigger package state\n\nUse when:\n  - you need to inspect configured triggers without opening TOML manually\n  - you need to stop a trigger without editing TOML manually\n  - you want to re-enable a trigger after maintenance or debugging\n\nReads:\n  - configured root config\n  - configured trigger packages\n\nWrites:\n  - target trigger package config.toml for enable or disable actions\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot trigger list\n  chainbot trigger list --json\n  chainbot trigger enable tr-market\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market\n\nSee also:\n  init, status, validate, serve"),
-        HelpTopic::Validate => String::from("validate - Validate config and package contracts\n\nUse when:\n  - you want to confirm a root is structurally valid\n  - you changed config and want a fast contract check\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin packages\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot validate\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate\n\nSee also:\n  status, run, serve"),
-        HelpTopic::ListRuns => String::from("list-runs - Print persisted run summaries as JSON\n\nUse when:\n  - you need machine-readable workflow run summaries\n  - you want raw persisted run status output without higher-level aggregation\n\nReads:\n  - configured state runs directory\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot list-runs\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot list-runs\n\nSee also:\n  status, serve"),
-        HelpTopic::Run => String::from("run - Execute one manual workflow run\n\nUse when:\n  - you want a single manual execution without a serve lease\n  - your root contains exactly one workflow package\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured plugin packages\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n\nExamples:\n  chainbot run\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot run\n\nSee also:\n  status, validate, serve"),
-        HelpTopic::Serve => String::from("serve - Drain one trigger snapshot under a serve lease\n\nUse when:\n  - you want to evaluate configured triggers once\n  - you need runtime recovery plus duplicate-suppression coordination\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin packages\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n  - configured trigger record directory\n  - configured coordination store\n\nExamples:\n  chainbot serve\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot serve\n\nSee also:\n  status, validate, list-runs"),
+        HelpTopic::Init => render_help_card(
+            "init",
+            "Bootstrap a minimal ChainBot root",
+            &["chainbot init"],
+            &[
+                "you need a new ChainBot root that validates immediately",
+                "you want the canonical single-file root config without manual setup",
+                "you are preparing a fresh local root for workflows, triggers, plugins, secrets, and state",
+            ],
+            &[],
+            &[
+                "resolved root directory",
+                "<root>/chainbot.toml when no root config exists yet",
+                "default package directories under the resolved root",
+            ],
+            &["workflow runs", "trigger snapshots"],
+            &[
+                "prints created and reused bootstrap paths",
+                "reuses existing canonical files and directories instead of overwriting them",
+            ],
+            &[
+                "uses CHAINBOT_CONFIG_DIR when it is set to a non-empty path",
+                "otherwise bootstraps ~/.chainbot",
+            ],
+            &[("Root config example", "toml", ROOT_CONFIG_EXAMPLE)],
+            &[
+                "directory/file collisions are reported with the exact path that blocks bootstrap",
+                "invalid existing chainbot.toml is reported with file and line context",
+            ],
+            &["chainbot init", "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot init"],
+            &["validate", "status", "trigger"],
+        ),
+        HelpTopic::Status => render_help_card(
+            "status",
+            "Inspect runtime state without executing workflows",
+            &["chainbot status", "chainbot status --json"],
+            &[
+                "you want to know whether serve is active",
+                "you want the latest workflow run result without opening state files manually",
+                "you want trigger activity and summary counts in one snapshot",
+            ],
+            &[
+                "configured root config",
+                "configured workflow packages",
+                "configured trigger packages",
+                "configured state runs directory",
+                "configured trigger record directory",
+                "configured coordination store",
+            ],
+            &[],
+            &["workflow runs", "trigger snapshots", "runtime recovery"],
+            &[
+                "prints a human-readable Root / Workflows / Triggers / Summary snapshot by default",
+                "prints stable JSON when `--json` is enabled",
+            ],
+            &[
+                "resolve the root from CHAINBOT_CONFIG_DIR before reading workspace state",
+                "return validation errors instead of partial snapshots when config is invalid",
+            ],
+            &[],
+            &[
+                "unexpected flags are reported with their argument position after `chainbot status`",
+                "invalid root config is reported with file and line context before any runtime access",
+            ],
+            &[
+                "chainbot status",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot status",
+                "chainbot status --json",
+            ],
+            &["validate", "list-runs", "serve"],
+        ),
+        HelpTopic::Trigger => render_help_card(
+            "trigger",
+            "Inspect or persist trigger package state",
+            &[
+                "chainbot trigger list [--json]",
+                "chainbot trigger enable <trigger-id>",
+                "chainbot trigger disable <trigger-id>",
+            ],
+            &[
+                "you need to inspect configured triggers without opening TOML manually",
+                "you need to stop or re-enable a trigger without editing config by hand",
+                "you want a machine-readable trigger inventory for automation",
+            ],
+            &["configured root config", "configured trigger packages"],
+            &["target trigger package config.toml for enable or disable actions"],
+            &["workflow runs", "trigger snapshots"],
+            &[
+                "prints a trigger table or JSON list for `list`",
+                "prints the exact trigger config path touched by enable/disable",
+            ],
+            &[
+                "resolve root config before loading trigger packages",
+                "for `list`, only trigger package inputs are required beyond root config",
+            ],
+            &[("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE)],
+            &[
+                "unsupported actions and extra arguments are reported with their exact argument position",
+                "unknown trigger IDs direct you to `chainbot trigger list`",
+            ],
+            &[
+                "chainbot trigger list",
+                "chainbot trigger list --json",
+                "chainbot trigger enable tr-market",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market",
+            ],
+            &["init", "status", "validate", "serve"],
+        ),
+        HelpTopic::Validate => render_help_card(
+            "validate",
+            "Validate config and package contracts",
+            &["chainbot validate"],
+            &[
+                "you want to confirm a root is structurally valid",
+                "you changed config and want a fast contract check before `run` or `serve`",
+                "you want canonical examples for root, workflow, trigger, and plugin packages",
+            ],
+            &[
+                "configured root config",
+                "configured workflow packages",
+                "configured trigger packages",
+                "configured plugin packages",
+            ],
+            &[],
+            &["workflow runs", "trigger snapshots"],
+            &[
+                "prints `validated root: <path>` on success",
+                "prints file-aware validation diagnostics on failure",
+            ],
+            &[
+                "load chainbot.toml first, then workflows, then triggers, then plugins",
+                "reject absolute path overrides and any root-relative path that contains `..`",
+            ],
+            &[
+                ("Root config example", "toml", ROOT_CONFIG_EXAMPLE),
+                ("Workflow package example", "toml", WORKFLOW_CONFIG_EXAMPLE),
+                ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
+                ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
+            ],
+            &[
+                "invalid TOML is reported with file path, line, column, and highlighted source",
+                "semantic validation failures report the owning contract field or package identity",
+            ],
+            &[
+                "chainbot validate",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate",
+            ],
+            &["status", "run", "serve"],
+        ),
+        HelpTopic::ListRuns => render_help_card(
+            "list-runs",
+            "Print persisted run summaries as JSON",
+            &["chainbot list-runs"],
+            &[
+                "you need machine-readable workflow run summaries",
+                "you want raw persisted run status output without higher-level aggregation",
+            ],
+            &["configured state runs directory"],
+            &[],
+            &["workflow runs", "trigger snapshots"],
+            &["prints a JSON array of persisted run summaries"],
+            &[
+                "resolve root config and runtime state before reading summaries",
+                "runtime recovery is applied before listing persisted runs",
+            ],
+            &[],
+            &[
+                "unexpected flags are reported with their exact argument position",
+                "serialization failures are surfaced as state errors",
+            ],
+            &[
+                "chainbot list-runs",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot list-runs",
+            ],
+            &["status", "serve"],
+        ),
+        HelpTopic::Run => render_help_card(
+            "run",
+            "Execute one manual workflow run",
+            &["chainbot run"],
+            &[
+                "you want a single manual execution without a serve lease",
+                "your root contains exactly one workflow package or one inferable top-level workflow",
+            ],
+            &[
+                "configured root config",
+                "configured workflow packages",
+                "configured plugin packages",
+                "configured secrets directory",
+            ],
+            &[
+                "configured state runs directory",
+                "configured workflow log directory",
+            ],
+            &[],
+            &[
+                "prints run_id, workflow_id, and terminal status on success",
+                "persists run summary and workflow log entries",
+            ],
+            &[
+                "resolve root config before selecting a manual-run workflow",
+                "manual run inference fails fast when multiple top-level workflows are present",
+            ],
+            &[("Workflow package example", "toml", WORKFLOW_CONFIG_EXAMPLE)],
+            &[
+                "top-level workflow inference failures are returned as usage errors",
+                "execution failures surface the run_id so you can inspect state artifacts immediately",
+            ],
+            &[
+                "chainbot run",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot run",
+            ],
+            &["status", "validate", "serve"],
+        ),
+        HelpTopic::Serve => render_help_card(
+            "serve",
+            "Drain one trigger snapshot under a serve lease",
+            &["chainbot serve"],
+            &[
+                "you want to evaluate configured triggers once",
+                "you need runtime recovery plus duplicate-suppression coordination",
+                "you want accepted trigger events normalized into workflow runs",
+            ],
+            &[
+                "configured root config",
+                "configured workflow packages",
+                "configured trigger packages",
+                "configured plugin packages",
+                "configured secrets directory",
+            ],
+            &[
+                "configured state runs directory",
+                "configured workflow log directory",
+                "configured trigger record directory",
+                "configured coordination store",
+            ],
+            &[],
+            &[
+                "prints accepted trigger-event count and each resulting run on success",
+                "returns conflict errors when another serve owner holds the lease",
+            ],
+            &[
+                "acquire a serve lease before evaluating the trigger snapshot",
+                "load trigger packages and plugin manifests from the canonical root layout",
+            ],
+            &[
+                ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
+                ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
+            ],
+            &[
+                "lease acquisition failures include the current owner and expiry",
+                "trigger/config decode failures report the owning file before any execution starts",
+            ],
+            &[
+                "chainbot serve",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot serve",
+            ],
+            &["status", "validate", "list-runs"],
+        ),
     }
 }
 
@@ -865,9 +1312,6 @@ fn render_status_output(status: &StatusOutput) -> String {
         lines.push(format!("  serve_expires_at_ms: {expires_at_ms}"));
     }
 
-    lines.push(String::new());
-    lines.push(String::from("Legacy Layout"));
-    lines.push(String::new());
     lines.push(String::from("Workflows"));
     if status.workflows.is_empty() {
         lines.push(String::from("  none"));
@@ -946,12 +1390,17 @@ fn render_serve_lease_state(state: ServeLeaseState) -> &'static str {
     }
 }
 
-fn parse_bool_flag_value(value: &str) -> Result<bool, UserFacingError> {
+fn parse_bool_flag_value(
+    flag_name: &str,
+    value: &str,
+    position: usize,
+    command_path: &str,
+) -> Result<bool, UserFacingError> {
     match value {
         "true" | "1" => Ok(true),
         "false" | "0" => Ok(false),
         other => Err(UserFacingError::usage(format!(
-            "Unsupported boolean flag value `{other}`. Use true, false, 1, or 0."
+            "Unsupported {flag_name} value at argument #{position} after `{command_path}`: `{other}`. Use true, false, 1, or 0."
         ))),
     }
 }
@@ -959,10 +1408,10 @@ fn parse_bool_flag_value(value: &str) -> Result<bool, UserFacingError> {
 fn unsupported_command_message(value: &str) -> String {
     match suggest_command(value) {
         Some(suggestion) => format!(
-            "Unsupported command `{value}`. Did you mean `{suggestion}`? Run `chainbot help` to see available command skills."
+            "Unsupported command at argv[1]: `{value}`. Did you mean `{suggestion}`? Run `chainbot help` to see available command skills."
         ),
         None => format!(
-            "Unsupported command `{value}`. Run `chainbot help` to see available command skills."
+            "Unsupported command at argv[1]: `{value}`. Run `chainbot help` to see available command skills."
         ),
     }
 }
@@ -1163,12 +1612,15 @@ fn ensure_root_config(
                     path.display()
                 ))
             })?;
-            let root_config = toml::from_str::<RootConfigDefinition>(&contents).map_err(|source| {
-                UserFacingError::validation(format!(
-                    "Existing init root config is invalid TOML at {}: {source}",
-                    path.display()
-                ))
-            })?;
+            let root_config = toml::from_str::<RootConfigDefinition>(&contents).map_err(
+                |source| {
+                    UserFacingError::from_contract(crate::errors::ContractError::toml_decode(
+                        path.clone(),
+                        &contents,
+                        source,
+                    ))
+                },
+            )?;
             root_config
                 .validate()
                 .map_err(UserFacingError::from_contract)?;
@@ -1695,7 +2147,7 @@ mod tests {
         assert!(matches!(reload_error, UserFacingError::Validation { .. }));
         assert!(reload_error
             .to_string()
-            .contains("Definition file is invalid TOML"));
+            .contains("definition file is invalid TOML"));
 
         unsafe {
             std::env::remove_var("CHAINBOT_CONFIG_DIR");

@@ -179,6 +179,29 @@ fn help_trigger_includes_toggle_guidance() {
 }
 
 #[test]
+fn help_validate_includes_config_examples() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "validate"])
+        .output()
+        .expect("chainbot help validate should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Root config example:"));
+    assert!(stdout.contains("Workflow package example:"));
+    assert!(stdout.contains("Trigger package example:"));
+    assert!(stdout.contains("Plugin package example:"));
+    assert!(stdout.contains("chainbot.toml"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn init_creates_minimal_root_and_validate_accepts_it() {
     let _lock = acquire_fixture_lock();
     let root = unique_root("init-minimal");
@@ -353,6 +376,45 @@ fn validate_accepts_basic_root() {
 }
 
 #[test]
+fn validate_accepts_curated_examples() {
+    let single_workflow_root = workspace_root().join("examples").join("single-workflow");
+    let builtin_triggers_root = workspace_root().join("examples").join("builtin-triggers");
+    let workflow_composition_root = workspace_root()
+        .join("examples")
+        .join("workflow-composition");
+    let plugin_integrations_root = workspace_root()
+        .join("examples")
+        .join("plugin-integrations");
+    let custom_paths_root = workspace_root().join("examples").join("custom-paths");
+
+    for root in [
+        single_workflow_root,
+        builtin_triggers_root,
+        workflow_composition_root,
+        plugin_integrations_root,
+        custom_paths_root,
+    ] {
+        let output = Command::new(chainbot_bin())
+            .env("CHAINBOT_CONFIG_DIR", &root)
+            .arg("validate")
+            .output()
+            .expect("validate should execute for curated example root");
+
+        assert!(
+            output.status.success(),
+            "example root should validate: {}",
+            root.display()
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+        let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+        assert!(stdout.contains("validated root:"));
+        assert!(stderr.is_empty());
+    }
+}
+
+#[test]
 fn list_runs_prints_empty_list_for_basic_root() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
@@ -392,7 +454,122 @@ fn status_prints_human_summary_for_basic_root() {
     assert!(stdout.contains("serve: idle"));
     assert!(stdout.contains("wf-alpha"));
     assert!(stdout.contains("tr-market"));
+    assert!(!stdout.contains("Legacy Layout"));
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn invalid_toml_validate_reports_line_context() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("validate-invalid-toml");
+    let _ = fs::remove_dir_all(&root);
+
+    fs::create_dir_all(root.join("workflows").join("wf-alpha"))
+        .expect("workflow package directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("tr-market"))
+        .expect("trigger package directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("quote-plugin"))
+        .expect("plugin package directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"broken\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config fixture should be writable");
+    fs::write(
+        root.join("workflows").join("wf-alpha").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-alpha\n",
+    )
+    .expect("invalid workflow config should be writable");
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"builtin\"\nsource = \"market_tick\"\nworkflow_id = \"wf-alpha\"\nenabled = true\n",
+    )
+    .expect("trigger fixture should be writable");
+    fs::write(
+        root.join("plugins").join("quote-plugin").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
+    )
+    .expect("plugin fixture should be writable");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("validate")
+        .output()
+        .expect("validate should execute for invalid TOML root");
+
+    assert_eq!(output.status.code(), Some(3));
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("definition file is invalid TOML"));
+    assert!(stderr.contains("line:"));
+    assert!(stderr.contains("column:"));
+    assert!(stderr.contains("3 | id = \"wf-alpha"));
+    assert!(stderr.contains("^"));
+}
+
+#[test]
+fn unexpected_argument_reports_argument_position() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "unexpected"])
+        .output()
+        .expect("status should execute with bad argument");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("Unexpected argument #1 after `chainbot status`: `unexpected`"));
+}
+
+#[test]
+fn invalid_help_topic_reports_help_argument_position() {
+    let output = Command::new(chainbot_bin())
+        .args(["help", "unknown-topic"])
+        .output()
+        .expect("help should execute with bad topic");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.is_empty());
+    assert!(stderr
+        .contains("Unsupported help topic at argument #1 after `chainbot help`: `unknown-topic`"));
+}
+
+#[test]
+fn invalid_json_flag_value_reports_argument_position() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json=maybe"])
+        .output()
+        .expect("status should execute with bad json value");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("Unsupported --json value at argument #1 after `chainbot status`: `maybe`")
+    );
 }
 
 #[test]

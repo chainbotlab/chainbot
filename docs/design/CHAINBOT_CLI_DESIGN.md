@@ -68,7 +68,7 @@ chainbot serve
 - 初始化一个最小可校验的 ChainBot root。
 - 若目标 root 不存在则创建默认 canonical 目录布局。
 - 若 `chainbot.toml` 缺失则写入默认模板。
-- `init` 只引导当前稳定 root contract：`chainbot.toml`、`workflows/`、`triggers/`、`plugins/bin/`、`secrets/`、`state/`。
+- `init` 只引导当前稳定 root contract：`chainbot.toml`、`workflows/`、`triggers/`、`plugins/<plugin_id>/config.toml`、`secrets/`、`state/`。
 - `init` 不创建旧版 shared manifest 目录，也不把 legacy root-config 路径视为稳定 bootstrap 输出的一部分。
 - 已存在的目录与 root config 默认按幂等方式复用，不递归覆盖业务内容。
 
@@ -107,12 +107,19 @@ chainbot serve
 `chainbot help <command>` 返回稳定结构化帮助信息，包含：
 
 - `Use when`
+- `Usage`
 - `Reads` 或 `Writes`
 - `Does not execute` 或等价约束说明
+- `Outputs`
+- `Root resolution`（当命令依赖 root 时）
+- `Config examples`（当命令依赖配置 contract 时）
+- `Failure navigation`
 - `Examples`
 - `See also`
 
 帮助文本描述的是命令 contract，而不是实现细节。
+
+当命令依赖 root / workflow / trigger / plugin contract 时，帮助系统应直接内嵌 canonical 示例片段，避免 operator 或 agent 需要跳转到源码或测试夹具才能理解配置形状。
 
 ## Status Contract
 
@@ -224,9 +231,10 @@ CLI 错误不仅描述失败，还必须给出下一步动作。
 稳定规则：
 
 - unsupported command -> 尽量给出最近命令建议，并引导 `chainbot help`
+- unexpected argv token -> 指出命令路径与参数位置，避免用户猜测是哪一个 token 触发失败
 - missing root directory -> 引导设置 `CHAINBOT_CONFIG_DIR` 或检查默认 `~/.chainbot` 是否指向有效 root
 - missing root config file -> 引导检查 `CHAINBOT_CONFIG_DIR` 指向的 root，确认 `chainbot.toml` 存在且可加载
-- invalid config -> 返回 validation error，不降级为 partial status payload
+- invalid config -> 返回 validation error，不降级为 partial status payload；当失败来自 TOML decode 时，错误应包含 file path、line/column 与 source snippet
 
 ## Output Strategy
 
