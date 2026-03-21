@@ -3,9 +3,9 @@ use serde::Deserialize;
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::{decode_builtin_trigger_params, BuiltinTriggerHandler};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission, TRIGGER_KIND_MANUAL_ALIAS};
+use crate::trigger::{TriggerDefinition, TriggerEmission};
 
-pub(crate) const BUILTIN_TRIGGER_MANUAL_KIND: &str = TRIGGER_KIND_MANUAL_ALIAS;
+pub(crate) const BUILTIN_TRIGGER_MANUAL_KIND: &str = "manual";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ManualTriggerHandler;

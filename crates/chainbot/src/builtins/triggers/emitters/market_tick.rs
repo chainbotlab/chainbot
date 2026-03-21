@@ -3,9 +3,9 @@ use serde::Deserialize;
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::{decode_builtin_trigger_params, BuiltinTriggerHandler};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission, TRIGGER_KIND_MARKET_TICK_ALIAS};
+use crate::trigger::{TriggerDefinition, TriggerEmission};
 
-pub(crate) const BUILTIN_TRIGGER_MARKET_TICK_KIND: &str = TRIGGER_KIND_MARKET_TICK_ALIAS;
+pub(crate) const BUILTIN_TRIGGER_MARKET_TICK_KIND: &str = "market_tick";
 
 #[derive(Debug, Clone, Copy)]
 pub struct MarketTickTriggerHandler;

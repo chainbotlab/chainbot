@@ -107,7 +107,7 @@ mod tests {
     fn build_builtin_trigger_emissions_supports_alias_and_source_resolution() {
         let emissions = build_builtin_trigger_emissions(
             &[
-                trigger_definition("manual-trigger", "manual", "manual-source"),
+                trigger_definition("manual-trigger", "builtin", "manual"),
                 trigger_definition("market-trigger", "builtin", "market_tick"),
             ],
             1_710_300_100_000,
@@ -116,7 +116,7 @@ mod tests {
 
         assert_eq!(
             emissions["manual-trigger"][0].payload,
-            serde_json::json!({"kind": "manual", "source": "manual-source"})
+            serde_json::json!({"kind": "manual", "source": "manual"})
         );
         assert_eq!(
             emissions["market-trigger"][0].payload,
@@ -188,7 +188,7 @@ mod tests {
                 &BuiltinTriggerContext {
                     now_ms: 1_710_300_100_000,
                 },
-                &trigger_definition("manual-trigger", "manual", BUILTIN_TRIGGER_MANUAL_KIND),
+                &trigger_definition("manual-trigger", "builtin", BUILTIN_TRIGGER_MANUAL_KIND),
             )
             .expect("manual trigger handler should be registered");
         assert_eq!(manual.len(), 1);
@@ -200,7 +200,7 @@ mod tests {
                 },
                 &trigger_definition(
                     "market-trigger",
-                    "market_tick",
+                    "builtin",
                     BUILTIN_TRIGGER_MARKET_TICK_KIND,
                 ),
             )
