@@ -318,7 +318,7 @@ fn invalid_dag_and_variable_fixtures_rejected() {
 #[test]
 fn subflow_call_dsl_and_variable_reference_shorthand_deserialize() {
     let workflow: WorkflowDefinition = toml::from_str(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.when]\nsource = \"run.enabled\"\noperator = \"truthy\"\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = \"trigger.symbol\"\ndry_run = \"manual.dry_run\"\n\n[nodes.call.returns]\ndecision = \"subflow_decision\"\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.when]\nsource = \"run.enabled\"\noperator = \"truthy\"\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = \"trigger.symbol\"\ndry_run = \"manual.dry_run\"\n\n[nodes.call.returns]\ndecision = \"subflow_decision\"\n",
     )
     .expect("subflow call DSL should deserialize");
 
@@ -360,7 +360,7 @@ fn subflow_call_dsl_and_variable_reference_shorthand_deserialize() {
 #[test]
 fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
     let missing_workflow = toml::from_str::<WorkflowDefinition>(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call.with]\nticker = \"trigger.symbol\"\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call.with]\nticker = \"trigger.symbol\"\n",
     )
     .expect_err("missing subflow workflow should fail deserialization");
     assert!(missing_workflow
@@ -368,7 +368,7 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
         .contains("missing field `workflow`"));
 
     let invalid_reference = toml::from_str::<WorkflowDefinition>(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = \"trigger.symbol.price\"\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = \"trigger.symbol.price\"\n",
     )
     .expect_err("multi-segment shorthand keys should fail deserialization");
     assert!(invalid_reference
@@ -376,7 +376,7 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
         .contains("key must be a single segment"));
 
     let invalid_subflow_plugin = toml::from_str::<WorkflowDefinition>(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin.identity\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin.identity\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
     )
     .expect_err("non-canonical subflow plugin should fail deserialization");
     assert!(invalid_subflow_plugin
@@ -384,7 +384,7 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
         .contains("must use plugin `builtin-subflow`"));
 
     let invalid_subflow_operation = toml::from_str::<WorkflowDefinition>(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\noperation = \"custom\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\noperation = \"custom\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
     )
     .expect_err("non-canonical subflow operation should fail deserialization");
     assert!(invalid_subflow_operation
@@ -392,7 +392,7 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
         .contains("must use operation `run`"));
 
     let legacy_subflow = toml::from_str::<WorkflowDefinition>(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin-subflow\"\noperation = \"run\"\ndepends_on = []\n\n[nodes.subflow]\nworkflow_id = \"wf-child\"\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin-subflow\"\noperation = \"run\"\ndepends_on = []\n\n[nodes.subflow]\nworkflow_id = \"wf-child\"\n",
     )
     .expect_err("legacy subflow syntax should be rejected");
     assert!(legacy_subflow
@@ -403,7 +403,7 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
 #[test]
 fn structured_call_references_still_work() {
     let structured_call: WorkflowDefinition = toml::from_str(
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = { namespace = \"trigger_payload_mapping\", key = \"symbol\" }\n",
+"[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n\n[nodes.call.with]\nticker = { namespace = \"trigger_payload_mapping\", key = \"symbol\" }\n",
     )
     .expect("structured call.with references should still deserialize");
     let import = &structured_call.nodes[0]

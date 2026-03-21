@@ -10,6 +10,7 @@
 //! [INVARIANTS]
 //! Persisted run and trigger artifacts remain append-only, and state paths stay deterministic across restarts.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File};
@@ -31,6 +32,9 @@ pub const RUNS_DIR_NAME: &str = "runs";
 pub const WORKFLOW_LOGS_DIR_NAME: &str = "workflow-logs";
 pub const TRIGGER_RECORDS_DIR_NAME: &str = "trigger-records";
 pub const TRIGGER_CHECKPOINTS_DIR_NAME: &str = "trigger-checkpoints";
+pub const CANONICAL_TRIGGERS_DIR_NAME: &str = "triggers";
+pub const CANONICAL_TRIGGER_RECORDS_DIR_NAME: &str = "records";
+pub const CANONICAL_TRIGGER_CHECKPOINT_FILE_NAME: &str = "checkpoint.json";
 pub const SERVE_OWNER_ID_PREFIX: &str = "chainbot-serve-pid-";
 
 const RUN_SUMMARY_FILE_NAME: &str = "summary.json";
@@ -106,6 +110,7 @@ pub struct StateLayout {
     pub state_root: PathBuf,
     pub coordination_db_path: PathBuf,
     pub runs_dir: PathBuf,
+    pub trigger_state_dir: PathBuf,
     pub workflow_logs_dir: PathBuf,
     pub trigger_records_dir: PathBuf,
     pub trigger_checkpoints_dir: PathBuf,
@@ -160,6 +165,30 @@ pub struct RuntimeStateRecoveryReport {
     pub workflow_logs: FileArtifactRecoveryReport,
     pub trigger_records: FileArtifactRecoveryReport,
     pub failed_incomplete_runs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixedCheckpointConflict {
+    pub trigger_id: String,
+    pub canonical_path: PathBuf,
+    pub legacy_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateTriggerHistoryConflict {
+    pub trigger_id: String,
+    pub event_id: String,
+    pub canonical_path: PathBuf,
+    pub legacy_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LegacyStateInspection {
+    pub legacy_workflow_log_paths: Vec<PathBuf>,
+    pub legacy_trigger_record_paths: Vec<PathBuf>,
+    pub legacy_trigger_checkpoint_paths: Vec<PathBuf>,
+    pub dual_checkpoint_conflicts: Vec<MixedCheckpointConflict>,
+    pub duplicate_trigger_history_conflicts: Vec<DuplicateTriggerHistoryConflict>,
 }
 
 #[derive(Debug)]
@@ -238,6 +267,7 @@ impl StateLayout {
         Self {
             coordination_db_path: state_root.join(COORDINATION_DB_FILE_NAME),
             runs_dir: state_root.join(RUNS_DIR_NAME),
+            trigger_state_dir: state_root.join(CANONICAL_TRIGGERS_DIR_NAME),
             workflow_logs_dir: state_root.join(WORKFLOW_LOGS_DIR_NAME),
             trigger_records_dir: state_root.join(TRIGGER_RECORDS_DIR_NAME),
             trigger_checkpoints_dir: state_root.join(TRIGGER_CHECKPOINTS_DIR_NAME),
@@ -248,9 +278,7 @@ impl StateLayout {
     pub fn ensure_state_tree(&self) -> Result<(), FileStateError> {
         create_dir_all_file_state(&self.state_root)?;
         create_dir_all_file_state(&self.runs_dir)?;
-        create_dir_all_file_state(&self.workflow_logs_dir)?;
-        create_dir_all_file_state(&self.trigger_records_dir)?;
-        create_dir_all_file_state(&self.trigger_checkpoints_dir)?;
+        create_dir_all_file_state(&self.trigger_state_dir)?;
         Ok(())
     }
 
@@ -267,8 +295,8 @@ impl StateLayout {
     }
 
     pub fn workflow_log_entry_path(&self, run_id: &str, sequence: u64) -> PathBuf {
-        self.workflow_logs_dir
-            .join(sanitize_path_component(run_id))
+        self.run_dir(run_id)
+            .join(WORKFLOW_LOGS_DIR_NAME)
             .join(format!("{sequence:020}.json"))
     }
 
@@ -278,14 +306,15 @@ impl StateLayout {
 
     pub fn trigger_record_path(
         &self,
-        run_id: &str,
+        _run_id: &str,
         sequence: u64,
         trigger_id: &str,
         event_id: &str,
     ) -> PathBuf {
-        self.trigger_records_dir
-            .join(sanitize_path_component(run_id))
-            .join(trigger_record_file_name(sequence, trigger_id, event_id))
+        self.trigger_state_dir
+            .join(sanitize_path_component(trigger_id))
+            .join(CANONICAL_TRIGGER_RECORDS_DIR_NAME)
+            .join(canonical_trigger_record_file_name(sequence, event_id))
     }
 
     pub fn staged_trigger_record_path(
@@ -299,8 +328,9 @@ impl StateLayout {
     }
 
     pub fn trigger_checkpoint_path(&self, trigger_id: &str) -> PathBuf {
-        self.trigger_checkpoints_dir
-            .join(format!("{}.json", sanitize_path_component(trigger_id)))
+        self.trigger_state_dir
+            .join(sanitize_path_component(trigger_id))
+            .join(CANONICAL_TRIGGER_CHECKPOINT_FILE_NAME)
     }
 
     pub fn staged_trigger_checkpoint_path(&self, trigger_id: &str) -> PathBuf {
@@ -463,20 +493,35 @@ impl FileBackedStateStore {
     ) -> Result<Option<TriggerCheckpointRecord>, FileStateError> {
         self.layout.ensure_state_tree()?;
         let path = self.layout.trigger_checkpoint_path(trigger_id);
-        if !path.exists() {
-            return Ok(None);
+        if path.exists() {
+            return load_json_file(&path).map(Some);
         }
-        load_json_file(&path).map(Some)
+
+        Ok(None)
     }
 
     pub fn recover_workflow_logs(&self) -> Result<FileArtifactRecoveryReport, FileStateError> {
         self.layout.ensure_state_tree()?;
-        recover_append_only_entries(&self.layout.workflow_logs_dir, load_workflow_log_entry_file)
+        let mut report = FileArtifactRecoveryReport::default();
+        for directory in self.workflow_log_roots()? {
+            let recovered =
+                recover_append_only_entries_if_exists(&directory, load_workflow_log_entry_file)?;
+            report.promoted_staged_files += recovered.promoted_staged_files;
+            report.removed_staged_files += recovered.removed_staged_files;
+        }
+        Ok(report)
     }
 
     pub fn recover_trigger_records(&self) -> Result<FileArtifactRecoveryReport, FileStateError> {
         self.layout.ensure_state_tree()?;
-        recover_append_only_entries(&self.layout.trigger_records_dir, load_trigger_record_file)
+        let mut report = FileArtifactRecoveryReport::default();
+        for directory in self.trigger_record_roots()? {
+            let recovered =
+                recover_append_only_entries_if_exists(&directory, load_trigger_record_file)?;
+            report.promoted_staged_files += recovered.promoted_staged_files;
+            report.removed_staged_files += recovered.removed_staged_files;
+        }
+        Ok(report)
     }
 
     pub fn load_trigger_records(&self) -> Result<Vec<TriggerEventRecord>, FileStateError> {
@@ -490,7 +535,9 @@ impl FileBackedStateStore {
         &self,
     ) -> Result<Vec<TriggerEventRecord>, FileStateError> {
         let mut record_paths = Vec::new();
-        collect_existing_json_files(&self.layout.trigger_records_dir, &mut record_paths)?;
+        for directory in self.trigger_record_roots()? {
+            collect_existing_json_files(&directory, &mut record_paths)?;
+        }
         record_paths.sort();
 
         let mut records = Vec::with_capacity(record_paths.len());
@@ -510,6 +557,22 @@ impl FileBackedStateStore {
         }
 
         Ok(keys)
+    }
+
+    pub fn inspect_legacy_usage(&self) -> Result<LegacyStateInspection, FileStateError> {
+        let legacy_workflow_log_paths = self.collect_legacy_workflow_log_paths()?;
+        let legacy_trigger_record_paths = self.collect_legacy_trigger_record_paths()?;
+        let legacy_trigger_checkpoint_paths = self.collect_legacy_trigger_checkpoint_paths()?;
+
+        Ok(LegacyStateInspection {
+            dual_checkpoint_conflicts: self
+                .detect_dual_checkpoints(&legacy_trigger_checkpoint_paths),
+            duplicate_trigger_history_conflicts: self
+                .detect_duplicate_trigger_history(&legacy_trigger_record_paths)?,
+            legacy_workflow_log_paths,
+            legacy_trigger_record_paths,
+            legacy_trigger_checkpoint_paths,
+        })
     }
 
     pub fn recover_run_summaries(&self) -> Result<RunSummaryRecoveryReport, FileStateError> {
@@ -600,38 +663,215 @@ impl FileBackedStateStore {
     }
 
     fn next_workflow_log_sequence(&self, run_id: &str) -> Result<u64, FileStateError> {
-        let run_dir = self
+        let mut max_sequence = 0_u64;
+        let canonical_dir = self
             .layout
             .workflow_log_entry_path(run_id, 1)
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.layout.workflow_logs_dir.clone());
-        create_dir_all_file_state(&run_dir)?;
+            .unwrap_or_else(|| self.layout.run_dir(run_id).join(WORKFLOW_LOGS_DIR_NAME));
 
-        let entries = fs::read_dir(&run_dir).map_err(|source| FileStateError::Io {
-            path: run_dir.clone(),
-            operation: "read workflow log directory",
-            source,
-        })?;
+        create_dir_all_file_state(&canonical_dir)?;
 
-        let mut max_sequence = 0_u64;
-        for entry in entries {
-            let entry = entry.map_err(|source| FileStateError::Io {
-                path: run_dir.clone(),
-                operation: "read workflow log directory entry",
-                source,
-            })?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
+        for directory in [canonical_dir] {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(FileStateError::Io {
+                        path: directory,
+                        operation: "read workflow log directory",
+                        source,
+                    });
+                }
+            };
+
+            for entry in entries {
+                let entry = entry.map_err(|source| FileStateError::Io {
+                    path: directory.clone(),
+                    operation: "read workflow log directory entry",
+                    source,
+                })?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+
+                let log_entry = load_workflow_log_entry_file(&path)?;
+                max_sequence = max_sequence.max(log_entry.sequence);
             }
-
-            let log_entry = load_workflow_log_entry_file(&path)?;
-            max_sequence = max_sequence.max(log_entry.sequence);
         }
 
         Ok(max_sequence.saturating_add(1))
     }
+
+    fn workflow_log_roots(&self) -> Result<Vec<PathBuf>, FileStateError> {
+        let mut roots = Vec::new();
+
+        let run_dirs = match fs::read_dir(&self.layout.runs_dir) {
+            Ok(run_dirs) => run_dirs,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                roots.sort();
+                roots.dedup();
+                return Ok(roots);
+            }
+            Err(source) => {
+                return Err(FileStateError::Io {
+                    path: self.layout.runs_dir.clone(),
+                    operation: "read runs directory",
+                    source,
+                });
+            }
+        };
+        for entry in run_dirs {
+            let entry = entry.map_err(|source| FileStateError::Io {
+                path: self.layout.runs_dir.clone(),
+                operation: "read runs directory entry",
+                source,
+            })?;
+            let run_dir = entry.path();
+            if run_dir.is_dir() {
+                roots.push(run_dir.join(WORKFLOW_LOGS_DIR_NAME));
+            }
+        }
+
+        roots.sort();
+        roots.dedup();
+        Ok(roots)
+    }
+
+    fn trigger_record_roots(&self) -> Result<Vec<PathBuf>, FileStateError> {
+        let mut roots = Vec::new();
+
+        let trigger_dirs = match fs::read_dir(&self.layout.trigger_state_dir) {
+            Ok(trigger_dirs) => trigger_dirs,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                roots.sort();
+                roots.dedup();
+                return Ok(roots);
+            }
+            Err(source) => {
+                return Err(FileStateError::Io {
+                    path: self.layout.trigger_state_dir.clone(),
+                    operation: "read trigger state directory",
+                    source,
+                });
+            }
+        };
+        for entry in trigger_dirs {
+            let entry = entry.map_err(|source| FileStateError::Io {
+                path: self.layout.trigger_state_dir.clone(),
+                operation: "read trigger state directory entry",
+                source,
+            })?;
+            let trigger_dir = entry.path();
+            if trigger_dir.is_dir() {
+                roots.push(trigger_dir.join(CANONICAL_TRIGGER_RECORDS_DIR_NAME));
+            }
+        }
+
+        roots.sort();
+        roots.dedup();
+        Ok(roots)
+    }
+
+    fn collect_legacy_workflow_log_paths(&self) -> Result<Vec<PathBuf>, FileStateError> {
+        let mut paths = Vec::new();
+        collect_existing_json_files(&self.layout.workflow_logs_dir, &mut paths)?;
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn collect_legacy_trigger_record_paths(&self) -> Result<Vec<PathBuf>, FileStateError> {
+        let mut paths = Vec::new();
+        collect_existing_json_files(&self.layout.trigger_records_dir, &mut paths)?;
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn collect_legacy_trigger_checkpoint_paths(&self) -> Result<Vec<PathBuf>, FileStateError> {
+        let mut paths = Vec::new();
+        collect_existing_json_files(&self.layout.trigger_checkpoints_dir, &mut paths)?;
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn detect_dual_checkpoints(
+        &self,
+        legacy_checkpoint_paths: &[PathBuf],
+    ) -> Vec<MixedCheckpointConflict> {
+        let mut conflicts = Vec::new();
+        for legacy_path in legacy_checkpoint_paths {
+            let Some(trigger_id) = legacy_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let canonical_path = self.layout.trigger_checkpoint_path(&trigger_id);
+            if canonical_path.exists() {
+                conflicts.push(MixedCheckpointConflict {
+                    trigger_id,
+                    canonical_path,
+                    legacy_path: legacy_path.clone(),
+                });
+            }
+        }
+        conflicts.sort_by(|left, right| left.trigger_id.cmp(&right.trigger_id));
+        conflicts
+    }
+
+    fn detect_duplicate_trigger_history(
+        &self,
+        legacy_record_paths: &[PathBuf],
+    ) -> Result<Vec<DuplicateTriggerHistoryConflict>, FileStateError> {
+        let mut canonical_records = Vec::new();
+        for directory in self.trigger_record_roots()? {
+            if directory == self.layout.trigger_records_dir {
+                continue;
+            }
+            collect_existing_json_files(&directory, &mut canonical_records)?;
+        }
+
+        let mut canonical_by_identity = BTreeMap::<(String, String), PathBuf>::new();
+        for path in canonical_records {
+            let record = load_trigger_record_file(&path)?;
+            canonical_by_identity
+                .entry((record.trigger_id, record.event_id))
+                .or_insert(path);
+        }
+
+        let mut conflicts = Vec::new();
+        for legacy_path in legacy_record_paths {
+            let legacy_record = load_trigger_record_file(legacy_path)?;
+            let identity = (
+                legacy_record.trigger_id.clone(),
+                legacy_record.event_id.clone(),
+            );
+            if let Some(canonical_path) = canonical_by_identity.get(&identity) {
+                conflicts.push(DuplicateTriggerHistoryConflict {
+                    trigger_id: legacy_record.trigger_id,
+                    event_id: legacy_record.event_id,
+                    canonical_path: canonical_path.clone(),
+                    legacy_path: legacy_path.clone(),
+                });
+            }
+        }
+
+        conflicts.sort_by(|left, right| {
+            left.trigger_id
+                .cmp(&right.trigger_id)
+                .then(left.event_id.cmp(&right.event_id))
+        });
+        Ok(conflicts)
+    }
+}
+
+pub fn inspect_legacy_state_usage(
+    layout: &StateLayout,
+) -> Result<LegacyStateInspection, FileStateError> {
+    FileBackedStateStore::new(layout.clone()).inspect_legacy_usage()
 }
 
 impl CoordinationStore {
@@ -1349,6 +1589,24 @@ fn recover_append_only_entries<T>(
     Ok(report)
 }
 
+fn recover_append_only_entries_if_exists<T>(
+    root: &Path,
+    loader: fn(&Path) -> Result<T, FileStateError>,
+) -> Result<FileArtifactRecoveryReport, FileStateError> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => recover_append_only_entries(root, loader),
+        Ok(_) => Ok(FileArtifactRecoveryReport::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(FileArtifactRecoveryReport::default())
+        }
+        Err(source) => Err(FileStateError::Io {
+            path: root.to_path_buf(),
+            operation: "inspect metadata",
+            source,
+        }),
+    }
+}
+
 fn atomic_write_json<T>(path: &Path, staged_path: &Path, value: &T) -> Result<(), FileStateError>
 where
     T: Serialize,
@@ -1617,10 +1875,6 @@ pub(crate) fn sanitize_path_component(value: &str) -> String {
     sanitized
 }
 
-pub(crate) fn trigger_record_file_name(sequence: u64, trigger_id: &str, event_id: &str) -> String {
-    format!(
-        "{sequence:020}-{}-{}.json",
-        sanitize_path_component(trigger_id),
-        sanitize_path_component(event_id)
-    )
+fn canonical_trigger_record_file_name(sequence: u64, event_id: &str) -> String {
+    format!("{sequence:020}-{}.json", sanitize_path_component(event_id))
 }

@@ -201,7 +201,6 @@ fn init_creates_minimal_root_and_validate_accepts_it() {
     assert!(!root.join("config").exists());
     assert!(root.join("workflows").is_dir());
     assert!(root.join("triggers").is_dir());
-    assert!(root.join("plugins").join("manifests").is_dir());
     assert!(root.join("plugins").join("bin").is_dir());
     assert!(root.join("secrets").is_dir());
     assert!(root.join("state").is_dir());
@@ -215,6 +214,7 @@ fn init_creates_minimal_root_and_validate_accepts_it() {
     )));
     assert!(root_config.contains("profile = \"default\""));
     assert!(root_config.contains("workflows_dir = \"workflows\""));
+    assert!(!root_config.contains("plugins/manifests/*.toml"));
 
     let validate_output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", &root)
@@ -228,6 +228,7 @@ fn init_creates_minimal_root_and_validate_accepts_it() {
     let validate_stderr =
         String::from_utf8(validate_output.stderr).expect("stderr should be UTF-8");
     assert!(validate_stdout.contains("validated root:"));
+    assert!(!validate_stdout.contains("legacy layout detected:"));
     assert!(validate_stderr.is_empty());
 }
 
@@ -267,7 +268,7 @@ fn init_respects_existing_root_path_overrides() {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n\n[plugins]\nmanifest_globs = [\"extensions/catalog/*.toml\"]\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -288,19 +289,12 @@ fn init_respects_existing_root_path_overrides() {
             .to_string_lossy()
             .as_ref()
     ));
-    assert!(stdout.contains(
-        root.join("extensions")
-            .join("catalog")
-            .to_string_lossy()
-            .as_ref()
-    ));
     assert!(stderr.is_empty());
 
     assert!(root.join("defs").join("workflows").is_dir());
     assert!(root.join("defs").join("triggers").is_dir());
     assert!(root.join("extensions").is_dir());
     assert!(root.join("extensions").join("bin").is_dir());
-    assert!(root.join("extensions").join("catalog").is_dir());
     assert!(root.join("vault").is_dir());
     assert!(root.join("runtime").is_dir());
 
@@ -313,38 +307,11 @@ fn init_respects_existing_root_path_overrides() {
 }
 
 #[test]
-fn init_reuses_legacy_root_config_without_creating_chainbot_toml() {
-    let _lock = acquire_fixture_lock();
-    let root = unique_root("init-legacy-root-config");
-    let _ = fs::remove_dir_all(&root);
-
-    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
-    fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"legacy\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"extensions\"\n",
-    )
-    .expect("legacy root config should be writable");
-
-    let output = Command::new(chainbot_bin())
-        .env("CHAINBOT_CONFIG_DIR", &root)
-        .arg("init")
-        .output()
-        .expect("init should execute with legacy root config");
-
-    assert!(output.status.success());
-    assert!(!root.join("chainbot.toml").exists());
-    assert!(root.join("config").join("root.toml").is_file());
-    assert!(root.join("extensions").join("manifests").is_dir());
-    assert!(root.join("extensions").join("bin").is_dir());
-}
-
-#[test]
 fn init_prefers_chainbot_toml_when_both_root_config_paths_exist() {
     let _lock = acquire_fixture_lock();
     let root = unique_root("init-dual-root-config");
     let _ = fs::remove_dir_all(&root);
 
-    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
     fs::create_dir_all(&root).expect("root directory should be creatable");
     fs::write(
         root.join("chainbot.toml"),
@@ -354,11 +321,6 @@ fn init_prefers_chainbot_toml_when_both_root_config_paths_exist() {
         ),
     )
     .expect("new root config should be writable");
-    fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"legacy\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"legacy-plugins\"\n",
-    )
-    .expect("legacy root config should be writable");
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", &root)
@@ -367,8 +329,7 @@ fn init_prefers_chainbot_toml_when_both_root_config_paths_exist() {
         .expect("init should execute with dual root configs");
 
     assert!(output.status.success());
-    assert!(root.join("new-plugins").join("manifests").is_dir());
-    assert!(!root.join("legacy-plugins").exists());
+    assert!(root.join("new-plugins").join("bin").is_dir());
 }
 
 #[test]
@@ -505,7 +466,7 @@ fn trigger_list_reports_configured_triggers() {
     assert!(stdout.contains("Triggers"));
     assert!(stdout.contains("tr-market"));
     assert!(stdout.contains("workflow=wf-alpha"));
-    assert!(stdout.contains("source=market-feed"));
+    assert!(stdout.contains("source=market_tick"));
     assert!(stderr.is_empty());
 }
 
@@ -530,10 +491,10 @@ fn trigger_list_json_reports_machine_readable_payload() {
     assert_eq!(payload.as_array().map(Vec::len), Some(1));
     assert_eq!(payload[0]["manifest_version"], "2.0.0");
     assert_eq!(payload[0]["trigger_id"], "tr-market");
-    assert_eq!(payload[0]["kind"], "market_tick");
+    assert_eq!(payload[0]["kind"], "builtin");
     assert_eq!(payload[0]["workflow_id"], "wf-alpha");
     assert_eq!(payload[0]["enabled"], false);
-    assert_eq!(payload[0]["source"], "market-feed");
+    assert_eq!(payload[0]["source"], "market_tick");
     assert_eq!(payload[0]["input_mapping"], serde_json::json!({}));
     assert_eq!(payload[0].get("package_root"), None);
     assert!(stderr.is_empty());
@@ -557,7 +518,7 @@ fn trigger_list_only_requires_trigger_root_inputs() {
     .expect("root config should be writable");
     fs::write(
         root.join("triggers").join("tr-market").join("config.toml"),
-        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"builtin\"\nsource = \"market_tick\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
     )
     .expect("trigger config should be writable");
 
@@ -586,54 +547,6 @@ fn trigger_list_only_requires_trigger_root_inputs() {
         fs::read_to_string(root.join("triggers").join("tr-market").join("config.toml"))
             .expect("trigger config should remain readable after enable");
     assert!(trigger_config.contains("enabled = true"));
-}
-
-#[test]
-fn validate_accepts_legacy_root_config_path() {
-    let _lock = acquire_fixture_lock();
-    let root = unique_root("legacy-root-config");
-    let _ = fs::remove_dir_all(&root);
-
-    fs::create_dir_all(root.join("config")).expect("legacy config directory should be creatable");
-    fs::create_dir_all(root.join("workflows").join("wf-alpha"))
-        .expect("workflow package directory should be creatable");
-    fs::create_dir_all(root.join("triggers").join("tr-market"))
-        .expect("trigger package directory should be creatable");
-    fs::create_dir_all(root.join("plugins").join("manifests"))
-        .expect("plugin manifests directory should be creatable");
-    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
-    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
-
-    fs::write(
-        root.join("config").join("root.toml"),
-        "manifest_version = \"2.0.0\"\nprofile = \"legacy\"\nsecret_refs = []\n",
-    )
-    .expect("legacy root config should be writable");
-    fs::write(
-        root.join("workflows").join("wf-alpha").join("config.toml"),
-        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-alpha\"\nname = \"alpha\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"node-1\"\nkind = \"plugin\"\nplugin = \"quote-plugin\"\noperation = \"normalize\"\ndepends_on = []\n",
-    )
-    .expect("legacy workflow fixture should be writable");
-    fs::write(
-        root.join("triggers").join("tr-market").join("config.toml"),
-        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
-    )
-    .expect("legacy trigger fixture should be writable");
-    fs::write(
-        root.join("plugins").join("manifests").join("quote_plugin.toml"),
-        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
-    )
-    .expect("legacy plugin fixture should be writable");
-
-    let output = Command::new(chainbot_bin())
-        .env("CHAINBOT_CONFIG_DIR", &root)
-        .arg("validate")
-        .output()
-        .expect("validate should execute for legacy root config path");
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
-    assert!(stderr.is_empty());
 }
 
 #[test]
@@ -743,8 +656,8 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
         .expect("run summary should remain readable after status");
     assert_eq!(summary.status, RunStatus::Running);
     assert!(!state_layout
-        .workflow_logs_dir
-        .join("run-incomplete")
+        .run_dir("run-incomplete")
+        .join("workflow-logs")
         .exists());
 }
 
@@ -789,8 +702,8 @@ fn run_and_serve_have_bounded_runtime_outcomes() {
 
     // Clean up trigger records created by run before serve to ensure deterministic outcome
     let state_root = basic_root().join("state");
-    let _ = fs::remove_dir_all(state_root.join("trigger-records"));
-    let _ = fs::create_dir_all(state_root.join("trigger-records"));
+    let _ = fs::remove_dir_all(state_root.join("triggers"));
+    let _ = fs::create_dir_all(state_root.join("triggers"));
 
     let serve_output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -841,14 +754,13 @@ fn ensure_basic_root_fixture() {
     let state_root = root.join("state");
 
     let _ = fs::remove_dir_all(state_root.join("runs"));
-    let _ = fs::remove_dir_all(state_root.join("workflow-logs"));
-    let _ = fs::remove_dir_all(state_root.join("trigger-records"));
+    let _ = fs::remove_dir_all(state_root.join("triggers"));
     let _ = fs::remove_file(state_root.join("coordination.sqlite3"));
 
     fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
     fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
-    fs::create_dir_all(root.join("plugins").join("manifests"))
-        .expect("plugin manifests directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("quote-plugin"))
+        .expect("plugin package directory should be creatable");
     fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
     fs::create_dir_all(&state_root).expect("state directory should be creatable");
     fs::create_dir_all(root.join("workflows").join("wf-alpha"))
@@ -873,12 +785,12 @@ fn ensure_basic_root_fixture() {
 
     fs::write(
         root.join("triggers").join("tr-market").join("config.toml"),
-        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"market_tick\"\nsource = \"market-feed\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"builtin\"\nsource = \"market_tick\"\nworkflow_id = \"wf-alpha\"\nenabled = false\n",
     )
     .expect("trigger fixture should be writable");
 
     fs::write(
-        root.join("plugins").join("manifests").join("quote_plugin.toml"),
+        root.join("plugins").join("quote-plugin").join("config.toml"),
         "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
     )
     .expect("plugin fixture should be writable");

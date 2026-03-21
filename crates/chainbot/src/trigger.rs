@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::builtins::triggers::validate_builtin_trigger_definition;
-use crate::errors::{assert_supported_major, ContractError};
+use crate::errors::{assert_required_major, assert_supported_major, ContractError};
 use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifest};
 use crate::state::{
     sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
@@ -34,12 +34,7 @@ use crate::state::{
 pub const CURRENT_API_MAJOR: u64 = 2;
 pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.listen.event";
 pub const TRIGGER_KIND_BUILTIN: &str = "builtin";
-pub const TRIGGER_KIND_CRON_ALIAS: &str = "cron";
-pub const TRIGGER_KIND_MANUAL_ALIAS: &str = "manual";
-pub const TRIGGER_KIND_MARKET_TICK_ALIAS: &str = "market_tick";
 pub const TRIGGER_KIND_EXTERNAL_PLUGIN: &str = "external_plugin";
-pub const TRIGGER_KIND_EXTERNAL_TRIGGER_ALIAS: &str = "external_trigger";
-pub const TRIGGER_KIND_PLUGIN_ALIAS: &str = "plugin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerKind {
@@ -50,7 +45,7 @@ pub enum TriggerKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerDefinition {
-    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(rename = "manifest_version")]
     pub api_version: String,
     pub trigger_id: String,
     pub kind: String,
@@ -220,7 +215,7 @@ enum ListenerFrame {
 
 impl TriggerDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
+        assert_required_major(
             "trigger.manifest_version",
             &self.api_version,
             CURRENT_API_MAJOR,
@@ -241,13 +236,8 @@ impl TriggerDefinition {
 
     pub fn kind(&self) -> Result<TriggerKind, ContractError> {
         match self.kind.as_str() {
-            TRIGGER_KIND_BUILTIN
-            | TRIGGER_KIND_CRON_ALIAS
-            | TRIGGER_KIND_MANUAL_ALIAS
-            | TRIGGER_KIND_MARKET_TICK_ALIAS => Ok(TriggerKind::Builtin),
-            TRIGGER_KIND_EXTERNAL_PLUGIN
-            | TRIGGER_KIND_EXTERNAL_TRIGGER_ALIAS
-            | TRIGGER_KIND_PLUGIN_ALIAS => Ok(TriggerKind::ExternalPlugin),
+            TRIGGER_KIND_BUILTIN => Ok(TriggerKind::Builtin),
+            TRIGGER_KIND_EXTERNAL_PLUGIN => Ok(TriggerKind::ExternalPlugin),
             _ => Err(ContractError::UnknownTriggerKind {
                 trigger_id: self.trigger_id.clone(),
                 kind: self.kind.clone(),

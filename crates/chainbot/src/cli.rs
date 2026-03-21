@@ -20,8 +20,7 @@ use crate::builtins::{
 };
 use crate::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
-    RootConfigDefinition, RootDefinitionBundle, RootLayout, RootPathOverrides, RootPluginDiscovery,
-    TriggerToggleResult,
+    RootConfigDefinition, RootDefinitionBundle, RootLayout, RootPathOverrides, TriggerToggleResult,
 };
 use crate::errors::UserFacingError;
 use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
@@ -445,7 +444,6 @@ impl CliRequest {
         let state_layout = StateLayout::from_root_layout(&root_layout);
         let state_store = FileBackedStateStore::new(state_layout.clone());
         let observed_at_ms = current_time_ms()?;
-
         let run_summaries = state_store
             .list_committed_run_summaries()
             .map_err(|error| map_file_state_error("list committed run summaries", error))?;
@@ -757,10 +755,10 @@ fn help_text(topic: HelpTopic) -> String {
         HelpTopic::Init => String::from("init - Bootstrap a minimal ChainBot root\n\nUse when:\n  - you need a new ChainBot root that validates immediately\n  - you want the default single-file root config without manual setup\n  - you are preparing a fresh local root for workflows and triggers\n\nWrites:\n  - resolved root directory\n  - chainbot.toml when no root config exists yet\n  - default package directories under the root\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot init\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot init\n\nCompatibility:\n  - reuses existing chainbot.toml when present\n  - falls back to config/root.toml for pre-migration roots\n\nSee also:\n  version, validate, status, trigger"),
         HelpTopic::Status => String::from("status - Inspect runtime state without executing workflows\n\nUse when:\n  - you want to know whether serve is active\n  - you want the latest workflow run result\n  - you want trigger activity without opening state files\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured state runs directory\n  - configured trigger record directory\n  - configured coordination store\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot status\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot status\n  chainbot status --json\n\nSee also:\n  validate, list-runs, serve"),
         HelpTopic::Trigger => String::from("trigger - Inspect or persist trigger package state\n\nUse when:\n  - you need to inspect configured triggers without opening TOML manually\n  - you need to stop a trigger without editing TOML manually\n  - you want to re-enable a trigger after maintenance or debugging\n\nReads:\n  - configured root config\n  - configured trigger packages\n\nWrites:\n  - target trigger package config.toml for enable or disable actions\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot trigger list\n  chainbot trigger list --json\n  chainbot trigger enable tr-market\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market\n\nSee also:\n  init, status, validate, serve"),
-        HelpTopic::Validate => String::from("validate - Validate config and package contracts\n\nUse when:\n  - you want to confirm a root is structurally valid\n  - you changed config and want a fast contract check\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin manifests\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot validate\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate\n\nSee also:\n  status, run, serve"),
+        HelpTopic::Validate => String::from("validate - Validate config and package contracts\n\nUse when:\n  - you want to confirm a root is structurally valid\n  - you changed config and want a fast contract check\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin packages\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot validate\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate\n\nSee also:\n  status, run, serve"),
         HelpTopic::ListRuns => String::from("list-runs - Print persisted run summaries as JSON\n\nUse when:\n  - you need machine-readable workflow run summaries\n  - you want raw persisted run status output without higher-level aggregation\n\nReads:\n  - configured state runs directory\n\nDoes not execute:\n  - workflow runs\n  - trigger snapshots\n\nExamples:\n  chainbot list-runs\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot list-runs\n\nSee also:\n  status, serve"),
-        HelpTopic::Run => String::from("run - Execute one manual workflow run\n\nUse when:\n  - you want a single manual execution without a serve lease\n  - your root contains exactly one workflow package\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured plugin manifests\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n\nExamples:\n  chainbot run\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot run\n\nSee also:\n  status, validate, serve"),
-        HelpTopic::Serve => String::from("serve - Drain one trigger snapshot under a serve lease\n\nUse when:\n  - you want to evaluate configured triggers once\n  - you need runtime recovery plus duplicate-suppression coordination\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin manifests\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n  - configured trigger record directory\n  - configured coordination store\n\nExamples:\n  chainbot serve\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot serve\n\nSee also:\n  status, validate, list-runs"),
+        HelpTopic::Run => String::from("run - Execute one manual workflow run\n\nUse when:\n  - you want a single manual execution without a serve lease\n  - your root contains exactly one workflow package\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured plugin packages\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n\nExamples:\n  chainbot run\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot run\n\nSee also:\n  status, validate, serve"),
+        HelpTopic::Serve => String::from("serve - Drain one trigger snapshot under a serve lease\n\nUse when:\n  - you want to evaluate configured triggers once\n  - you need runtime recovery plus duplicate-suppression coordination\n\nReads:\n  - configured root config\n  - configured workflow packages\n  - configured trigger packages\n  - configured plugin packages\n  - configured secrets directory\n\nWrites:\n  - configured state runs directory\n  - configured workflow log directory\n  - configured trigger record directory\n  - configured coordination store\n\nExamples:\n  chainbot serve\n  CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot serve\n\nSee also:\n  status, validate, list-runs"),
     }
 }
 
@@ -867,6 +865,8 @@ fn render_status_output(status: &StatusOutput) -> String {
         lines.push(format!("  serve_expires_at_ms: {expires_at_ms}"));
     }
 
+    lines.push(String::new());
+    lines.push(String::from("Legacy Layout"));
     lines.push(String::new());
     lines.push(String::from("Workflows"));
     if status.workflows.is_empty() {
@@ -1110,10 +1110,6 @@ fn initialize_root_layout(layout: &RootLayout) -> Result<InitResult, UserFacingE
         &mut reused_paths,
     )?;
 
-    for manifest_dir in plugin_manifest_directories(&effective_layout.root, &root_config)? {
-        ensure_directory(&manifest_dir, &mut created_paths, &mut reused_paths)?;
-    }
-
     Ok(InitResult {
         root: layout.root.clone(),
         created_paths,
@@ -1157,9 +1153,7 @@ fn ensure_root_config(
     created_paths: &mut Vec<PathBuf>,
     reused_paths: &mut Vec<PathBuf>,
 ) -> Result<RootConfigDefinition, UserFacingError> {
-    let path = layout
-        .existing_root_config_path()
-        .unwrap_or_else(|| layout.root_config_path());
+    let path = layout.root_config_path();
     match fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => {
             reused_paths.push(path.clone());
@@ -1208,49 +1202,6 @@ fn ensure_root_config(
     }
 }
 
-fn plugin_manifest_directories(
-    root: &Path,
-    root_config: &RootConfigDefinition,
-) -> Result<Vec<PathBuf>, UserFacingError> {
-    let default_plugins_dir = root.join(
-        root_config
-            .paths
-            .plugins_dir
-            .as_deref()
-            .unwrap_or("plugins"),
-    );
-    if root_config.plugins.manifest_globs.is_empty() {
-        return Ok(vec![default_plugins_dir.join("manifests")]);
-    }
-
-    let mut directories = BTreeSet::new();
-    for pattern in root_config.plugins.manifest_globs.clone() {
-        let Some(directory_pattern) = pattern.strip_suffix("/*.toml") else {
-            return Err(UserFacingError::validation(format!(
-                "root_config.plugins.manifest_globs must use a root-relative <dir>/*.toml pattern: {pattern}"
-            )));
-        };
-        let directory = if directory_pattern == "plugins/manifests" {
-            default_plugins_dir.join("manifests")
-        } else {
-            let candidate = Path::new(directory_pattern);
-            if candidate.is_absolute()
-                || candidate
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                return Err(UserFacingError::validation(format!(
-                    "root_config.plugins.manifest_globs must stay within the root: {pattern}"
-                )));
-            }
-            root.join(candidate)
-        };
-        directories.insert(directory);
-    }
-
-    Ok(directories.into_iter().collect())
-}
-
 fn default_root_config() -> RootConfigDefinition {
     RootConfigDefinition {
         schema_version: INIT_MANIFEST_VERSION.to_owned(),
@@ -1267,9 +1218,6 @@ fn default_root_config() -> RootConfigDefinition {
             plugins_dir: Some(String::from("plugins")),
             secrets_dir: Some(String::from("secrets")),
             state_dir: Some(String::from("state")),
-        },
-        plugins: RootPluginDiscovery {
-            manifest_globs: vec![String::from("plugins/manifests/*.toml")],
         },
     }
 }
@@ -1768,7 +1716,7 @@ mod tests {
             root.join("triggers")
                 .join("builtin-trigger-e2e")
                 .join("config.toml"),
-            "manifest_version = \"2.0.0\"\ntrigger_id = \"builtin-trigger-e2e\"\nkind = \"manual\"\nsource = \"manual-source\"\nworkflow_id = \"wf-e2e\"\nenabled = true\n",
+            "manifest_version = \"2.0.0\"\ntrigger_id = \"builtin-trigger-e2e\"\nkind = \"builtin\"\nsource = \"manual\"\nworkflow_id = \"wf-e2e\"\nenabled = true\n",
         )
         .expect("builtin trigger fixture should be writable");
 
@@ -1785,7 +1733,7 @@ mod tests {
 
         let runtime = request
             .load_runtime_context()
-            .expect("runtime load should succeed with builtin alias trigger");
+            .expect("runtime load should succeed with canonical builtin trigger");
         let mut lease_supervisor = ServeLeaseSupervisor::new(
             StateLayout::from_root_layout(&runtime.root_layout),
             String::from("test-owner"),

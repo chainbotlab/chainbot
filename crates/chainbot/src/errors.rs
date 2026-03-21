@@ -71,6 +71,11 @@ pub enum ContractError {
         major: u64,
         max_supported_major: u64,
     },
+    UnsupportedMajorVersion {
+        field: &'static str,
+        major: u64,
+        supported_major: u64,
+    },
     InvalidSecretReferenceSyntax {
         value: String,
     },
@@ -483,6 +488,14 @@ impl Display for ContractError {
             } => write!(
                 f,
                 "{field} major version {major} is unsupported; max supported major is {max_supported_major}"
+            ),
+            Self::UnsupportedMajorVersion {
+                field,
+                major,
+                supported_major,
+            } => write!(
+                f,
+                "{field} major version {major} is unsupported; required major is {supported_major}"
             ),
             Self::InvalidSecretReferenceSyntax { value } => {
                 write!(f, "invalid secret reference syntax: {value}")
@@ -902,6 +915,30 @@ pub fn assert_supported_major(
             field,
             major,
             max_supported_major,
+        });
+    }
+
+    Ok(())
+}
+
+pub fn assert_required_major(
+    field: &'static str,
+    version: &str,
+    required_major: u64,
+) -> Result<(), ContractError> {
+    let major_segment = version.split('.').next().unwrap_or_default().trim();
+    let major = major_segment
+        .parse::<u64>()
+        .map_err(|_| ContractError::InvalidVersionFormat {
+            field,
+            value: version.to_owned(),
+        })?;
+
+    if major != required_major {
+        return Err(ContractError::UnsupportedMajorVersion {
+            field,
+            major,
+            supported_major: required_major,
         });
     }
 

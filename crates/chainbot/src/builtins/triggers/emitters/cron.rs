@@ -4,10 +4,10 @@ use time::OffsetDateTime;
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::{decode_builtin_trigger_params, BuiltinTriggerHandler};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission, TRIGGER_KIND_CRON_ALIAS};
+use crate::trigger::{TriggerDefinition, TriggerEmission};
 
 const MILLIS_PER_MINUTE: i64 = 60_000;
-pub(crate) const BUILTIN_TRIGGER_CRON_KIND: &str = TRIGGER_KIND_CRON_ALIAS;
+pub(crate) const BUILTIN_TRIGGER_CRON_KIND: &str = "cron";
 
 #[derive(Debug, Clone, Copy)]
 pub struct CronTriggerHandler;

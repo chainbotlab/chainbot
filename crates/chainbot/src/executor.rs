@@ -16,7 +16,7 @@ pub use crate::builtins::nodes::contract::{
     BuiltinNodeRegistry, BuiltinNodeRequest, BuiltinNodeResult,
 };
 use crate::builtins::nodes::dispatch::builtin_dispatch_kind;
-use crate::errors::{assert_supported_major, ContractError};
+use crate::errors::{assert_required_major, ContractError};
 use crate::workflow::{
     DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, SubflowContract, VariableBinding,
     WhenCondition, WorkflowDefinition,
@@ -27,12 +27,12 @@ pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeDefinition {
-    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(rename = "manifest_version")]
     pub api_version: String,
-    #[serde(rename = "id", alias = "node_id")]
+    #[serde(rename = "id")]
     pub node_id: String,
     pub kind: String,
-    #[serde(rename = "plugin", alias = "plugin_id")]
+    #[serde(rename = "plugin")]
     pub plugin_id: String,
     pub operation: String,
     #[serde(default)]
@@ -101,7 +101,7 @@ enum DependencyDecision {
 
 impl NodeDefinition {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
+        assert_required_major(
             "node.manifest_version",
             &self.api_version,
             CURRENT_API_MAJOR,

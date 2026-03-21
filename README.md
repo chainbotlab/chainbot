@@ -32,17 +32,20 @@ chainbot trigger disable <trigger-id>
 
 ## Workspace Structure
 
-When you run `chainbot init`, it creates this layout:
+When you run `chainbot init`, it creates this minimal canonical layout:
 
 ```text
 <root>/
 |- chainbot.toml  # Root configuration file
 |- workflows/    # Workflow definitions
 |- triggers/     # Trigger state persistence
-|- plugins/      # Plugin binaries and configs
+|- plugins/
+|  `- bin/       # Shared plugin executables bootstrap directory
 |- secrets/      # Secret management
 `- state/        # Runtime state
 ```
+
+Installed plugin packages live under `plugins/<plugin_id>/config.toml` when present. The older shared `plugins/manifests/` layout is not created by `chainbot init` and is not part of the current stable bootstrap contract.
 
 The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to override.
 
@@ -66,7 +69,7 @@ Main configuration file: `chainbot.toml`
 
 ## Version
 
-Current version: **2.1.4**
+Current version: **2.2.0**
 
 ## Links
 

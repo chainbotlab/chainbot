@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{assert_supported_major, ContractError};
+use crate::errors::{assert_required_major, assert_supported_major, ContractError};
 
 pub const CURRENT_API_MAJOR: u64 = 2;
 pub const NODE_PLUGIN_CONTRACT_VERSION: &str = "1.0.0";
@@ -21,8 +21,6 @@ pub const NODE_PLUGIN_CONTRACT_MAX_MAJOR: u64 = 1;
 pub const PLUGIN_KIND_BUILTIN: &str = "builtin";
 pub const PLUGIN_KIND_EXTERNAL_NODE: &str = "external_node";
 pub const PLUGIN_KIND_EXTERNAL_TRIGGER: &str = "external_trigger";
-pub const PLUGIN_KIND_NODE_ALIAS: &str = "node";
-pub const PLUGIN_KIND_TRIGGER_ALIAS: &str = "trigger";
 pub const NODE_PLUGIN_EXECUTE_CAPABILITY: &str = "node:execute";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +32,7 @@ pub enum PluginKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginManifest {
-    #[serde(rename = "manifest_version", alias = "api_version")]
+    #[serde(rename = "manifest_version")]
     pub api_version: String,
     pub plugin_id: String,
     pub kind: String,
@@ -52,7 +50,7 @@ pub struct PluginManifest {
 
 impl PluginManifest {
     pub fn validate(&self) -> Result<(), ContractError> {
-        assert_supported_major(
+        assert_required_major(
             "plugin.manifest_version",
             &self.api_version,
             CURRENT_API_MAJOR,
@@ -108,10 +106,8 @@ impl PluginManifest {
     pub fn kind(&self) -> Result<PluginKind, ContractError> {
         match self.kind.as_str() {
             PLUGIN_KIND_BUILTIN => Ok(PluginKind::Builtin),
-            PLUGIN_KIND_EXTERNAL_NODE | PLUGIN_KIND_NODE_ALIAS => Ok(PluginKind::ExternalNode),
-            PLUGIN_KIND_EXTERNAL_TRIGGER | PLUGIN_KIND_TRIGGER_ALIAS => {
-                Ok(PluginKind::ExternalTrigger)
-            }
+            PLUGIN_KIND_EXTERNAL_NODE => Ok(PluginKind::ExternalNode),
+            PLUGIN_KIND_EXTERNAL_TRIGGER => Ok(PluginKind::ExternalTrigger),
             _ => Err(ContractError::NodePluginInvalidKind {
                 plugin_id: self.plugin_id.clone(),
                 kind: self.kind.clone(),
