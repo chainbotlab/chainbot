@@ -681,20 +681,31 @@ fn resolve_executable_path(
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(plugin_root_dir);
+
+    // Canonicalize both paths to ensure they can be compared correctly.
+    // manifest_root_dir may be relative (e.g., "plugins/manifests") while
+    // plugin_root_dir is typically absolute. Without canonicalization,
+    // entrypoint_escapes_root would fail to strip prefixes correctly.
+    let manifest_root =
+        std::fs::canonicalize(manifest_root_dir).map_err(|source| ContractError::Io {
+            path: manifest_root_dir.to_path_buf(),
+            operation: "canonicalize trigger plugin manifest root",
+            source,
+        })?;
     let plugin_root =
         std::fs::canonicalize(plugin_root_dir).map_err(|source| ContractError::Io {
             path: plugin_root_dir.to_path_buf(),
             operation: "canonicalize trigger plugin root",
             source,
         })?;
-    if entrypoint_escapes_root(manifest_root_dir, &plugin_root, entrypoint_path) {
+    if entrypoint_escapes_root(&manifest_root, &plugin_root, entrypoint_path) {
         return Err(ContractError::TriggerPluginEntrypointEscapesRoot {
             plugin_id: manifest.plugin_id.clone(),
             entrypoint: entrypoint.to_owned(),
             root: plugin_root,
         });
     }
-    let executable_path = manifest_root_dir.join(entrypoint_path);
+    let executable_path = manifest_root.join(entrypoint_path);
 
     if !executable_path.exists() {
         return Err(ContractError::TriggerPluginExecutableMissing {
@@ -1219,6 +1230,42 @@ mod tests {
             250,
             50,
         ));
+    }
+
+    #[test]
+    fn entrypoint_escapes_root_within_subdirectory() {
+        let root = Path::new("/tmp/chainbot-demo/plugins");
+        let manifest_root = Path::new("/tmp/chainbot-demo/plugins/manifests");
+        let entrypoint = Path::new("../bin/demo-trigger.sh");
+
+        assert!(
+            !entrypoint_escapes_root(manifest_root, root, entrypoint),
+            "../bin/demo-trigger.sh from manifests/ should stay within plugins/"
+        );
+    }
+
+    #[test]
+    fn entrypoint_escapes_root_truly_escapes() {
+        let root = Path::new("/tmp/chainbot-demo/plugins");
+        let manifest_root = Path::new("/tmp/chainbot-demo/plugins/manifests");
+        let entrypoint = Path::new("../../escaped.sh");
+
+        assert!(
+            entrypoint_escapes_root(manifest_root, root, entrypoint),
+            "../../escaped.sh should escape plugins/"
+        );
+    }
+
+    #[test]
+    fn entrypoint_escapes_root_stays_within_manifest_dir() {
+        let root = Path::new("/tmp/chainbot-demo/plugins");
+        let manifest_root = Path::new("/tmp/chainbot-demo/plugins/manifests");
+        let entrypoint = Path::new("bin/demo-trigger.sh");
+
+        assert!(
+            !entrypoint_escapes_root(manifest_root, root, entrypoint),
+            "bin/demo-trigger.sh from manifests/ should stay within plugins/"
+        );
     }
 }
 
