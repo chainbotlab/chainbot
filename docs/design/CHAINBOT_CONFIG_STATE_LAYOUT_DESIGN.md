@@ -44,6 +44,7 @@ Define the stable root layout that aligns ChainBot contract versioning, package 
    `- triggers/
       `- <trigger_id>/
          |- checkpoint.json
+         |- snapshot.json
          `- records/
             |- 00000000000000000001-<event>.json
             `- 00000000000000000002-<event>.json
@@ -123,11 +124,13 @@ Run-scoped artifacts are retained, inspected, and cleaned up as one lifecycle un
 `state/triggers/<trigger_id>/` owns one trigger listener state record.
 
 - `checkpoint.json` is the durable resume position
+- `snapshot.json` is a non-authoritative derived snapshot for operator reads and restart-time coordination shortcuts
 - `records/*.json` are append-only accepted trigger records
 
 Trigger-scoped artifacts are retained, inspected, and cleaned up as one lifecycle unit.
 
 Accepted trigger records are not ordinary logs. They are durable trigger-plane state used to rebuild dedup and cooldown coordination after restart.
+Trigger snapshots must remain rebuildable from accepted trigger records and must not replace them as the source of truth.
 
 ### Coordination-Scoped Artifacts
 
@@ -145,6 +148,7 @@ The coordination database must remain rebuild-friendly and must not become the s
 - workflow logs remain append-only
 - trigger records remain append-only
 - trigger checkpoints remain the last acknowledged trigger progress
+- trigger snapshots remain derived, replaceable state
 - trigger dedup and cooldown rebuild must succeed from persisted trigger records after restart
 - run cleanup must not delete trigger-scoped artifacts implicitly
 - trigger cleanup must treat accepted trigger records as correctness-bearing state
