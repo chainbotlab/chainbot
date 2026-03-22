@@ -5,3 +5,9 @@ secret_refs = ["secret://ops/slack/webhook#api_token"]
 
 [runtime_defaults]
 environment = "test"
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "state/runtime.sqlite3"

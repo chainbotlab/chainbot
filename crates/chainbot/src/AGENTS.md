@@ -17,6 +17,7 @@
 - `plugin/`: Encapsulated plugin subsystem containing the stable public facade plus internal contract and host implementation modules.
 - `script_protocol.rs`: Versioned script-worker request/response envelope contract shared by config loading, builtin script execution, and protocol tests.
 - `builtins/nodes/script_worker.rs`: Bounded subprocess host for Python/JavaScript builtin script nodes plus timeout cleanup and runtime failure mapping.
-- `state.rs`: Run summary schema plus state-tree layout, crash-safe file persistence, canonical run/trigger-scoped append-only artifacts, minimal SQLite coordination, deterministic run-summary listing, and canonical-only restart recovery.
+- `state.rs`: Legacy file-backed runtime-state and SQLite coordination implementation retained for compatibility, inspection, and future import paths.
+- `state_db.rs`: DB-primary runtime-state implementation for local SQLite and PostgreSQL backends used by main CLI and trigger execution paths.
 - `secrets.rs`: Secret reference parser plus pass-style runtime secret provider, decryptor seam, and redaction helpers that prevent durable plaintext leakage.
 - `errors.rs`: Typed contract error variants plus stable CLI-facing error and exit-code mapping.

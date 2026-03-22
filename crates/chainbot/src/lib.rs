@@ -17,5 +17,6 @@ pub mod plugin;
 pub mod script_protocol;
 pub mod secrets;
 pub mod state;
+pub mod state_db;
 pub mod trigger;
 pub mod workflow;

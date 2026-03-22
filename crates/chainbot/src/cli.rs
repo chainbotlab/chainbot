@@ -20,16 +20,18 @@ use crate::builtins::{
 };
 use crate::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
-    RootConfigDefinition, RootDefinitionBundle, RootLayout, RootPathOverrides, TriggerToggleResult,
+    LocalStorageDefinition, RawDebugArtifactsDefinition, RootConfigDefinition,
+    RootDefinitionBundle, RootLayout, RootPathOverrides, RuntimeStorageConfig, StorageDefinition,
+    StorageMode, TriggerToggleResult,
 };
 use crate::errors::UserFacingError;
 use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
 use crate::plugin::{PluginKind, PluginManifest};
 use crate::state::{
-    sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
-    FileStateError, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
-    ServeLeaseState, StateLayout, TriggerEventRecord, SERVE_OWNER_ID_PREFIX,
+    sanitize_path_component, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
+    ServeLeaseState, TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX,
 };
+use crate::state_db::{RuntimeStateError, RuntimeStateStore};
 use crate::trigger::{
     TriggerDefinition, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
     REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
@@ -158,7 +160,8 @@ struct InitResult {
 struct RuntimeContext {
     root_layout: RootLayout,
     definitions: RootDefinitionBundle,
-    state_store: FileBackedStateStore,
+    storage_config: RuntimeStorageConfig,
+    state_store: RuntimeStateStore,
     secret_mode: SecretDecryptMode,
     worker_host: WorkerHost,
 }
@@ -172,7 +175,7 @@ struct SingleRunResult {
 
 #[derive(Debug, Clone)]
 struct ServeLeaseSupervisor {
-    state_layout: StateLayout,
+    storage_config: RuntimeStorageConfig,
     owner_id: String,
     lease_ttl_ms: i64,
     renew_interval_ms: i64,
@@ -180,9 +183,9 @@ struct ServeLeaseSupervisor {
 }
 
 impl ServeLeaseSupervisor {
-    fn new(state_layout: StateLayout, owner_id: String, acquired_at_ms: i64) -> Self {
+    fn new(storage_config: RuntimeStorageConfig, owner_id: String, acquired_at_ms: i64) -> Self {
         Self {
-            state_layout,
+            storage_config,
             owner_id,
             lease_ttl_ms: SERVE_LEASE_TTL_MS,
             renew_interval_ms: SERVE_LEASE_RENEW_INTERVAL_MS,
@@ -195,11 +198,11 @@ impl ServeLeaseSupervisor {
             return Ok(());
         }
 
-        let mut coordination = CoordinationStore::open(&self.state_layout, now_ms)
-            .map_err(|error| map_coordination_error("open serve coordination store", error))?;
-        match coordination
+        let mut store = RuntimeStateStore::open(&self.storage_config, now_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        match store
             .try_acquire_serve_lease(&self.owner_id, now_ms, self.lease_ttl_ms)
-            .map_err(|error| map_coordination_error("renew serve lease", error))?
+            .map_err(|error| map_runtime_state_error("renew serve lease", error))?
         {
             LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
                 self.next_renew_at_ms = now_ms.saturating_add(self.renew_interval_ms);
@@ -517,18 +520,22 @@ impl CliRequest {
         let root_layout = self.resolve_existing_root()?;
         let definitions =
             RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
-        let state_layout = StateLayout::from_root_layout(&root_layout);
-        let state_store = FileBackedStateStore::new(state_layout.clone());
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&root_layout.root)
+            .map_err(UserFacingError::from_contract)?;
+        let mut state_store = RuntimeStateStore::open(&storage_config, current_time_ms()?)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let observed_at_ms = current_time_ms()?;
         let run_summaries = state_store
-            .list_committed_run_summaries()
-            .map_err(|error| map_file_state_error("list committed run summaries", error))?;
-        let trigger_records = state_store
-            .load_committed_trigger_records()
-            .map_err(|error| map_file_state_error("load committed trigger records", error))?;
-        let serve_lease =
-            CoordinationStore::inspect_existing_serve_lease(&state_layout, observed_at_ms)
-                .map_err(|error| map_coordination_error("inspect existing serve lease", error))?;
+            .list_run_summaries()
+            .map_err(|error| map_runtime_state_error("list run summaries", error))?;
+        let trigger_snapshots = state_store
+            .list_trigger_snapshots()
+            .map_err(|error| map_runtime_state_error("load trigger snapshots", error))?;
+        let serve_lease = state_store
+            .inspect_serve_lease(observed_at_ms)
+            .map_err(|error| map_runtime_state_error("inspect serve lease", error))?;
 
         let payload = build_status_output(
             &root_layout,
@@ -536,7 +543,7 @@ impl CliRequest {
             &definitions.workflows,
             &definitions.triggers,
             &run_summaries,
-            &trigger_records,
+            &trigger_snapshots,
             serve_lease,
         );
 
@@ -593,17 +600,17 @@ impl CliRequest {
 
     fn execute_list_runs(&self) -> Result<CliOutput, UserFacingError> {
         let layout = self.resolve_existing_root()?;
-        let store = FileBackedStateStore::new(StateLayout::from_root_layout(&layout));
-        store
-            .initialize()
-            .map_err(|error| map_file_state_error("initialize runtime state", error))?;
-        let recovered_at_ms = current_time_ms()?;
-        let _ = store
-            .recover_runtime_state(recovered_at_ms)
-            .map_err(|error| map_file_state_error("recover runtime state", error))?;
+        let definitions =
+            RootDefinitionBundle::load(&layout).map_err(UserFacingError::from_contract)?;
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&layout.root)
+            .map_err(UserFacingError::from_contract)?;
+        let mut store = RuntimeStateStore::open(&storage_config, current_time_ms()?)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let summaries = store
             .list_run_summaries()
-            .map_err(|error| map_file_state_error("list persisted run summaries", error))?;
+            .map_err(|error| map_runtime_state_error("list run summaries", error))?;
         let payload = serde_json::to_string_pretty(&summaries).map_err(|source| {
             UserFacingError::state(format!(
                 "Failed to serialize run summaries for output: {source}"
@@ -613,7 +620,7 @@ impl CliRequest {
     }
 
     fn execute_run(&self) -> Result<CliOutput, UserFacingError> {
-        let runtime = self.load_runtime_context()?;
+        let mut runtime = self.load_runtime_context()?;
         let workflow = select_manual_run_workflow(&runtime.definitions.workflows)?;
 
         let mut request = NormalizedRunRequest::new(
@@ -628,7 +635,7 @@ impl CliRequest {
             .manual_invocation_input
             .insert("manual_invocation".to_owned(), serde_json::json!(true));
 
-        let run_result = execute_single_run(&runtime, request, current_time_ms()?)?;
+        let run_result = execute_single_run(&mut runtime, request, current_time_ms()?)?;
         Ok(CliOutput::text(format!(
             "run completed: run_id={} workflow_id={} status={}",
             run_result.run_id,
@@ -638,27 +645,26 @@ impl CliRequest {
     }
 
     fn execute_serve(&self) -> Result<CliOutput, UserFacingError> {
-        let runtime = self.load_runtime_context()?;
-        let state_layout = StateLayout::from_root_layout(&runtime.root_layout);
+        let mut runtime = self.load_runtime_context()?;
         let now_ms = current_time_ms()?;
         let owner_id = format!("{SERVE_OWNER_ID_PREFIX}{}", std::process::id());
-        let mut coordination = CoordinationStore::open(&state_layout, now_ms)
-            .map_err(|error| map_coordination_error("open serve coordination store", error))?;
+        let mut store = RuntimeStateStore::open(&runtime.storage_config, now_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
 
-        match coordination
+        match store
             .try_acquire_serve_lease(&owner_id, now_ms, SERVE_LEASE_TTL_MS)
-            .map_err(|error| map_coordination_error("acquire serve lease", error))?
+            .map_err(|error| map_runtime_state_error("acquire serve lease", error))?
         {
             LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
                 let mut lease_supervisor = ServeLeaseSupervisor::new(
-                    state_layout.clone(),
+                    runtime.storage_config.clone(),
                     owner_id.clone(),
                     now_ms,
                 );
-                let run_result = serve_once_with_lease(&runtime, now_ms, &mut lease_supervisor);
-                let released = coordination
+                let run_result = serve_once_with_lease(&mut runtime, now_ms, &mut lease_supervisor);
+                let released = store
                     .release_serve_lease(&owner_id)
-                    .map_err(|error| map_coordination_error("release serve lease", error))?;
+                    .map_err(|error| map_runtime_state_error("release serve lease", error))?;
                 if !released {
                     return Err(UserFacingError::state(
                         "Failed to release serve lease for current owner.",
@@ -703,19 +709,21 @@ impl CliRequest {
         let root_layout = self.resolve_existing_root()?;
         let definitions =
             RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
-
-        let state_store = FileBackedStateStore::new(StateLayout::from_root_layout(&root_layout));
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&root_layout.root)
+            .map_err(UserFacingError::from_contract)?;
         let recovered_at_ms = current_time_ms()?;
-        state_store
-            .initialize()
-            .map_err(|error| map_file_state_error("initialize runtime state", error))?;
+        let mut state_store = RuntimeStateStore::open(&storage_config, recovered_at_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let _ = state_store
             .recover_runtime_state(recovered_at_ms)
-            .map_err(|error| map_file_state_error("recover runtime state", error))?;
+            .map_err(|error| map_runtime_state_error("recover runtime state", error))?;
 
         Ok(RuntimeContext {
             root_layout,
             definitions,
+            storage_config,
             state_store,
             secret_mode: secret_decrypt_mode_from_env(),
             worker_host: WorkerHost::new(WorkerHostLimits::default()),
@@ -1219,7 +1227,7 @@ fn build_status_output(
     workflows: &[WorkflowDefinition],
     triggers: &[TriggerDefinition],
     run_summaries: &[RunRecordSummary],
-    trigger_records: &[TriggerEventRecord],
+    trigger_snapshots: &[TriggerSnapshotRecord],
     serve_lease: ServeLeaseSnapshot,
 ) -> StatusOutput {
     let mut latest_runs = BTreeMap::<String, RunRecordSummary>::new();
@@ -1232,15 +1240,10 @@ fn build_status_output(
         }
     }
 
-    let mut latest_trigger_events = BTreeMap::<String, TriggerEventRecord>::new();
-    for record in trigger_records {
-        match latest_trigger_events.get(&record.trigger_id) {
-            Some(current) if !trigger_record_is_newer(record, current) => {}
-            _ => {
-                latest_trigger_events.insert(record.trigger_id.clone(), record.clone());
-            }
-        }
-    }
+    let latest_trigger_events = trigger_snapshots
+        .iter()
+        .map(|snapshot| (snapshot.trigger_id.clone(), snapshot.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let workflow_views = workflows
         .iter()
@@ -1264,8 +1267,8 @@ fn build_status_output(
                 trigger_id: trigger.trigger_id.clone(),
                 enabled: trigger.enabled,
                 workflow_id: trigger.workflow_id.clone(),
-                last_event_id: latest_record.map(|record| record.event_id.clone()),
-                last_accepted_at_ms: latest_record.map(|record| record.accepted_at_ms),
+                last_event_id: latest_record.and_then(|record| record.last_event_id.clone()),
+                last_accepted_at_ms: latest_record.and_then(|record| record.last_accepted_at_ms),
             }
         })
         .collect::<Vec<_>>();
@@ -1372,14 +1375,6 @@ fn run_summary_is_newer(candidate: &RunRecordSummary, current: &RunRecordSummary
         current.finished_at_ms.unwrap_or(i64::MIN),
         &current.run_id,
     )
-}
-
-fn trigger_record_is_newer(candidate: &TriggerEventRecord, current: &TriggerEventRecord) -> bool {
-    (
-        candidate.accepted_at_ms,
-        candidate.sequence,
-        &candidate.event_id,
-    ) > (current.accepted_at_ms, current.sequence, &current.event_id)
 }
 
 fn render_serve_lease_state(state: ServeLeaseState) -> &'static str {
@@ -1671,6 +1666,14 @@ fn default_root_config() -> RootConfigDefinition {
             secrets_dir: Some(String::from("secrets")),
             state_dir: Some(String::from("state")),
         },
+        storage: StorageDefinition {
+            mode: StorageMode::Local,
+            local: Some(LocalStorageDefinition {
+                database_path: Some(String::from("state/runtime.sqlite3")),
+            }),
+            postgres: None,
+            raw_debug: RawDebugArtifactsDefinition::default(),
+        },
     }
 }
 
@@ -1703,22 +1706,15 @@ fn current_time_ms() -> Result<i64, UserFacingError> {
     Ok(duration.as_millis().min(i64::MAX as u128) as i64)
 }
 
-fn map_file_state_error(action: &str, error: FileStateError) -> UserFacingError {
-    UserFacingError::state(format!("Failed to {action}: {error}"))
-}
-
-fn map_coordination_error(action: &str, error: CoordinationError) -> UserFacingError {
+fn map_runtime_state_error(action: &str, error: RuntimeStateError) -> UserFacingError {
     UserFacingError::state(format!("Failed to {action}: {error}"))
 }
 
 fn map_trigger_error(error: TriggerPlaneError) -> UserFacingError {
     match error {
         TriggerPlaneError::Contract(source) => UserFacingError::from_contract(source),
-        TriggerPlaneError::FileState(source) => {
-            map_file_state_error("persist trigger-plane state", source)
-        }
-        TriggerPlaneError::Coordination(source) => {
-            map_coordination_error("evaluate trigger-plane coordination", source)
+        TriggerPlaneError::RuntimeState(source) => {
+            map_runtime_state_error("evaluate trigger-plane runtime state", source)
         }
     }
 }
@@ -1767,12 +1763,11 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), std
 }
 
 fn serve_once_with_lease(
-    runtime: &RuntimeContext,
+    runtime: &mut RuntimeContext,
     accepted_at_ms: i64,
     lease_supervisor: &mut ServeLeaseSupervisor,
 ) -> Result<CliOutput, UserFacingError> {
     lease_supervisor.maybe_renew(accepted_at_ms)?;
-    let state_layout = StateLayout::from_root_layout(&runtime.root_layout);
     let trigger_manifests = runtime
         .definitions
         .plugins
@@ -1790,13 +1785,15 @@ fn serve_once_with_lease(
         build_builtin_trigger_emissions(&runtime.definitions.triggers, accepted_at_ms)
             .map_err(UserFacingError::from_contract)?;
 
-    let mut trigger_plane = TriggerPlane::open(
-        state_layout,
+    let trigger_store = RuntimeStateStore::open(&runtime.storage_config, accepted_at_ms)
+        .map_err(|error| map_runtime_state_error("open trigger runtime state store", error))?;
+
+    let mut trigger_plane = TriggerPlane::open_with_store(
+        trigger_store,
         runtime.definitions.triggers.clone(),
         trigger_manifests,
         policy,
         builtin_events,
-        accepted_at_ms,
     )
     .map_err(map_trigger_error)?;
 
@@ -1867,7 +1864,7 @@ fn serve_once_with_lease(
 }
 
 fn execute_single_run(
-    runtime: &RuntimeContext,
+    runtime: &mut RuntimeContext,
     request: NormalizedRunRequest,
     started_at_ms: i64,
 ) -> Result<SingleRunResult, UserFacingError> {
@@ -1875,23 +1872,23 @@ fn execute_single_run(
     let workflow_id = request.workflow_id.clone();
 
     write_run_status(
-        &runtime.state_store,
+        &mut runtime.state_store,
         &run_id,
         &workflow_id,
         RunStatus::Running,
         started_at_ms,
         None,
     )
-    .map_err(|error| map_file_state_error("persist running run summary", error))?;
+    .map_err(|error| map_runtime_state_error("persist running run summary", error))?;
 
     write_log_entry(
-        &runtime.state_store,
+        &mut runtime.state_store,
         &run_id,
         "run_started",
         "run accepted for execution",
         started_at_ms,
     )
-    .map_err(|error| map_file_state_error("write run_started log", error))?;
+    .map_err(|error| map_runtime_state_error("write run_started log", error))?;
 
     let plane = build_execution_plane(runtime)?;
     let report = plane.execute(&request);
@@ -1906,7 +1903,7 @@ fn execute_single_run(
             };
 
             write_log_entry(
-                &runtime.state_store,
+                &mut runtime.state_store,
                 &run_id,
                 "run_finished",
                 &format!(
@@ -1916,17 +1913,17 @@ fn execute_single_run(
                 ),
                 finished_at_ms,
             )
-            .map_err(|error| map_file_state_error("write run_finished log", error))?;
+            .map_err(|error| map_runtime_state_error("write run_finished log", error))?;
 
             write_run_status(
-                &runtime.state_store,
+                &mut runtime.state_store,
                 &run_id,
                 &workflow_id,
                 status,
                 started_at_ms,
                 Some(finished_at_ms),
             )
-            .map_err(|error| map_file_state_error("persist finished run summary", error))?;
+            .map_err(|error| map_runtime_state_error("persist finished run summary", error))?;
 
             if status == RunStatus::Failed {
                 return Err(UserFacingError::unavailable(format!(
@@ -1949,16 +1946,16 @@ fn execute_single_run(
         Err(error) => {
             let detail = error.to_string();
             write_log_entry(
-                &runtime.state_store,
+                &mut runtime.state_store,
                 &run_id,
                 "run_failed",
                 &detail,
                 finished_at_ms,
             )
-            .map_err(|write_error| map_file_state_error("write run_failed log", write_error))?;
+            .map_err(|write_error| map_runtime_state_error("write run_failed log", write_error))?;
 
             write_run_status(
-                &runtime.state_store,
+                &mut runtime.state_store,
                 &run_id,
                 &workflow_id,
                 RunStatus::Failed,
@@ -1966,7 +1963,7 @@ fn execute_single_run(
                 Some(finished_at_ms),
             )
             .map_err(|write_error| {
-                map_file_state_error("persist failed run summary", write_error)
+                map_runtime_state_error("persist failed run summary", write_error)
             })?;
 
             Err(UserFacingError::unavailable(format!(
@@ -2045,13 +2042,13 @@ fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> Norma
 }
 
 fn write_run_status(
-    state_store: &FileBackedStateStore,
+    state_store: &mut RuntimeStateStore,
     run_id: &str,
     workflow_id: &str,
     status: RunStatus,
     started_at_ms: i64,
     finished_at_ms: Option<i64>,
-) -> Result<PathBuf, FileStateError> {
+) -> Result<(), RuntimeStateError> {
     state_store.write_run_summary(&RunRecordSummary {
         schema_version: "1.0.0".to_owned(),
         run_id: run_id.to_owned(),
@@ -2063,12 +2060,12 @@ fn write_run_status(
 }
 
 fn write_log_entry(
-    state_store: &FileBackedStateStore,
+    state_store: &mut RuntimeStateStore,
     run_id: &str,
     event: &str,
     message: &str,
     occurred_at_ms: i64,
-) -> Result<PathBuf, FileStateError> {
+) -> Result<u64, RuntimeStateError> {
     state_store.append_workflow_log_entry(run_id, event, message, occurred_at_ms)
 }
 
@@ -2117,7 +2114,7 @@ mod tests {
             std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
         }
 
-        let runtime = request
+        let mut runtime = request
             .load_runtime_context()
             .expect("initial runtime load should succeed");
 
@@ -2130,12 +2127,12 @@ mod tests {
         .expect("mutated trigger file should be writable");
 
         let mut lease_supervisor = ServeLeaseSupervisor::new(
-            StateLayout::from_root_layout(&runtime.root_layout),
+            runtime.storage_config.clone(),
             String::from("test-owner"),
             1_710_300_000_000,
         );
         let serve_output =
-            serve_once_with_lease(&runtime, 1_710_300_000_000, &mut lease_supervisor)
+            serve_once_with_lease(&mut runtime, 1_710_300_000_000, &mut lease_supervisor)
                 .expect("already loaded runtime should ignore on-disk config mutation");
         assert!(serve_output
             .stdout()
@@ -2183,16 +2180,16 @@ mod tests {
             std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
         }
 
-        let runtime = request
+        let mut runtime = request
             .load_runtime_context()
             .expect("runtime load should succeed with canonical builtin trigger");
         let mut lease_supervisor = ServeLeaseSupervisor::new(
-            StateLayout::from_root_layout(&runtime.root_layout),
+            runtime.storage_config.clone(),
             String::from("test-owner"),
             1_710_300_100_000,
         );
         let serve_output =
-            serve_once_with_lease(&runtime, 1_710_300_100_000, &mut lease_supervisor)
+            serve_once_with_lease(&mut runtime, 1_710_300_100_000, &mut lease_supervisor)
                 .expect("serve should execute every accepted request from the snapshot");
 
         assert!(serve_output
@@ -2220,18 +2217,24 @@ mod tests {
     #[test]
     fn serve_lease_supervisor_renews_same_owner_lease() {
         let root = prepare_fixture_root("success", "cli-serve-lease-renewal");
-        let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(root));
-        let mut coordination = CoordinationStore::open(&state_layout, 1_710_300_200_000)
-            .expect("coordination store should open");
+        let storage_config = RuntimeStorageConfig {
+            backend: crate::config::RuntimeStorageBackend::Local {
+                database_path: root.join("state").join("runtime.sqlite3"),
+            },
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        };
+        let mut state_store = RuntimeStateStore::open(&storage_config, 1_710_300_200_000)
+            .expect("runtime state store should open");
         assert!(matches!(
-            coordination
+            state_store
                 .try_acquire_serve_lease("owner-renew", 1_710_300_200_000, SERVE_LEASE_TTL_MS)
                 .expect("initial lease should acquire"),
             LeaseAcquireResult::Acquired
         ));
 
         let mut supervisor = ServeLeaseSupervisor::new(
-            state_layout.clone(),
+            storage_config,
             String::from("owner-renew"),
             1_710_300_200_000,
         );
@@ -2239,9 +2242,9 @@ mod tests {
             .maybe_renew(1_710_300_210_100)
             .expect("lease renewal should succeed for same owner");
 
-        let snapshot =
-            CoordinationStore::inspect_existing_serve_lease(&state_layout, 1_710_300_210_100)
-                .expect("lease snapshot should load after renewal");
+        let snapshot = state_store
+            .inspect_serve_lease(1_710_300_210_100)
+            .expect("lease snapshot should load after renewal");
         assert!(matches!(snapshot.state, ServeLeaseState::Active));
         assert_eq!(snapshot.owner_id.as_deref(), Some("owner-renew"));
         assert_eq!(snapshot.expires_at_ms, Some(1_710_300_240_100));

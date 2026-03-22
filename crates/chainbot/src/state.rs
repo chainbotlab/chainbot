@@ -10,7 +10,7 @@
 //! [INVARIANTS]
 //! Persisted run and trigger artifacts remain append-only, and state paths stay deterministic across restarts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File};
@@ -35,12 +35,14 @@ pub const TRIGGER_CHECKPOINTS_DIR_NAME: &str = "trigger-checkpoints";
 pub const CANONICAL_TRIGGERS_DIR_NAME: &str = "triggers";
 pub const CANONICAL_TRIGGER_RECORDS_DIR_NAME: &str = "records";
 pub const CANONICAL_TRIGGER_CHECKPOINT_FILE_NAME: &str = "checkpoint.json";
+pub const CANONICAL_TRIGGER_SNAPSHOT_FILE_NAME: &str = "snapshot.json";
 pub const SERVE_OWNER_ID_PREFIX: &str = "chainbot-serve-pid-";
 
 const RUN_SUMMARY_FILE_NAME: &str = "summary.json";
 const STAGED_FILE_SUFFIX: &str = ".next";
 const SERVE_LEASE_KEY: &str = "serve";
 const SQLITE_COORDINATION_SCHEMA_VERSION: i64 = 1;
+const WORKFLOW_LOG_SEQUENCE_CURSOR_FILE_NAME: &str = "workflow-log-sequence.cursor";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +107,31 @@ pub struct TriggerCheckpointRecord {
     pub acked_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerTokenSnapshot {
+    pub key: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerSnapshotRecord {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
+    pub trigger_id: String,
+    #[serde(default)]
+    pub last_event_id: Option<String>,
+    #[serde(default)]
+    pub last_accepted_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_sequence: u64,
+    #[serde(default)]
+    pub accepted_event_ids: BTreeSet<String>,
+    #[serde(default)]
+    pub dedup_tokens: Vec<TriggerTokenSnapshot>,
+    #[serde(default)]
+    pub cooldown_tokens: Vec<TriggerTokenSnapshot>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateLayout {
     pub state_root: PathBuf,
@@ -164,6 +191,7 @@ pub struct RuntimeStateRecoveryReport {
     pub run_summaries: RunSummaryRecoveryReport,
     pub workflow_logs: FileArtifactRecoveryReport,
     pub trigger_records: FileArtifactRecoveryReport,
+    pub trigger_snapshots: FileArtifactRecoveryReport,
     pub failed_incomplete_runs: usize,
 }
 
@@ -254,6 +282,42 @@ impl RunRecordSummary {
     }
 }
 
+impl TriggerSnapshotRecord {
+    pub fn new(trigger_id: impl Into<String>) -> Self {
+        Self {
+            schema_version: default_schema_version(),
+            trigger_id: trigger_id.into(),
+            last_event_id: None,
+            last_accepted_at_ms: None,
+            last_sequence: 0,
+            accepted_event_ids: BTreeSet::new(),
+            dedup_tokens: Vec::new(),
+            cooldown_tokens: Vec::new(),
+        }
+    }
+
+    pub fn apply_record(&mut self, record: &TriggerEventRecord) {
+        self.last_event_id = Some(record.event_id.clone());
+        self.last_accepted_at_ms = Some(record.accepted_at_ms);
+        self.last_sequence = self.last_sequence.max(record.sequence);
+        self.accepted_event_ids.insert(record.event_id.clone());
+        retain_unexpired_tokens(&mut self.dedup_tokens, record.accepted_at_ms);
+        retain_unexpired_tokens(&mut self.cooldown_tokens, record.accepted_at_ms);
+        upsert_token_snapshot(
+            &mut self.dedup_tokens,
+            record.dedup_key.as_deref(),
+            record.dedup_expires_at_ms,
+            record.accepted_at_ms,
+        );
+        upsert_token_snapshot(
+            &mut self.cooldown_tokens,
+            record.cooldown_key.as_deref(),
+            record.cooldown_expires_at_ms,
+            record.accepted_at_ms,
+        );
+    }
+}
+
 fn default_schema_version() -> String {
     String::from("1.0.0")
 }
@@ -336,6 +400,21 @@ impl StateLayout {
     pub fn staged_trigger_checkpoint_path(&self, trigger_id: &str) -> PathBuf {
         staged_path(&self.trigger_checkpoint_path(trigger_id))
     }
+
+    pub fn trigger_snapshot_path(&self, trigger_id: &str) -> PathBuf {
+        self.trigger_state_dir
+            .join(sanitize_path_component(trigger_id))
+            .join(CANONICAL_TRIGGER_SNAPSHOT_FILE_NAME)
+    }
+
+    pub fn staged_trigger_snapshot_path(&self, trigger_id: &str) -> PathBuf {
+        staged_path(&self.trigger_snapshot_path(trigger_id))
+    }
+
+    pub fn workflow_log_sequence_cursor_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id)
+            .join(WORKFLOW_LOG_SEQUENCE_CURSOR_FILE_NAME)
+    }
 }
 
 impl CoordinationTokenKind {
@@ -369,12 +448,14 @@ impl FileBackedStateStore {
         let run_summaries = self.recover_run_summaries()?;
         let workflow_logs = self.recover_workflow_logs()?;
         let trigger_records = self.recover_trigger_records()?;
+        let trigger_snapshots = self.recover_trigger_snapshots()?;
         let failed_incomplete_runs = self.fail_incomplete_runs(recovered_at_ms)?;
 
         Ok(RuntimeStateRecoveryReport {
             run_summaries,
             workflow_logs,
             trigger_records,
+            trigger_snapshots,
             failed_incomplete_runs,
         })
     }
@@ -399,11 +480,28 @@ impl FileBackedStateStore {
     }
 
     pub fn list_committed_run_summaries(&self) -> Result<Vec<RunRecordSummary>, FileStateError> {
+        self.layout.ensure_state_tree()?;
         let mut summary_paths = Vec::new();
-        collect_existing_json_files(&self.layout.runs_dir, &mut summary_paths)?;
-        summary_paths.retain(|path| {
-            path.file_name().and_then(|value| value.to_str()) == Some(RUN_SUMMARY_FILE_NAME)
-        });
+        let entries = fs::read_dir(&self.layout.runs_dir).map_err(|source| FileStateError::Io {
+            path: self.layout.runs_dir.clone(),
+            operation: "read runs directory",
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| FileStateError::Io {
+                path: self.layout.runs_dir.clone(),
+                operation: "read runs directory entry",
+                source,
+            })?;
+            let run_dir = entry.path();
+            if !run_dir.is_dir() {
+                continue;
+            }
+            let summary_path = run_dir.join(RUN_SUMMARY_FILE_NAME);
+            if summary_path.exists() {
+                summary_paths.push(summary_path);
+            }
+        }
         summary_paths.sort();
 
         let mut summaries = Vec::with_capacity(summary_paths.len());
@@ -448,14 +546,28 @@ impl FileBackedStateStore {
     ) -> Result<PathBuf, FileStateError> {
         self.layout.ensure_state_tree()?;
 
-        let next_sequence = self.next_workflow_log_sequence(run_id)?;
-        self.write_workflow_log_entry(&WorkflowRuntimeLogEntry {
-            run_id: run_id.to_owned(),
-            sequence: next_sequence,
-            event: event.to_owned(),
-            message: message.to_owned(),
-            occurred_at_ms,
-        })
+        let mut next_sequence = self.next_workflow_log_sequence(run_id)?;
+        loop {
+            match self.write_workflow_log_entry(&WorkflowRuntimeLogEntry {
+                run_id: run_id.to_owned(),
+                sequence: next_sequence,
+                event: event.to_owned(),
+                message: message.to_owned(),
+                occurred_at_ms,
+            }) {
+                Ok(path) => {
+                    let _ = self.write_workflow_log_sequence_cursor(
+                        run_id,
+                        next_sequence.saturating_add(1),
+                    );
+                    return Ok(path);
+                }
+                Err(FileStateError::ImmutableFileExists { .. }) => {
+                    next_sequence = next_sequence.saturating_add(1);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub fn write_trigger_record(
@@ -487,6 +599,17 @@ impl FileBackedStateStore {
         Ok(path)
     }
 
+    pub fn write_trigger_snapshot(
+        &self,
+        entry: &TriggerSnapshotRecord,
+    ) -> Result<PathBuf, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let path = self.layout.trigger_snapshot_path(&entry.trigger_id);
+        let staged = self.layout.staged_trigger_snapshot_path(&entry.trigger_id);
+        atomic_write_json_file(&path, &staged, entry, "write trigger snapshot")?;
+        Ok(path)
+    }
+
     pub fn read_trigger_checkpoint(
         &self,
         trigger_id: &str,
@@ -498,6 +621,84 @@ impl FileBackedStateStore {
         }
 
         Ok(None)
+    }
+
+    pub fn read_trigger_snapshot(
+        &self,
+        trigger_id: &str,
+    ) -> Result<Option<TriggerSnapshotRecord>, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let path = self.layout.trigger_snapshot_path(trigger_id);
+        if path.exists() {
+            return load_json_file(&path).map(Some);
+        }
+
+        Ok(None)
+    }
+
+    pub fn load_committed_trigger_snapshots(
+        &self,
+    ) -> Result<Vec<TriggerSnapshotRecord>, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let mut snapshots = Vec::<TriggerSnapshotRecord>::new();
+        for directory in self.trigger_state_dirs()? {
+            let path = directory.join(CANONICAL_TRIGGER_SNAPSHOT_FILE_NAME);
+            if path.exists() {
+                snapshots.push(load_json_file(&path)?);
+            }
+        }
+        snapshots.sort_by(|left, right| left.trigger_id.cmp(&right.trigger_id));
+        Ok(snapshots)
+    }
+
+    pub fn load_trigger_records_after_sequence(
+        &self,
+        trigger_id: &str,
+        sequence_exclusive: u64,
+    ) -> Result<Vec<TriggerEventRecord>, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let directory = self
+            .layout
+            .trigger_state_dir
+            .join(sanitize_path_component(trigger_id))
+            .join(CANONICAL_TRIGGER_RECORDS_DIR_NAME);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(FileStateError::Io {
+                    path: directory,
+                    operation: "read trigger record directory",
+                    source,
+                });
+            }
+        };
+
+        let mut record_paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| FileStateError::Io {
+                path: directory.clone(),
+                operation: "read trigger record directory entry",
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(sequence) = parse_numeric_file_stem_prefix(&path) else {
+                continue;
+            };
+            if sequence > sequence_exclusive {
+                record_paths.push(path);
+            }
+        }
+        record_paths.sort();
+
+        let mut records = Vec::with_capacity(record_paths.len());
+        for path in record_paths {
+            records.push(load_trigger_record_file(&path)?);
+        }
+        Ok(records)
     }
 
     pub fn recover_workflow_logs(&self) -> Result<FileArtifactRecoveryReport, FileStateError> {
@@ -520,6 +721,40 @@ impl FileBackedStateStore {
                 recover_append_only_entries_if_exists(&directory, load_trigger_record_file)?;
             report.promoted_staged_files += recovered.promoted_staged_files;
             report.removed_staged_files += recovered.removed_staged_files;
+        }
+        Ok(report)
+    }
+
+    pub fn recover_trigger_snapshots(&self) -> Result<FileArtifactRecoveryReport, FileStateError> {
+        self.layout.ensure_state_tree()?;
+        let mut report = FileArtifactRecoveryReport::default();
+        for trigger_dir in self.trigger_state_dirs()? {
+            let snapshot_path = trigger_dir.join(CANONICAL_TRIGGER_SNAPSHOT_FILE_NAME);
+            let staged_snapshot_path = staged_path(&snapshot_path);
+            if !staged_snapshot_path.exists() {
+                continue;
+            }
+            if snapshot_path.exists() {
+                fs::remove_file(&staged_snapshot_path).map_err(|source| FileStateError::Io {
+                    path: staged_snapshot_path.clone(),
+                    operation: "remove staged trigger snapshot",
+                    source,
+                })?;
+                report.removed_staged_files += 1;
+                continue;
+            }
+            let _ = load_trigger_snapshot_file(&staged_snapshot_path)?;
+            fs::rename(&staged_snapshot_path, &snapshot_path).map_err(|source| {
+                FileStateError::Io {
+                    path: staged_snapshot_path.clone(),
+                    operation: "promote staged trigger snapshot",
+                    source,
+                }
+            })?;
+            if let Some(parent) = snapshot_path.parent() {
+                sync_directory(parent)?;
+            }
+            report.promoted_staged_files += 1;
         }
         Ok(report)
     }
@@ -634,7 +869,7 @@ impl FileBackedStateStore {
     }
 
     fn fail_incomplete_runs(&self, recovered_at_ms: i64) -> Result<usize, FileStateError> {
-        let summaries = self.list_run_summaries()?;
+        let summaries = self.list_committed_run_summaries()?;
         let mut recovered_runs = 0;
 
         for summary in summaries {
@@ -663,7 +898,10 @@ impl FileBackedStateStore {
     }
 
     fn next_workflow_log_sequence(&self, run_id: &str) -> Result<u64, FileStateError> {
-        let mut max_sequence = 0_u64;
+        if let Some(sequence) = self.read_workflow_log_sequence_cursor(run_id)? {
+            return Ok(sequence);
+        }
+
         let canonical_dir = self
             .layout
             .workflow_log_entry_path(run_id, 1)
@@ -672,37 +910,66 @@ impl FileBackedStateStore {
             .unwrap_or_else(|| self.layout.run_dir(run_id).join(WORKFLOW_LOGS_DIR_NAME));
 
         create_dir_all_file_state(&canonical_dir)?;
-
-        for directory in [canonical_dir] {
-            let entries = match fs::read_dir(&directory) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => {
-                    return Err(FileStateError::Io {
-                        path: directory,
-                        operation: "read workflow log directory",
-                        source,
-                    });
-                }
-            };
-
-            for entry in entries {
-                let entry = entry.map_err(|source| FileStateError::Io {
-                    path: directory.clone(),
-                    operation: "read workflow log directory entry",
+        let entries = match fs::read_dir(&canonical_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+            Err(source) => {
+                return Err(FileStateError::Io {
+                    path: canonical_dir,
+                    operation: "read workflow log directory",
                     source,
-                })?;
-                let path = entry.path();
-                if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                    continue;
-                }
+                });
+            }
+        };
 
-                let log_entry = load_workflow_log_entry_file(&path)?;
-                max_sequence = max_sequence.max(log_entry.sequence);
+        let mut max_sequence = 0_u64;
+        for entry in entries {
+            let entry = entry.map_err(|source| FileStateError::Io {
+                path: canonical_dir.clone(),
+                operation: "read workflow log directory entry",
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(sequence) = parse_numeric_file_stem_prefix(&path) {
+                max_sequence = max_sequence.max(sequence);
             }
         }
 
         Ok(max_sequence.saturating_add(1))
+    }
+
+    fn read_workflow_log_sequence_cursor(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<u64>, FileStateError> {
+        let cursor_path = self.layout.workflow_log_sequence_cursor_path(run_id);
+        match fs::read_to_string(&cursor_path) {
+            Ok(value) => Ok(value.trim().parse::<u64>().ok()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(FileStateError::Io {
+                path: cursor_path,
+                operation: "read workflow log sequence cursor",
+                source,
+            }),
+        }
+    }
+
+    fn write_workflow_log_sequence_cursor(
+        &self,
+        run_id: &str,
+        next_sequence: u64,
+    ) -> Result<(), FileStateError> {
+        let cursor_path = self.layout.workflow_log_sequence_cursor_path(run_id);
+        let staged = staged_path(&cursor_path);
+        atomic_write_text_file(
+            &cursor_path,
+            &staged,
+            &next_sequence.to_string(),
+            "write workflow log sequence cursor",
+        )
     }
 
     fn workflow_log_roots(&self) -> Result<Vec<PathBuf>, FileStateError> {
@@ -773,6 +1040,38 @@ impl FileBackedStateStore {
         roots.sort();
         roots.dedup();
         Ok(roots)
+    }
+
+    fn trigger_state_dirs(&self) -> Result<Vec<PathBuf>, FileStateError> {
+        let mut directories = Vec::new();
+
+        let trigger_dirs = match fs::read_dir(&self.layout.trigger_state_dir) {
+            Ok(trigger_dirs) => trigger_dirs,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(directories),
+            Err(source) => {
+                return Err(FileStateError::Io {
+                    path: self.layout.trigger_state_dir.clone(),
+                    operation: "read trigger state directory",
+                    source,
+                });
+            }
+        };
+
+        for entry in trigger_dirs {
+            let entry = entry.map_err(|source| FileStateError::Io {
+                path: self.layout.trigger_state_dir.clone(),
+                operation: "read trigger state directory entry",
+                source,
+            })?;
+            let trigger_dir = entry.path();
+            if trigger_dir.is_dir() {
+                directories.push(trigger_dir);
+            }
+        }
+
+        directories.sort();
+        directories.dedup();
+        Ok(directories)
     }
 
     fn collect_legacy_workflow_log_paths(&self) -> Result<Vec<PathBuf>, FileStateError> {
@@ -1119,6 +1418,60 @@ impl CoordinationStore {
             })
     }
 
+    pub fn rebuild_trigger_snapshot_coordination(
+        &mut self,
+        snapshots: &[TriggerSnapshotRecord],
+        now_ms: i64,
+    ) -> Result<(), CoordinationError> {
+        let transaction =
+            self.connection
+                .transaction()
+                .map_err(|source| CoordinationError::Sqlite {
+                    path: self.db_path.clone(),
+                    operation: "start trigger snapshot coordination rebuild transaction",
+                    source,
+                })?;
+
+        transaction
+            .execute("DELETE FROM coordination_tokens", [])
+            .map_err(|source| CoordinationError::Sqlite {
+                path: self.db_path.clone(),
+                operation: "clear coordination tokens before snapshot rebuild",
+                source,
+            })?;
+
+        for snapshot in snapshots {
+            for token in &snapshot.dedup_tokens {
+                upsert_coordination_token_if_unexpired(
+                    &transaction,
+                    &self.db_path,
+                    CoordinationTokenKind::Dedup,
+                    Some(token.key.as_str()),
+                    Some(token.expires_at_ms),
+                    now_ms,
+                )?;
+            }
+            for token in &snapshot.cooldown_tokens {
+                upsert_coordination_token_if_unexpired(
+                    &transaction,
+                    &self.db_path,
+                    CoordinationTokenKind::Cooldown,
+                    Some(token.key.as_str()),
+                    Some(token.expires_at_ms),
+                    now_ms,
+                )?;
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|source| CoordinationError::Sqlite {
+                path: self.db_path.clone(),
+                operation: "commit trigger snapshot coordination rebuild transaction",
+                source,
+            })
+    }
+
     pub fn apply_trigger_record_coordination(
         &mut self,
         record: &TriggerEventRecord,
@@ -1345,6 +1698,10 @@ fn load_trigger_record_file(path: &Path) -> Result<TriggerEventRecord, FileState
     load_json_file(path)
 }
 
+fn load_trigger_snapshot_file(path: &Path) -> Result<TriggerSnapshotRecord, FileStateError> {
+    load_json_file(path)
+}
+
 fn load_json_file<T>(path: &Path) -> Result<T, FileStateError>
 where
     T: DeserializeOwned,
@@ -1375,6 +1732,44 @@ fn create_dir_all_coordination(path: &Path) -> Result<(), CoordinationError> {
         operation: "create directory",
         source,
     })
+}
+
+fn atomic_write_text_file(
+    path: &Path,
+    staged_path: &Path,
+    value: &str,
+    _operation: &'static str,
+) -> Result<(), FileStateError> {
+    if let Some(parent) = path.parent() {
+        create_dir_all_file_state(parent)?;
+    }
+
+    let mut file = File::create(staged_path).map_err(|source| FileStateError::Io {
+        path: staged_path.to_path_buf(),
+        operation: "create staged file",
+        source,
+    })?;
+    file.write_all(value.as_bytes())
+        .map_err(|source| FileStateError::Io {
+            path: staged_path.to_path_buf(),
+            operation: "write staged file",
+            source,
+        })?;
+    file.sync_all().map_err(|source| FileStateError::Io {
+        path: staged_path.to_path_buf(),
+        operation: "sync staged file",
+        source,
+    })?;
+
+    fs::rename(staged_path, path).map_err(|source| FileStateError::Io {
+        path: staged_path.to_path_buf(),
+        operation: "promote staged file",
+        source,
+    })?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn write_lease_row(
@@ -1713,6 +2108,15 @@ fn staged_path(path: &Path) -> PathBuf {
     }
 }
 
+fn parse_numeric_file_stem_prefix(path: &Path) -> Option<u64> {
+    let file_name = path.file_name()?.to_str()?;
+    let prefix = file_name.split_once('.')?.0.split_once('-').map_or_else(
+        || file_name.split_once('.').map(|(value, _)| value),
+        |(value, _)| Some(value),
+    )?;
+    prefix.parse::<u64>().ok()
+}
+
 fn committed_path_from_staged(path: &Path) -> PathBuf {
     let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
         return path.to_path_buf();
@@ -1841,6 +2245,34 @@ fn inspect_serve_lease_snapshot(
 
 fn accepted_trigger_key(trigger_id: &str, event_id: &str) -> String {
     format!("{trigger_id}:::{event_id}")
+}
+
+fn retain_unexpired_tokens(tokens: &mut Vec<TriggerTokenSnapshot>, now_ms: i64) {
+    tokens.retain(|token| token.expires_at_ms > now_ms);
+}
+
+fn upsert_token_snapshot(
+    tokens: &mut Vec<TriggerTokenSnapshot>,
+    key: Option<&str>,
+    expires_at_ms: Option<i64>,
+    now_ms: i64,
+) {
+    let (Some(key), Some(expires_at_ms)) = (key, expires_at_ms) else {
+        return;
+    };
+    if expires_at_ms <= now_ms {
+        return;
+    }
+
+    if let Some(existing) = tokens.iter_mut().find(|token| token.key == key) {
+        existing.expires_at_ms = existing.expires_at_ms.max(expires_at_ms);
+        return;
+    }
+
+    tokens.push(TriggerTokenSnapshot {
+        key: key.to_owned(),
+        expires_at_ms,
+    });
 }
 
 fn serve_lease_owner_is_active(owner_id: &str) -> bool {

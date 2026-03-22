@@ -16,7 +16,7 @@ use chainbot::builtins::triggers::build_builtin_trigger_emissions;
 use chainbot::config::RootLayout;
 use chainbot::errors::ContractError;
 use chainbot::plugin::PluginManifest;
-use chainbot::state::{StateLayout, TriggerEventRecord};
+use chainbot::state::StateLayout;
 use chainbot::trigger::{
     TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlane, TriggerPlaneError,
     TriggerPluginHostPolicy, TriggerStartCommand, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
@@ -50,7 +50,7 @@ fn trigger_plugin_manifest_validation() {
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     );
 
-    let open_result = TriggerPlane::open(
+    let open_result = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         vec![valid_manifest.clone()],
@@ -60,7 +60,7 @@ fn trigger_plugin_manifest_validation() {
     );
     open_result.expect("valid trigger plugin manifest should pass host validation");
 
-    let alias_kind_open_result = TriggerPlane::open(
+    let alias_kind_open_result = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         vec![trigger_definition(
             "trigger-external-alias",
@@ -84,7 +84,7 @@ fn trigger_plugin_manifest_validation() {
             if trigger_id == "trigger-external-alias" && kind == "plugin"
     ));
 
-    let duplicate_trigger_error = TriggerPlane::open(
+    let duplicate_trigger_error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         vec![
             trigger_definition("dup-trigger", "builtin", "market_tick"),
@@ -102,7 +102,7 @@ fn trigger_plugin_manifest_validation() {
             if trigger_id == "dup-trigger"
     ));
 
-    let empty_source_error = TriggerPlane::open(
+    let empty_source_error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         vec![trigger_definition("bad-source", "builtin", "")],
         Vec::new(),
@@ -120,7 +120,7 @@ fn trigger_plugin_manifest_validation() {
         }) if trigger_id == "bad-source"
     ));
 
-    let unknown_kind_error = TriggerPlane::open(
+    let unknown_kind_error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         vec![trigger_definition(
             "bad-kind",
@@ -146,7 +146,7 @@ fn trigger_plugin_manifest_validation() {
         "valid-trigger.sh",
         &["trigger.observe"],
     );
-    let missing_capability_error = TriggerPlane::open(
+    let missing_capability_error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         vec![missing_capability_manifest],
@@ -174,7 +174,7 @@ fn trigger_plugin_manifest_validation() {
         "../escape.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     );
-    let escaping_error = TriggerPlane::open(
+    let escaping_error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         vec![escaping_manifest],
@@ -203,7 +203,7 @@ fn trigger_plugin_manifest_validation() {
         "valid-trigger.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     );
-    let unsupported_api_error = TriggerPlane::open(
+    let unsupported_api_error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         vec![unsupported_api_manifest],
@@ -237,7 +237,7 @@ fn trigger_dedup_and_cooldown() {
     let manifests = Vec::<PluginManifest>::new();
     let host_policy = policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]);
 
-    let mut plane_first = TriggerPlane::open(
+    let mut plane_first = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         manifests.clone(),
@@ -259,7 +259,7 @@ fn trigger_dedup_and_cooldown() {
     assert_eq!(first_requests.len(), 1);
     assert_eq!(first_requests[0].event_id, "event-a");
 
-    let mut plane_second = TriggerPlane::open(
+    let mut plane_second = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         manifests.clone(),
@@ -283,7 +283,7 @@ fn trigger_dedup_and_cooldown() {
         .expect("second dedup pass should succeed");
     assert!(second_requests.is_empty());
 
-    let mut plane_third = TriggerPlane::open(
+    let mut plane_third = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         manifests.clone(),
@@ -307,7 +307,7 @@ fn trigger_dedup_and_cooldown() {
         .expect("cooldown pass should succeed");
     assert!(third_requests.is_empty());
 
-    let mut plane_fourth = TriggerPlane::open(
+    let mut plane_fourth = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         manifests,
@@ -334,6 +334,68 @@ fn trigger_dedup_and_cooldown() {
 }
 
 #[test]
+fn trigger_sequence_continues_from_snapshot_after_restart() {
+    let (state_layout, plugin_root) = unique_layout("trigger-sequence-continues-from-snapshot");
+    let definitions = vec![trigger_definition(
+        "builtin-market",
+        "builtin",
+        "market_tick",
+    )];
+    let manifests = Vec::<PluginManifest>::new();
+    let host_policy = policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]);
+
+    let mut first_plane = TriggerPlane::open_legacy_state_layout_for_tests(
+        state_layout.clone(),
+        definitions.clone(),
+        manifests.clone(),
+        host_policy.clone(),
+        BTreeMap::from([(
+            "builtin-market".to_string(),
+            vec![builtin_event(
+                "event-a",
+                "wf-a",
+                "dedup-a",
+                1_000,
+                "cooldown-a",
+                5_000,
+            )],
+        )]),
+        1_710_100_020_000,
+    )
+    .expect("first trigger plane should open");
+    let first_requests = first_plane
+        .collect_run_requests(1_710_100_020_000)
+        .expect("first trigger pass should succeed");
+    assert_eq!(first_requests.len(), 1);
+    assert!(first_requests[0].run_id.ends_with("00000000000000000001"));
+
+    let mut second_plane = TriggerPlane::open_legacy_state_layout_for_tests(
+        state_layout,
+        definitions,
+        manifests,
+        host_policy,
+        BTreeMap::from([(
+            "builtin-market".to_string(),
+            vec![builtin_event(
+                "event-b",
+                "wf-a",
+                "dedup-b",
+                1_000,
+                "cooldown-b",
+                5_000,
+            )],
+        )]),
+        1_710_100_021_000,
+    )
+    .expect("second trigger plane should open from persisted snapshot");
+    let second_requests = second_plane
+        .collect_run_requests(1_710_100_021_000)
+        .expect("second trigger pass should succeed");
+    assert_eq!(second_requests.len(), 1);
+    assert!(second_requests[0].run_id.ends_with("00000000000000000002"));
+}
+
+#[test]
 fn builtin_and_external_trigger_emit_run_requests() {
     let (state_layout, plugin_root) = unique_layout("builtin-and-external-emit-run-requests");
     let external_plugin_path = plugin_root.join("plugin-external.sh");
@@ -353,7 +415,7 @@ fn builtin_and_external_trigger_emit_run_requests() {
         "plugin-external.sh",
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         manifests,
@@ -401,14 +463,14 @@ fn builtin_and_external_trigger_emit_run_requests() {
 }
 
 #[test]
-fn trigger_records_are_file_backed() {
+fn trigger_records_are_db_backed() {
     let (state_layout, plugin_root) = unique_layout("trigger-records-are-file-backed");
     let definitions = vec![trigger_definition(
         "builtin-record",
         "builtin",
         "market_tick",
     )];
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions,
         Vec::new(),
@@ -429,7 +491,7 @@ fn trigger_records_are_file_backed() {
         )]),
         1_710_100_030_010,
     )
-    .expect("trigger plane should open for file-backed record validation");
+    .expect("trigger plane should open for DB-backed record validation");
 
     let requests = plane
         .collect_run_requests(1_710_100_030_020)
@@ -437,31 +499,28 @@ fn trigger_records_are_file_backed() {
     assert_eq!(requests.len(), 1);
 
     let request = &requests[0];
-    assert!(request.trigger_record_path.exists());
-    assert!(request
-        .trigger_record_path
-        .starts_with(&state_layout.trigger_state_dir));
     assert_eq!(
-        request.trigger_record_path,
-        state_layout.trigger_record_path(&request.run_id, 1, "builtin-record", "btc/usdt@1m")
+        request.trigger_record_ref,
+        "db://trigger_event_records/builtin-record/1"
     );
-
-    let record: TriggerEventRecord = serde_json::from_str(
-        &fs::read_to_string(&request.trigger_record_path)
-            .expect("persisted trigger record should be readable"),
-    )
-    .expect("persisted trigger record should decode");
-    assert_eq!(record.trigger_id, "builtin-record");
-    assert_eq!(record.event_id, "btc/usdt@1m");
-    assert_eq!(record.source, "builtin-feed");
-
-    let file_name = request
-        .trigger_record_path
-        .file_name()
-        .expect("trigger record path should have file name")
-        .to_string_lossy()
-        .to_string();
-    assert!(file_name.contains("btc_usdt_1m"));
+    let sqlite = Connection::open(&state_layout.coordination_db_path)
+        .expect("runtime sqlite database should be readable");
+    let record = sqlite
+        .query_row(
+            "SELECT trigger_id, event_id, source FROM trigger_event_records WHERE trigger_id = ?1 AND sequence = ?2",
+            rusqlite::params!["builtin-record", 1_i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .expect("persisted trigger record row should load");
+    assert_eq!(record.0, "builtin-record");
+    assert_eq!(record.1, "btc/usdt@1m");
+    assert_eq!(record.2, "builtin-feed");
 }
 
 #[test]
@@ -472,7 +531,7 @@ fn builtin_trigger_kind_aliases_are_accepted() {
         trigger_definition("market-trigger", "builtin", "market_tick"),
     ];
 
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         Vec::new(),
@@ -534,7 +593,7 @@ fn builtin_trigger_fanout_emits_multiple_run_requests_end_to_end() {
     let builtin_events = build_builtin_trigger_emissions(&definitions, 1_710_100_041_000)
         .expect("builtin trigger emission generation should succeed");
 
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         Vec::new(),
@@ -593,7 +652,7 @@ fn builtin_cron_trigger_uses_params_and_restarts_without_duplicate_events() {
     let accepted_at_ms = 1_736_172_900_123;
     let builtin_events = build_builtin_trigger_emissions(&[definition.clone()], accepted_at_ms)
         .expect("cron builtin events should build from params");
-    let mut first_plane = TriggerPlane::open(
+    let mut first_plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         vec![definition.clone()],
         Vec::new(),
@@ -624,7 +683,7 @@ fn builtin_cron_trigger_uses_params_and_restarts_without_duplicate_events() {
 
     let repeat_events = build_builtin_trigger_emissions(&[definition.clone()], accepted_at_ms)
         .expect("same-slot cron builtin events should still build");
-    let mut reopened_plane = TriggerPlane::open(
+    let mut reopened_plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         vec![definition],
         Vec::new(),
@@ -645,7 +704,7 @@ fn builtin_cron_trigger_requires_schedule_param() {
     let (state_layout, plugin_root) = unique_layout("builtin-cron-trigger-validation");
     let definition = trigger_definition("cron-trigger-invalid", "builtin", "cron");
 
-    let error = TriggerPlane::open(
+    let error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         vec![definition],
         Vec::new(),
@@ -666,7 +725,7 @@ fn builtin_cron_trigger_requires_schedule_param() {
 }
 
 #[test]
-fn trigger_coordination_rebuilds_from_file_records_after_restart() {
+fn trigger_dedup_and_cooldown_persist_from_db_records_after_restart() {
     let (state_layout, plugin_root) = unique_layout("trigger-coordination-rebuild-after-restart");
     let definitions = vec![trigger_definition(
         "builtin-market",
@@ -675,7 +734,7 @@ fn trigger_coordination_rebuilds_from_file_records_after_restart() {
     )];
     let policy = policy(&plugin_root, &[], &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY]);
 
-    let mut first_plane = TriggerPlane::open(
+    let mut first_plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout.clone(),
         definitions.clone(),
         Vec::new(),
@@ -697,16 +756,10 @@ fn trigger_coordination_rebuilds_from_file_records_after_restart() {
 
     let first_requests = first_plane
         .collect_run_requests(1_710_100_050_000)
-        .expect("first trigger request should persist a coordination-backed record");
+        .expect("first trigger request should persist a DB-backed record");
     assert_eq!(first_requests.len(), 1);
 
-    let sqlite = Connection::open(&state_layout.coordination_db_path)
-        .expect("coordination database should be readable");
-    sqlite
-        .execute("DELETE FROM coordination_tokens", [])
-        .expect("test should simulate lost sqlite coordination state");
-
-    let mut reopened_plane = TriggerPlane::open(
+    let mut reopened_plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         Vec::new(),
@@ -724,11 +777,11 @@ fn trigger_coordination_rebuilds_from_file_records_after_restart() {
         )]),
         1_710_100_050_200,
     )
-    .expect("reopened trigger plane should rebuild coordination from trigger records");
+    .expect("reopened trigger plane should keep dedup/cooldown suppression from DB records");
 
     let reopened_requests = reopened_plane
         .collect_run_requests(1_710_100_050_200)
-        .expect("rebuilt coordination should still suppress dedup/cooldown collisions");
+        .expect("DB-backed dedup/cooldown should still suppress collisions");
     assert!(reopened_requests.is_empty());
 }
 
@@ -753,7 +806,7 @@ fn trigger_plugin_host_uses_default_deny_environment() {
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
 
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         manifests,
@@ -797,7 +850,7 @@ fn external_trigger_plugin_receives_params_via_stdin_protocol() {
         &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
     )];
 
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         vec![definition],
         manifests,
@@ -858,7 +911,7 @@ fn external_trigger_plugin_rejects_event_before_ready() {
         "plugin-bad-order",
     )];
 
-    let mut plane = TriggerPlane::open(
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         manifests,
