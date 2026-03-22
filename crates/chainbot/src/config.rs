@@ -28,6 +28,57 @@ pub const CHAINBOT_CONFIG_DIR_ENV: &str = "CHAINBOT_CONFIG_DIR";
 pub const ROOT_CONFIG_FILE_NAME: &str = "chainbot.toml";
 pub const PACKAGE_CONFIG_FILE_NAME: &str = "config.toml";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMode {
+    Local,
+    Postgres,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageDefinition {
+    pub mode: StorageMode,
+    #[serde(default)]
+    pub local: Option<LocalStorageDefinition>,
+    #[serde(default)]
+    pub postgres: Option<PostgresStorageDefinition>,
+    #[serde(default)]
+    pub raw_debug: RawDebugArtifactsDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalStorageDefinition {
+    #[serde(default)]
+    pub database_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostgresStorageDefinition {
+    #[serde(default)]
+    pub database_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RawDebugArtifactsDefinition {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub artifacts_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeStorageBackend {
+    Local { database_path: PathBuf },
+    Postgres { database_url: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStorageConfig {
+    pub backend: RuntimeStorageBackend,
+    pub raw_debug_enabled: bool,
+    pub raw_debug_artifacts_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigRoot {
     pub schema_version: String,
@@ -58,6 +109,7 @@ pub struct RootConfigDefinition {
     pub runtime_defaults: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub paths: RootPathOverrides,
+    pub storage: StorageDefinition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -148,6 +200,122 @@ impl RootConfigDefinition {
 
         for secret_ref in &self.secret_refs {
             let _ = SecretReference::parse(secret_ref)?;
+        }
+
+        self.storage.validate()?;
+
+        Ok(())
+    }
+
+    pub fn resolve_runtime_storage(
+        &self,
+        root: &Path,
+    ) -> Result<RuntimeStorageConfig, ContractError> {
+        let backend = match self.storage.mode {
+            StorageMode::Local => {
+                let local = self.storage.local.as_ref().ok_or_else(|| {
+                    ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.local.database_path",
+                        detail:
+                            "storage.local.database_path is required when storage.mode is local"
+                                .to_owned(),
+                    }
+                })?;
+                let database_path = local.database_path.as_deref().ok_or_else(|| {
+                    ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.local.database_path",
+                        detail:
+                            "storage.local.database_path is required when storage.mode is local"
+                                .to_owned(),
+                    }
+                })?;
+                RuntimeStorageBackend::Local {
+                    database_path: resolve_root_relative_dir(
+                        root,
+                        "root_config.storage.local.database_path",
+                        database_path,
+                    )?,
+                }
+            }
+            StorageMode::Postgres => {
+                let postgres = self.storage.postgres.as_ref().ok_or_else(|| {
+                    ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.postgres.database_url",
+                        detail: "storage.postgres.database_url is required when storage.mode is postgres"
+                            .to_owned(),
+                    }
+                })?;
+                let database_url = postgres.database_url.as_ref().ok_or_else(|| {
+                    ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.postgres.database_url",
+                        detail: "storage.postgres.database_url is required when storage.mode is postgres"
+                            .to_owned(),
+                    }
+                })?;
+                RuntimeStorageBackend::Postgres {
+                    database_url: database_url.trim().to_owned(),
+                }
+            }
+        };
+
+        let raw_debug_artifacts_dir = match self.storage.raw_debug.artifacts_dir.as_deref() {
+            Some(value) => Some(resolve_root_relative_dir(
+                root,
+                "root_config.storage.raw_debug.artifacts_dir",
+                value,
+            )?),
+            None => None,
+        };
+
+        Ok(RuntimeStorageConfig {
+            backend,
+            raw_debug_enabled: self.storage.raw_debug.enabled,
+            raw_debug_artifacts_dir,
+        })
+    }
+}
+
+impl StorageDefinition {
+    fn validate(&self) -> Result<(), ContractError> {
+        match self.mode {
+            StorageMode::Local => {
+                let database_path = self
+                    .local
+                    .as_ref()
+                    .and_then(|local| local.database_path.as_ref())
+                    .map(String::as_str)
+                    .ok_or_else(|| ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.local.database_path",
+                        detail:
+                            "storage.local.database_path is required when storage.mode is local"
+                                .to_owned(),
+                    })?;
+                if database_path.trim().is_empty() {
+                    return Err(ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.local.database_path",
+                        detail: "value cannot be empty".to_owned(),
+                    });
+                }
+            }
+            StorageMode::Postgres => {
+                let database_url = self
+                    .postgres
+                    .as_ref()
+                    .and_then(|postgres| postgres.database_url.as_ref())
+                    .map(String::as_str)
+                    .ok_or_else(|| ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.postgres.database_url",
+                        detail:
+                            "storage.postgres.database_url is required when storage.mode is postgres"
+                                .to_owned(),
+                    })?;
+                if database_url.trim().is_empty() {
+                    return Err(ContractError::InvalidRootConfigField {
+                        field: "root_config.storage.postgres.database_url",
+                        detail: "value cannot be empty".to_owned(),
+                    });
+                }
+            }
         }
 
         Ok(())
