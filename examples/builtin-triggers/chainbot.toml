@@ -1,3 +1,17 @@
 manifest_version = "2.0.0"
-chainbot_version = "2.2.0"
+chainbot_version = "2.3.0"
 profile = "builtin-triggers"
+secret_refs = []
+
+[runtime_defaults]
+
+[paths]
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "state/runtime.sqlite3"
+
+[storage.raw_debug]
+enabled = false

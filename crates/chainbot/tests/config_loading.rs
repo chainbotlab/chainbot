@@ -2,7 +2,7 @@
 //! Temporary fixture roots, environment overrides, and TOML package definitions.
 //!
 //! [OUTPUT]
-//! Verifies root-layout resolution and package-loader behavior for valid, missing, and invalid manifests.
+//! Verifies root-layout resolution, startup-time root config version gating, and package-loader behavior for valid, missing, and invalid manifests.
 //!
 //! [ROLE]
 //! Covers the configuration loading boundary as an integration test.
@@ -13,7 +13,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::config::{
-    RootDefinitionBundle, RootLayout, CHAINBOT_CONFIG_DIR_ENV, DEFAULT_ROOT_DIR_NAME,
+    load_effective_root_layout, RootDefinitionBundle, RootLayout, CHAINBOT_CONFIG_DIR_ENV,
+    DEFAULT_ROOT_DIR_NAME,
 };
 use chainbot::errors::ContractError;
 use chainbot::workflow::RuntimeVariableNamespace;
@@ -207,6 +208,81 @@ fn root_paths_overrides_and_plugin_discovery_are_applied() {
     assert_eq!(bundle.plugins[0].plugin_id, "quote-plugin");
     assert_eq!(bundle.workflows[0].workflow_id, "wf-alpha");
     assert_eq!(bundle.triggers[0].workflow_id, "wf-alpha");
+}
+
+#[test]
+fn missing_chainbot_version_is_backfilled_during_startup_load() {
+    let root = unique_test_root("config-version-backfill");
+    write_valid_fixture(&root);
+    fs::write(
+        root.join("chainbot.toml"),
+        "manifest_version = \"2.0.0\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+    )
+    .expect("root config without chainbot_version should be writable");
+
+    let layout = RootLayout::from_root(root.clone());
+    let effective_layout =
+        load_effective_root_layout(&layout).expect("startup load should backfill missing version");
+    assert_eq!(effective_layout.root, root);
+
+    let bundle = RootDefinitionBundle::load(&layout)
+        .expect("root bundle should load after missing version backfill");
+    assert_eq!(
+        bundle.root_config.chainbot_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+
+    let rewritten_root_config =
+        fs::read_to_string(root.join("chainbot.toml")).expect("rewritten root config should exist");
+    assert!(rewritten_root_config.contains(&format!(
+        "chainbot_version = \"{}\"",
+        env!("CARGO_PKG_VERSION")
+    )));
+}
+
+#[test]
+fn matching_chainbot_version_loads_successfully() {
+    let root = unique_test_root("config-version-match");
+    write_valid_fixture(&root);
+    let root_config_path = root.join("chainbot.toml");
+    let original_root_config =
+        fs::read_to_string(&root_config_path).expect("matching root config should be readable");
+
+    let bundle = RootDefinitionBundle::load(&RootLayout::from_root(root))
+        .expect("matching chainbot_version should load without migration");
+    assert_eq!(
+        bundle.root_config.chainbot_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+
+    let reloaded_root_config =
+        fs::read_to_string(&root_config_path).expect("matching root config should stay readable");
+    assert_eq!(reloaded_root_config, original_root_config);
+}
+
+#[test]
+fn mismatched_chainbot_version_requires_migration() {
+    let root = unique_test_root("config-version-mismatch");
+    write_valid_fixture(&root);
+    fs::write(
+        root.join("chainbot.toml"),
+        "manifest_version = \"2.0.0\"\nchainbot_version = \"0.9.0\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+    )
+    .expect("root config with mismatched chainbot_version should be writable");
+
+    let error = RootDefinitionBundle::load(&RootLayout::from_root(root.clone()))
+        .expect_err("mismatched chainbot_version should require migration");
+    assert!(matches!(
+        error,
+        ContractError::ConfigVersionMigrationRequired {
+            stored_version,
+            running_version,
+        } if stored_version == "0.9.0" && running_version == env!("CARGO_PKG_VERSION")
+    ));
+
+    let root_config = fs::read_to_string(root.join("chainbot.toml"))
+        .expect("mismatched root config should remain readable");
+    assert!(root_config.contains("chainbot_version = \"0.9.0\""));
 }
 
 #[test]

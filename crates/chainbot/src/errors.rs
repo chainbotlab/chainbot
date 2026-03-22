@@ -64,6 +64,10 @@ pub enum ContractError {
         field: &'static str,
         detail: String,
     },
+    ConfigVersionMigrationRequired {
+        stored_version: String,
+        running_version: String,
+    },
     InvalidVersionFormat {
         field: &'static str,
         value: String,
@@ -499,6 +503,13 @@ impl Display for ContractError {
             Self::InvalidRootConfigField { field, detail } => {
                 write!(f, "root config has invalid field {field}: {detail}")
             }
+            Self::ConfigVersionMigrationRequired {
+                stored_version,
+                running_version,
+            } => write!(
+                f,
+                "root config requires migration before startup: stored chainbot_version={stored_version}, running chainbot_version={running_version}"
+            ),
             Self::InvalidVersionFormat { field, value } => {
                 write!(f, "{field} must start with a numeric major version: {value}")
             }

@@ -1,6 +1,9 @@
 manifest_version = "2.0.0"
-chainbot_version = "2.2.0"
+chainbot_version = "2.3.0"
 profile = "custom-paths"
+secret_refs = []
+
+[runtime_defaults]
 
 [paths]
 workflows_dir = "workflow-pkgs"
@@ -8,3 +11,12 @@ triggers_dir = "trigger-pkgs"
 plugins_dir = "plugin-pkgs"
 secrets_dir = "vault"
 state_dir = "runtime-state"
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "runtime-state/runtime.sqlite3"
+
+[storage.raw_debug]
+enabled = false

@@ -2,7 +2,7 @@
 //! Environment-derived root paths, on-disk package manifests, plugin manifests, and serialized contract payloads.
 //!
 //! [OUTPUT]
-//! Resolves canonical root layouts and loads validated root, workflow, trigger, plugin, and worker definition bundles with package-root context.
+//! Resolves canonical root layouts, enforces startup-time root config version compatibility, backfills missing ChainBot version metadata, and loads validated root, workflow, trigger, plugin, and worker definition bundles with package-root context.
 //!
 //! [ROLE]
 //! Defines the configuration and package-loading boundary for ChainBot runtime state on disk.
@@ -27,6 +27,8 @@ pub const DEFAULT_ROOT_DIR_NAME: &str = ".chainbot";
 pub const CHAINBOT_CONFIG_DIR_ENV: &str = "CHAINBOT_CONFIG_DIR";
 pub const ROOT_CONFIG_FILE_NAME: &str = "chainbot.toml";
 pub const PACKAGE_CONFIG_FILE_NAME: &str = "config.toml";
+
+const RUNNING_CHAINBOT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -556,9 +558,50 @@ pub fn resolve_root_layout() -> Result<RootLayout, ContractError> {
 pub fn load_effective_root_layout(base_layout: &RootLayout) -> Result<RootLayout, ContractError> {
     base_layout.validate_bootstrap_paths_exist()?;
     let root_config_path = resolve_root_config_path(base_layout)?;
-    let root_config: RootConfigDefinition = decode_required_toml(&root_config_path, "root config")?;
+    let mut root_config: RootConfigDefinition =
+        decode_required_toml(&root_config_path, "root config")?;
     root_config.validate()?;
+    reconcile_root_config_version(&root_config_path, &mut root_config)?;
     base_layout.apply_root_config(&root_config)
+}
+
+fn reconcile_root_config_version(
+    root_config_path: &Path,
+    root_config: &mut RootConfigDefinition,
+) -> Result<(), ContractError> {
+    match root_config.chainbot_version.as_deref() {
+        Some(stored_version) if stored_version != RUNNING_CHAINBOT_VERSION => {
+            run_root_config_version_migration(stored_version, RUNNING_CHAINBOT_VERSION)
+        }
+        None => {
+            persist_root_config_version(root_config_path, root_config, RUNNING_CHAINBOT_VERSION)
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+fn run_root_config_version_migration(
+    stored_version: &str,
+    running_version: &str,
+) -> Result<(), ContractError> {
+    Err(ContractError::ConfigVersionMigrationRequired {
+        stored_version: stored_version.to_owned(),
+        running_version: running_version.to_owned(),
+    })
+}
+
+fn persist_root_config_version(
+    root_config_path: &Path,
+    root_config: &mut RootConfigDefinition,
+    running_version: &str,
+) -> Result<(), ContractError> {
+    root_config.chainbot_version = Some(running_version.to_owned());
+    let contents =
+        toml::to_string_pretty(root_config).map_err(|source| ContractError::TomlEncode {
+            path: root_config_path.to_path_buf(),
+            source,
+        })?;
+    write_atomic_string(root_config_path, &contents)
 }
 
 fn resolve_root_config_path(layout: &RootLayout) -> Result<PathBuf, ContractError> {

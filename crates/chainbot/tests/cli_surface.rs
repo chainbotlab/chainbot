@@ -474,7 +474,7 @@ fn invalid_toml_validate_reports_line_context() {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"broken\"\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"broken\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
