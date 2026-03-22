@@ -61,6 +61,7 @@
 - path overrides
 - runtime defaults
 - secret references
+- storage mode and backend settings
 - all path settings must stay within `<root>` and use root-relative paths
 
 示例：
@@ -80,7 +81,23 @@ state_dir = "state"
 
 [runtime_defaults]
 timezone = "UTC"
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "state/runtime.sqlite3"
+
+[storage.raw_debug]
+enabled = false
 ```
+
+`storage` 约束：
+
+- `storage.mode` 只能是 `local` 或 `postgres`
+- 当 `storage.mode = "local"` 时，必须提供 `storage.local.database_path`
+- 当 `storage.mode = "postgres"` 时，必须提供 `storage.postgres.database_url`
+- `storage.raw_debug` 只定义可选调试产物配置形状，默认可关闭，不影响主运行正确性
 
 ## `workflows/<workflow_id>/config.toml`
 

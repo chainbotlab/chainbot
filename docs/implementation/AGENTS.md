@@ -17,3 +17,4 @@
 - `CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`: Records the params-backed trigger extension model, builtin cron implementation, and validation coverage.
 - `CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`: Records the canonical-only plugin/state layout cut, removed legacy compatibility, and the validation coverage for the redesign.
 - `CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md`: Records the narrower run-summary reads, trigger snapshot read-model, and validation coverage for the state-read optimizations.
+- `CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md`: Records the storage-mode schema extension and DB-primary runtime cut for CLI and trigger execution paths.

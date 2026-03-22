@@ -12,6 +12,12 @@ Define the stable root layout that aligns ChainBot contract versioning, package 
 - `plugin` defines a package-local extension registration and executable boundary
 - `state` defines durable runtime artifacts and restart-safe coordination boundaries
 
+`state` 在主运行路径采用 DB-primary 模型：
+
+- `storage.mode = "local"` 时，`state/runtime.sqlite3`（或配置的 local DB 路径）是本地权威状态
+- `storage.mode = "postgres"` 时，配置的 PostgreSQL 数据库是权威状态
+- legacy file-backed state 仅保留为兼容/导入准备，不再作为 `status`、`list-runs`、`run`、`serve`、trigger execution 的权威来源
+
 ## Root Layout
 
 ```text
@@ -34,20 +40,7 @@ Define the stable root layout that aligns ChainBot contract versioning, package 
 |     `- assets/
 |- secrets/
 `- state/
-   |- coordination.sqlite3
-   |- runs/
-   |  `- <run_id>/
-   |     |- summary.json
-   |     `- workflow-logs/
-   |        |- 00000000000000000001.json
-   |        `- 00000000000000000002.json
-   `- triggers/
-      `- <trigger_id>/
-         |- checkpoint.json
-         |- snapshot.json
-         `- records/
-            |- 00000000000000000001-<event>.json
-            `- 00000000000000000002-<event>.json
+   `- runtime.sqlite3
 ```
 
 ## Contract Boundary
@@ -110,48 +103,31 @@ Manifest and executable locality are part of the package contract.
 
 ## State Boundary
 
-### Run-Scoped Artifacts
+### Runtime DB Tables
 
-`state/runs/<run_id>/` owns one workflow execution record.
+权威运行态持久化写入统一逻辑表：
 
-- `summary.json` is the durable run summary
-- `workflow-logs/*.json` are append-only runtime log entries
+- `run_summaries`
+- `workflow_runtime_logs`
+- `trigger_event_records`
+- `trigger_checkpoints`
+- `trigger_snapshots`（derived read model）
+- `serve_leases`
 
-Run-scoped artifacts are retained, inspected, and cleaned up as one lifecycle unit.
+其中：
 
-### Trigger-Scoped Artifacts
-
-`state/triggers/<trigger_id>/` owns one trigger listener state record.
-
-- `checkpoint.json` is the durable resume position
-- `snapshot.json` is a non-authoritative derived snapshot for operator reads and restart-time coordination shortcuts
-- `records/*.json` are append-only accepted trigger records
-
-Trigger-scoped artifacts are retained, inspected, and cleaned up as one lifecycle unit.
-
-Accepted trigger records are not ordinary logs. They are durable trigger-plane state used to rebuild dedup and cooldown coordination after restart.
-Trigger snapshots must remain rebuildable from accepted trigger records and must not replace them as the source of truth.
-
-### Coordination-Scoped Artifacts
-
-`state/coordination.sqlite3` owns narrow mutable coordination state.
-
-- serve lease ownership
-- dedup tokens
-- cooldown tokens
-
-The coordination database must remain rebuild-friendly and must not become the sole source of run history or accepted trigger history.
+- `run_summaries` 与 `trigger_event_records` 是 run/trigger history 的主权威来源
+- `trigger_snapshots` 是可由 accepted records 重建的 read model
+- raw debug artifact 不参与正确性判定
 
 ## State Invariants
 
 - run summaries are authoritative for persisted run status
-- workflow logs remain append-only
-- trigger records remain append-only
+- workflow runtime logs remain append-only by `(run_id, sequence)`
+- trigger event records remain append-only by `(trigger_id, sequence)`
 - trigger checkpoints remain the last acknowledged trigger progress
 - trigger snapshots remain derived, replaceable state
-- trigger dedup and cooldown rebuild must succeed from persisted trigger records after restart
-- run cleanup must not delete trigger-scoped artifacts implicitly
-- trigger cleanup must treat accepted trigger records as correctness-bearing state
+- trigger dedup and cooldown decisions must remain restart-safe from persisted trigger history
 
 ## Discovery Rules
 
