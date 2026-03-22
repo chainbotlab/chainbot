@@ -27,10 +27,10 @@ use crate::builtins::triggers::validate_builtin_trigger_definition;
 use crate::errors::{assert_required_major, assert_supported_major, ContractError};
 use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifest};
 use crate::state::{
-    sanitize_path_component, CoordinationError, CoordinationStore, FileBackedStateStore,
-    FileStateError, StateLayout, TriggerCheckpointRecord, TriggerEventRecord,
+    sanitize_path_component, StateLayout, TriggerCheckpointRecord, TriggerEventRecord,
     TriggerSnapshotRecord,
 };
+use crate::state_db::{RuntimeStateError, RuntimeStateStore};
 
 pub const CURRENT_API_MAJOR: u64 = 2;
 pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.listen.event";
@@ -165,7 +165,7 @@ pub struct TriggerRunRequest {
     pub source: String,
     pub accepted_at_ms: i64,
     pub payload: serde_json::Value,
-    pub trigger_record_path: PathBuf,
+    pub trigger_record_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,8 +180,7 @@ pub struct TriggerPlane {
     definitions: Vec<TriggerDefinition>,
     builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
     external_plugins: BTreeMap<String, ExternalTriggerPlugin>,
-    state_store: FileBackedStateStore,
-    coordination_store: CoordinationStore,
+    state_store: RuntimeStateStore,
     accepted_sequence: u64,
     accepted_event_keys: BTreeSet<String>,
 }
@@ -189,8 +188,7 @@ pub struct TriggerPlane {
 #[derive(Debug)]
 pub enum TriggerPlaneError {
     Contract(ContractError),
-    FileState(FileStateError),
-    Coordination(CoordinationError),
+    RuntimeState(RuntimeStateError),
 }
 
 #[derive(Debug, Clone)]
@@ -319,12 +317,55 @@ impl ListenerSessionState {
 
 impl TriggerPlane {
     pub fn open(
+        state_store: RuntimeStateStore,
+        definitions: Vec<TriggerDefinition>,
+        plugin_manifests: Vec<PluginManifest>,
+        policy: TriggerPluginHostPolicy,
+        builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
+    ) -> Result<Self, TriggerPlaneError> {
+        Self::open_with_store(
+            state_store,
+            definitions,
+            plugin_manifests,
+            policy,
+            builtin_events,
+        )
+    }
+
+    pub fn open_legacy_state_layout_for_tests(
         state_layout: StateLayout,
         definitions: Vec<TriggerDefinition>,
         plugin_manifests: Vec<PluginManifest>,
         policy: TriggerPluginHostPolicy,
         builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
         now_ms: i64,
+    ) -> Result<Self, TriggerPlaneError> {
+        let state_store = RuntimeStateStore::open(
+            &crate::config::RuntimeStorageConfig {
+                backend: crate::config::RuntimeStorageBackend::Local {
+                    database_path: state_layout.coordination_db_path,
+                },
+                raw_debug_enabled: false,
+                raw_debug_artifacts_dir: None,
+            },
+            now_ms,
+        )?;
+
+        Self::open_with_store(
+            state_store,
+            definitions,
+            plugin_manifests,
+            policy,
+            builtin_events,
+        )
+    }
+
+    pub fn open_with_store(
+        mut state_store: RuntimeStateStore,
+        definitions: Vec<TriggerDefinition>,
+        plugin_manifests: Vec<PluginManifest>,
+        policy: TriggerPluginHostPolicy,
+        builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
     ) -> Result<Self, TriggerPlaneError> {
         let mut validated_definitions = Vec::with_capacity(definitions.len());
         let mut definition_ids = BTreeSet::new();
@@ -340,17 +381,12 @@ impl TriggerPlane {
             validated_definitions.push(definition);
         }
 
-        let state_store = FileBackedStateStore::new(state_layout.clone());
-        state_store.initialize()?;
-        let _ = state_store.recover_trigger_records()?;
-        let _ = state_store.recover_trigger_snapshots()?;
         let mut snapshots_by_trigger = state_store
-            .load_committed_trigger_snapshots()?
+            .list_trigger_snapshots()?
             .into_iter()
             .map(|snapshot| (snapshot.trigger_id.clone(), snapshot))
             .collect::<BTreeMap<_, _>>();
 
-        let mut trigger_snapshots = Vec::with_capacity(validated_definitions.len());
         let mut accepted_event_keys = BTreeSet::new();
         let mut accepted_sequence = 0_u64;
 
@@ -376,11 +412,7 @@ impl TriggerPlane {
                     .iter()
                     .map(|event_id| accepted_event_key(&definition.trigger_id, event_id)),
             );
-            trigger_snapshots.push(snapshot);
         }
-
-        let mut coordination_store = CoordinationStore::open(&state_layout, now_ms)?;
-        coordination_store.rebuild_trigger_snapshot_coordination(&trigger_snapshots, now_ms)?;
 
         let mut external_plugins = BTreeMap::new();
         for manifest in plugin_manifests {
@@ -393,7 +425,6 @@ impl TriggerPlane {
             builtin_events,
             external_plugins,
             state_store,
-            coordination_store,
             accepted_sequence,
             accepted_event_keys,
         })
@@ -436,13 +467,15 @@ impl TriggerPlane {
                             detail: "value cannot be empty".to_owned(),
                         }
                     })?;
-                    let plugin = self.external_plugins.get(plugin_id).ok_or_else(|| {
-                        ContractError::UnknownTriggerPlugin {
+                    let plugin = self
+                        .external_plugins
+                        .get(plugin_id)
+                        .ok_or_else(|| ContractError::UnknownTriggerPlugin {
                             trigger_id: definition.trigger_id.clone(),
                             plugin_id: plugin_id.to_owned(),
-                        }
-                    })?;
-                    plugin.stream_emissions(&self.state_store, &definition, on_progress)?
+                        })?
+                        .clone();
+                    plugin.stream_emissions(&mut self.state_store, &definition, on_progress)?
                 }
             };
 
@@ -490,10 +523,7 @@ impl TriggerPlane {
             .filter(|value| *value > 0)
             .map(|window_ms| accepted_at_ms.saturating_add(window_ms));
         if let Some(dedup_key) = dedup_key.as_deref() {
-            if !self
-                .coordination_store
-                .dedup_is_ready(dedup_key, accepted_at_ms)?
-            {
+            if !self.state_store.dedup_is_ready(dedup_key, accepted_at_ms)? {
                 return Ok(None);
             }
         }
@@ -510,7 +540,7 @@ impl TriggerPlane {
             .map(|cooldown_ms| accepted_at_ms.saturating_add(cooldown_ms));
         if let Some(cooldown_key) = cooldown_key.as_deref() {
             if !self
-                .coordination_store
+                .state_store
                 .cooldown_is_ready(cooldown_key, accepted_at_ms)?
             {
                 return Ok(None);
@@ -561,9 +591,7 @@ impl TriggerPlane {
             cooldown_expires_at_ms,
         };
 
-        let trigger_record_path = self.state_store.write_trigger_record(&trigger_record)?;
-        self.coordination_store
-            .apply_trigger_record_coordination(&trigger_record, accepted_at_ms)?;
+        let trigger_record_ref = self.state_store.write_trigger_record(&trigger_record)?;
         let mut snapshot = self
             .state_store
             .read_trigger_snapshot(&definition.trigger_id)?
@@ -589,7 +617,7 @@ impl TriggerPlane {
             source,
             accepted_at_ms,
             payload,
-            trigger_record_path,
+            trigger_record_ref,
         }))
     }
 }
@@ -598,8 +626,7 @@ impl Display for TriggerPlaneError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Contract(source) => write!(f, "trigger contract error: {source}"),
-            Self::FileState(source) => write!(f, "trigger state persistence error: {source}"),
-            Self::Coordination(source) => write!(f, "trigger coordination error: {source}"),
+            Self::RuntimeState(source) => write!(f, "trigger runtime-state error: {source}"),
         }
     }
 }
@@ -608,8 +635,7 @@ impl Error for TriggerPlaneError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Contract(source) => Some(source),
-            Self::FileState(source) => Some(source),
-            Self::Coordination(source) => Some(source),
+            Self::RuntimeState(source) => Some(source),
         }
     }
 }
@@ -620,15 +646,9 @@ impl From<ContractError> for TriggerPlaneError {
     }
 }
 
-impl From<FileStateError> for TriggerPlaneError {
-    fn from(value: FileStateError) -> Self {
-        Self::FileState(value)
-    }
-}
-
-impl From<CoordinationError> for TriggerPlaneError {
-    fn from(value: CoordinationError) -> Self {
-        Self::Coordination(value)
+impl From<RuntimeStateError> for TriggerPlaneError {
+    fn from(value: RuntimeStateError) -> Self {
+        Self::RuntimeState(value)
     }
 }
 
@@ -801,7 +821,7 @@ fn validate_non_empty_field(
 impl ExternalTriggerPlugin {
     fn stream_emissions<F>(
         &self,
-        state_store: &FileBackedStateStore,
+        state_store: &mut RuntimeStateStore,
         definition: &TriggerDefinition,
         on_progress: &mut F,
     ) -> Result<Vec<TriggerEmission>, ContractError>
