@@ -1,0 +1,13 @@
+manifest_version = "2.0.0"
+trigger_id = "tr-market"
+kind = "builtin"
+source = "market_tick"
+workflow_id = "wf-builtin"
+enabled = true
+
+[params]
+symbol = "BTCUSDT"
+
+[input_mapping]
+kind = "payload.kind"
+symbol = "payload.symbol"

@@ -1,0 +1,34 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-parent"
+name = "wf-parent"
+
+[runtime.defaults]
+symbol = "BTCUSDT"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "call-child"
+kind = "subflow"
+depends_on = []
+
+[nodes.call]
+workflow = "wf-child"
+
+[nodes.call.with]
+symbol = "run.symbol"
+
+[nodes.call.returns]
+decision = "decision"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "capture-decision"
+kind = "builtin"
+plugin = "builtin.identity"
+operation = "run"
+depends_on = ["call-child"]
+
+[[nodes.inputs]]
+target = "decision"
+source = "subflow_output.decision"

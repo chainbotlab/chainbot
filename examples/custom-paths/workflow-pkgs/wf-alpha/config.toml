@@ -1,0 +1,12 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-alpha"
+name = "wf-alpha"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "node-1"
+kind = "plugin"
+plugin = "quote-plugin"
+operation = "normalize"
+depends_on = []

@@ -9,6 +9,7 @@
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::ops::Range;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub enum ContractError {
     JsonDecode(serde_json::Error),
     TomlDecode {
         path: PathBuf,
+        context: Option<TomlParseContext>,
         source: toml::de::Error,
     },
     TomlEncode {
@@ -337,6 +339,14 @@ pub enum ContractError {
     },
 }
 
+#[derive(Debug)]
+pub struct TomlParseContext {
+    line: usize,
+    column: usize,
+    snippet: String,
+    pointer: String,
+}
+
 impl CliExitCode {
     pub const fn as_u8(self) -> u8 {
         match self {
@@ -426,10 +436,7 @@ impl UserFacingError {
                 "Failed to {operation} at {}: {source}",
                 path.display()
             )),
-            ContractError::TomlDecode { path, source } => Self::validation(format!(
-                "Definition file is invalid TOML at {}: {source}",
-                path.display()
-            )),
+            error @ ContractError::TomlDecode { .. } => Self::validation(error.to_string()),
             ContractError::TomlEncode { path, source } => Self::state(format!(
                 "Definition file could not be serialized at {}: {source}",
                 path.display()
@@ -450,8 +457,22 @@ impl Display for ContractError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::JsonDecode(err) => write!(f, "failed to decode contract json: {err}"),
-            Self::TomlDecode { path, source } => {
-                write!(f, "failed to decode TOML at {}: {source}", path.display())
+            Self::TomlDecode {
+                path,
+                context,
+                source,
+            } => {
+                writeln!(f, "definition file is invalid TOML")?;
+                writeln!(f, "  file: {}", path.display())?;
+                writeln!(f, "  message: {}", source.message())?;
+                if let Some(context) = context {
+                    writeln!(f, "  line: {}, column: {}", context.line, context.column)?;
+                    let gutter = context.line.to_string().len();
+                    writeln!(f)?;
+                    writeln!(f, "{:>width$} | {}", context.line, context.snippet, width = gutter)?;
+                    write!(f, "{} | {}", " ".repeat(gutter), context.pointer)?;
+                }
+                Ok(())
             }
             Self::TomlEncode { path, source } => {
                 write!(f, "failed to encode TOML at {}: {source}", path.display())
@@ -895,6 +916,57 @@ impl From<serde_json::Error> for ContractError {
     fn from(value: serde_json::Error) -> Self {
         Self::JsonDecode(value)
     }
+}
+
+impl ContractError {
+    pub fn toml_decode(path: PathBuf, input: &str, source: toml::de::Error) -> Self {
+        let context = build_toml_parse_context(input, source.span());
+        Self::TomlDecode {
+            path,
+            context,
+            source,
+        }
+    }
+}
+
+fn build_toml_parse_context(input: &str, span: Option<Range<usize>>) -> Option<TomlParseContext> {
+    let span = span?;
+    if input.is_empty() {
+        return None;
+    }
+
+    let last_index = input.len().saturating_sub(1);
+    let safe_start = span.start.min(last_index);
+    let line_start = input[..safe_start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = input[safe_start..]
+        .find('\n')
+        .map(|offset| safe_start + offset)
+        .unwrap_or(input.len());
+    let snippet = input[line_start..line_end].to_owned();
+    let line = input[..line_start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    let column_offset = input[line_start..safe_start].chars().count();
+    let snippet_width = snippet.chars().count();
+    let highlight_len = span.end.saturating_sub(span.start).max(1);
+    let available_width = snippet_width.saturating_sub(column_offset).max(1);
+    let pointer = format!(
+        "{}{}",
+        " ".repeat(column_offset),
+        "^".repeat(highlight_len.min(available_width).max(1))
+    );
+
+    Some(TomlParseContext {
+        line,
+        column: column_offset + 1,
+        snippet,
+        pointer,
+    })
 }
 
 pub fn assert_supported_major(

@@ -1,0 +1,9 @@
+manifest_version = "2.0.0"
+trigger_id = "tr-manual"
+kind = "builtin"
+source = "manual"
+workflow_id = "wf-builtin"
+enabled = true
+
+[input_mapping]
+kind = "payload.kind"

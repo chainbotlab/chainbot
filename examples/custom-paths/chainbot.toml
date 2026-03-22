@@ -1,0 +1,10 @@
+manifest_version = "2.0.0"
+chainbot_version = "2.2.0"
+profile = "custom-paths"
+
+[paths]
+workflows_dir = "workflow-pkgs"
+triggers_dir = "trigger-pkgs"
+plugins_dir = "plugin-pkgs"
+secrets_dir = "vault"
+state_dir = "runtime-state"

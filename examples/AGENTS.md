@@ -1,0 +1,20 @@
+# Local Rules
+
+## Scope
+- Position: Curated root-level ChainBot configuration examples for humans and agents.
+- Logic: Each example root demonstrates the current canonical config contract without test-only noise or legacy layouts.
+- Constraints: Keep examples deterministic, credential-free, and aligned with `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` plus `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`.
+
+## Constraints
+- Prefer canonical `chainbot.toml` + package-directory layouts.
+- Do not add `plugins/manifests/` legacy examples.
+- Do not add failure-only or secret-blob fixtures.
+- Keep examples copyable as standalone roots.
+
+## Members
+- `README.md`: Index of available example roots and what each one demonstrates.
+- `single-workflow/`: Smallest standalone workflow-only root for the base package layout.
+- `builtin-triggers/`: Shared workflow root showing builtin manual, market-tick, and cron trigger packages.
+- `workflow-composition/`: Parent/child workflow root focused on subflow contracts without external plugin setup.
+- `plugin-integrations/`: External trigger and external node plugin root focused on package-aligned plugin integration.
+- `custom-paths/`: Root showing non-default `[paths]` overrides while staying inside the configured root.

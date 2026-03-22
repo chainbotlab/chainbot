@@ -519,10 +519,8 @@ where
         }
     };
 
-    toml::from_str(&contents).map_err(|source| ContractError::TomlDecode {
-        path: path.to_path_buf(),
-        source,
-    })
+    toml::from_str(&contents)
+        .map_err(|source| ContractError::toml_decode(path.to_path_buf(), &contents, source))
 }
 
 fn write_atomic_string(path: &Path, contents: &str) -> Result<(), ContractError> {
