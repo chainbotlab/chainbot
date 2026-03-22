@@ -13,11 +13,9 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::RootLayout;
-use chainbot::state::{
-    CoordinationStore, FileBackedStateStore, RunRecordSummary, RunStatus, StateLayout,
-    TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX,
-};
+use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::state::{RunRecordSummary, RunStatus, TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX};
+use chainbot::state_db::RuntimeStateStore;
 
 fn acquire_fixture_lock() -> MutexGuard<'static, ()> {
     fixture_lock()
@@ -268,7 +266,7 @@ fn init_respects_existing_root_path_overrides() {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"custom\"\nsecret_refs = []\n\n[paths]\nworkflows_dir = \"defs/workflows\"\ntriggers_dir = \"defs/triggers\"\nplugins_dir = \"extensions\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"runtime/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -316,7 +314,7 @@ fn init_prefers_chainbot_toml_when_both_root_config_paths_exist() {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"new\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"new-plugins\"\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"new\"\nsecret_refs = []\n\n[paths]\nplugins_dir = \"new-plugins\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -511,7 +509,7 @@ fn trigger_list_only_requires_trigger_root_inputs() {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"minimal\"\nsecret_refs = []\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"minimal\"\nsecret_refs = []\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -593,11 +591,10 @@ fn status_json_reports_active_serve_lease() {
         .expect("system time should be after UNIX_EPOCH")
         .as_millis()
         .min(i64::MAX as u128) as i64;
-    let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(basic_root()));
-    let mut coordination = CoordinationStore::open(&state_layout, now_ms)
-        .expect("coordination store should open for status fixture");
+    let mut state_store = RuntimeStateStore::open(&storage_config_for_root(&basic_root()), now_ms)
+        .expect("runtime state store should open for status fixture");
     let owner_id = format!("{SERVE_OWNER_ID_PREFIX}{}", std::process::id());
-    coordination
+    state_store
         .try_acquire_serve_lease(&owner_id, now_ms, 60_000)
         .expect("serve lease should be acquired for status output");
 
@@ -627,11 +624,9 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
 
-    let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(basic_root()));
-    let state_store = FileBackedStateStore::new(state_layout.clone());
-    state_store
-        .initialize()
-        .expect("state tree should initialize for status mutation test");
+    let mut state_store =
+        RuntimeStateStore::open(&storage_config_for_root(&basic_root()), 1_710_000_040_000)
+            .expect("runtime state store should initialize for status mutation test");
     state_store
         .write_run_summary(&RunRecordSummary {
             schema_version: "1.0.0".to_string(),
@@ -651,14 +646,14 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
 
     assert!(output.status.success());
 
-    let summary = state_store
-        .read_run_summary("run-incomplete")
-        .expect("run summary should remain readable after status");
+    let summaries = state_store
+        .list_run_summaries()
+        .expect("run summaries should remain readable after status");
+    let summary = summaries
+        .into_iter()
+        .find(|summary| summary.run_id == "run-incomplete")
+        .expect("run summary should remain present after status");
     assert_eq!(summary.status, RunStatus::Running);
-    assert!(!state_layout
-        .run_dir("run-incomplete")
-        .join("workflow-logs")
-        .exists());
 }
 
 #[test]
@@ -666,11 +661,9 @@ fn status_reads_trigger_snapshot_without_record_scan_side_effects() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
 
-    let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(basic_root()));
-    let state_store = FileBackedStateStore::new(state_layout.clone());
-    state_store
-        .initialize()
-        .expect("state tree should initialize for trigger snapshot status test");
+    let mut state_store =
+        RuntimeStateStore::open(&storage_config_for_root(&basic_root()), 1_710_000_050_000)
+            .expect("runtime state store should initialize for trigger snapshot status test");
 
     let mut snapshot = TriggerSnapshotRecord::new("tr-market");
     snapshot.last_event_id = Some("event-snapshot".to_string());
@@ -682,12 +675,6 @@ fn status_reads_trigger_snapshot_without_record_scan_side_effects() {
     state_store
         .write_trigger_snapshot(&snapshot)
         .expect("trigger snapshot should persist for status output");
-
-    let records_dir = state_layout
-        .trigger_state_dir
-        .join("tr-market")
-        .join("records");
-    assert!(!records_dir.exists());
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -710,11 +697,9 @@ fn list_runs_does_not_recover_or_promote_staged_summaries() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
 
-    let state_layout = StateLayout::from_root_layout(&RootLayout::from_root(basic_root()));
-    let state_store = FileBackedStateStore::new(state_layout.clone());
-    state_store
-        .initialize()
-        .expect("state tree should initialize for list-runs read-only test");
+    let mut state_store =
+        RuntimeStateStore::open(&storage_config_for_root(&basic_root()), 1_710_000_060_000)
+            .expect("runtime state store should initialize for list-runs read-only test");
 
     state_store
         .write_run_summary(&RunRecordSummary {
@@ -726,27 +711,6 @@ fn list_runs_does_not_recover_or_promote_staged_summaries() {
             finished_at_ms: None,
         })
         .expect("committed run summary should persist");
-
-    let staged_summary_path = state_layout.staged_run_summary_path("run-staged");
-    fs::create_dir_all(
-        staged_summary_path
-            .parent()
-            .expect("staged run summary should have a parent directory"),
-    )
-    .expect("staged run summary directory should be creatable");
-    fs::write(
-        &staged_summary_path,
-        serde_json::to_vec_pretty(&RunRecordSummary {
-            schema_version: "1.0.0".to_string(),
-            run_id: "run-staged".to_string(),
-            workflow_id: "wf-alpha".to_string(),
-            status: RunStatus::Succeeded,
-            started_at_ms: 1_710_000_061_000,
-            finished_at_ms: Some(1_710_000_061_100),
-        })
-        .expect("staged run summary should serialize"),
-    )
-    .expect("staged run summary should be writable");
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -763,7 +727,6 @@ fn list_runs_does_not_recover_or_promote_staged_summaries() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["run_id"], "run-committed");
     assert_eq!(runs[0]["status"], "running");
-    assert!(staged_summary_path.exists());
 }
 
 #[test]
@@ -861,6 +824,7 @@ fn ensure_basic_root_fixture() {
     let _ = fs::remove_dir_all(state_root.join("runs"));
     let _ = fs::remove_dir_all(state_root.join("triggers"));
     let _ = fs::remove_file(state_root.join("coordination.sqlite3"));
+    let _ = fs::remove_file(state_root.join("runtime.sqlite3"));
 
     fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
     fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
@@ -876,7 +840,7 @@ fn ensure_basic_root_fixture() {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -899,6 +863,16 @@ fn ensure_basic_root_fixture() {
         "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
     )
     .expect("plugin fixture should be writable");
+}
+
+fn storage_config_for_root(root: &Path) -> RuntimeStorageConfig {
+    RuntimeStorageConfig {
+        backend: RuntimeStorageBackend::Local {
+            database_path: root.join("state").join("runtime.sqlite3"),
+        },
+        raw_debug_enabled: false,
+        raw_debug_artifacts_dir: None,
+    }
 }
 
 fn fixture_lock() -> &'static Mutex<()> {

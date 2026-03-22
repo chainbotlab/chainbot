@@ -114,7 +114,7 @@ fn toml_definition_validation() {
     write_valid_fixture(&invalid_version_root);
     fs::write(
         invalid_version_root.join("chainbot.toml"),
-        "manifest_version = \"4.0.0\"\nprofile = \"test\"\n",
+        "manifest_version = \"4.0.0\"\nprofile = \"test\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
     )
     .expect("invalid-version root fixture should be writable");
 
@@ -127,6 +127,49 @@ fn toml_definition_validation() {
             field: "root_config.manifest_version",
             major: 4,
             supported_major: 2
+        }
+    ));
+}
+
+#[test]
+fn storage_mode_requires_backend_specific_fields() {
+    let local_missing_root = unique_test_root("storage-local-missing-path");
+    write_valid_fixture(&local_missing_root);
+    fs::write(
+        local_missing_root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"local-missing\"\n\n[storage]\nmode = \"local\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("local-missing root config should be writable");
+    let local_error = RootDefinitionBundle::load(&RootLayout::from_root(local_missing_root))
+        .expect_err("local mode without storage.local.database_path should fail");
+    assert!(matches!(
+        local_error,
+        ContractError::InvalidRootConfigField {
+            field: "root_config.storage.local.database_path",
+            ..
+        }
+    ));
+
+    let postgres_missing_root = unique_test_root("storage-postgres-missing-url");
+    write_valid_fixture(&postgres_missing_root);
+    fs::write(
+        postgres_missing_root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"postgres-missing\"\n\n[storage]\nmode = \"postgres\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("postgres-missing root config should be writable");
+    let postgres_error = RootDefinitionBundle::load(&RootLayout::from_root(postgres_missing_root))
+        .expect_err("postgres mode without storage.postgres.database_url should fail");
+    assert!(matches!(
+        postgres_error,
+        ContractError::InvalidRootConfigField {
+            field: "root_config.storage.postgres.database_url",
+            ..
         }
     ));
 }
@@ -267,7 +310,7 @@ fn write_valid_fixture(root: &Path) {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -306,7 +349,7 @@ fn write_valid_fixture_with_overrides(root: &Path) {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"override\"\n\n[paths]\nworkflows_dir = \"defs/workflow-pkgs\"\ntriggers_dir = \"defs/trigger-pkgs\"\nplugins_dir = \"shared/plugins\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime-state\"\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"override\"\n\n[paths]\nworkflows_dir = \"defs/workflow-pkgs\"\ntriggers_dir = \"defs/trigger-pkgs\"\nplugins_dir = \"shared/plugins\"\nsecrets_dir = \"vault\"\nstate_dir = \"runtime-state\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"runtime-state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -355,7 +398,7 @@ fn write_subflow_call_fixture(root: &Path) {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"subflow\"\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"subflow\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -399,7 +442,7 @@ fn write_valid_fixture_with_plugin_package(root: &Path) {
     fs::write(
         root.join("chainbot.toml"),
         &format!(
-            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n",
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"basic\"\nsecret_refs = [\"secret://ops/slack/webhook\"]\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
             env!("CARGO_PKG_VERSION")
         ),
     )
