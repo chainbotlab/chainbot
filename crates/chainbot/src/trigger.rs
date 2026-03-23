@@ -345,6 +345,7 @@ impl TriggerPlane {
                 backend: crate::config::RuntimeStorageBackend::Local {
                     database_path: state_layout.coordination_db_path,
                 },
+                history_retention: None,
                 raw_debug_enabled: false,
                 raw_debug_artifacts_dir: None,
             },
@@ -402,7 +403,7 @@ impl TriggerPlane {
                 for record in &delta_records {
                     snapshot.apply_record(record);
                 }
-                let _ = state_store.write_trigger_snapshot(&snapshot);
+                state_store.write_trigger_snapshot(&snapshot)?;
             }
 
             accepted_sequence = accepted_sequence.max(snapshot.last_sequence);
@@ -597,7 +598,7 @@ impl TriggerPlane {
             .read_trigger_snapshot(&definition.trigger_id)?
             .unwrap_or_else(|| TriggerSnapshotRecord::new(definition.trigger_id.clone()));
         snapshot.apply_record(&trigger_record);
-        let _ = self.state_store.write_trigger_snapshot(&snapshot);
+        self.state_store.write_trigger_snapshot(&snapshot)?;
         if let Some(checkpoint) = checkpoint {
             self.state_store
                 .write_trigger_checkpoint(&TriggerCheckpointRecord {

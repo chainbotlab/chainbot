@@ -2,7 +2,7 @@
 //! Process arguments, environment-resolved ChainBot roots, and runtime services from config, state, trigger, executor, worker, and secrets modules.
 //!
 //! [OUTPUT]
-//! Parses commands, executes help, init, status, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
+//! Parses commands, executes help, init, status, observe, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
 //!
 //! [ROLE]
 //! Owns the user-facing command boundary for the `chainbot` binary.
@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
@@ -21,17 +23,19 @@ use crate::builtins::{
 use crate::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
     LocalStorageDefinition, RawDebugArtifactsDefinition, RootConfigDefinition,
-    RootDefinitionBundle, RootLayout, RootPathOverrides, RuntimeStorageConfig, StorageDefinition,
-    StorageMode, TriggerToggleResult,
+    RootDefinitionBundle, RootLayout, RootPathOverrides, RuntimeHistoryRetentionDefinition,
+    RuntimeStorageConfig, StorageDefinition, StorageMode, TriggerToggleResult,
 };
 use crate::errors::UserFacingError;
 use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
 use crate::plugin::{PluginKind, PluginManifest};
 use crate::state::{
-    sanitize_path_component, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
-    ServeLeaseState, TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX,
+    sanitize_path_component, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState,
+    TriggerEventRecord, TriggerSnapshotRecord, WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
 };
-use crate::state_db::{RuntimeStateError, RuntimeStateStore};
+use crate::state_db::{
+    RuntimeDaemonStatus, RuntimeHistoryArchiveCounts, RuntimeStateError, RuntimeStateStore,
+};
 use crate::trigger::{
     TriggerDefinition, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
     REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
@@ -40,7 +44,14 @@ use crate::workflow::WorkflowDefinition;
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
 const SERVE_LEASE_RENEW_INTERVAL_MS: i64 = 10_000;
+const SERVE_IDLE_POLL_INTERVAL_MS: u64 = 250;
+const SERVE_ERROR_BACKOFF_MS: u64 = 1_000;
+const SERVE_START_ACK_TIMEOUT_MS: u64 = 5_000;
+const SERVE_STOP_TIMEOUT_MS: u64 = 5_000;
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
+const CHAINBOT_TEST_DAEMON_START_DELAY_MS_ENV: &str = "CHAINBOT_TEST_DAEMON_START_DELAY_MS";
+const CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS_ENV: &str =
+    "CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
 const INIT_MANIFEST_VERSION: &str = "2.0.0";
 const CHAINBOT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -110,10 +121,13 @@ pub enum CliCommand {
     Version,
     Init,
     Status,
+    Observe,
+    Stop,
     Trigger,
     Validate,
     Run,
     Serve,
+    InternalServeDaemon,
     ListRuns,
 }
 
@@ -123,6 +137,8 @@ pub enum HelpTopic {
     Version,
     Init,
     Status,
+    Observe,
+    Stop,
     Trigger,
     Validate,
     Run,
@@ -135,6 +151,8 @@ pub struct CliRequest {
     pub command: CliCommand,
     pub json_output: bool,
     pub trigger_operation: Option<TriggerOperation>,
+    pub observe_request: Option<ObserveRequest>,
+    pub daemon_owner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +165,13 @@ pub enum TriggerOperation {
     List,
     Enable { trigger_id: String },
     Disable { trigger_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserveRequest {
+    pub limit: usize,
+    pub trigger_id: Option<String>,
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -177,16 +202,23 @@ struct SingleRunResult {
 struct ServeLeaseSupervisor {
     storage_config: RuntimeStorageConfig,
     owner_id: String,
+    pid: i64,
     lease_ttl_ms: i64,
     renew_interval_ms: i64,
     next_renew_at_ms: i64,
 }
 
 impl ServeLeaseSupervisor {
-    fn new(storage_config: RuntimeStorageConfig, owner_id: String, acquired_at_ms: i64) -> Self {
+    fn new(
+        storage_config: RuntimeStorageConfig,
+        owner_id: String,
+        pid: i64,
+        acquired_at_ms: i64,
+    ) -> Self {
         Self {
             storage_config,
             owner_id,
+            pid,
             lease_ttl_ms: SERVE_LEASE_TTL_MS,
             renew_interval_ms: SERVE_LEASE_RENEW_INTERVAL_MS,
             next_renew_at_ms: acquired_at_ms.saturating_add(SERVE_LEASE_RENEW_INTERVAL_MS),
@@ -205,6 +237,14 @@ impl ServeLeaseSupervisor {
             .map_err(|error| map_runtime_state_error("renew serve lease", error))?
         {
             LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
+                store
+                    .heartbeat_daemon(
+                        &self.owner_id,
+                        Some(self.pid),
+                        now_ms,
+                        now_ms.saturating_add(self.lease_ttl_ms),
+                    )
+                    .map_err(|error| map_runtime_state_error("heartbeat daemon session", error))?;
                 self.next_renew_at_ms = now_ms.saturating_add(self.renew_interval_ms);
                 Ok(())
             }
@@ -237,7 +277,14 @@ struct StatusRootView {
 struct StatusServeView {
     state: ServeLeaseState,
     owner: Option<String>,
-    expires_at_ms: Option<i64>,
+    pid: Option<i64>,
+    started_at_ms: Option<i64>,
+    last_heartbeat_at_ms: Option<i64>,
+    lease_expires_at_ms: Option<i64>,
+    last_reload_at_ms: Option<i64>,
+    stop_requested_at_ms: Option<i64>,
+    last_error_code: Option<String>,
+    last_error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -266,6 +313,20 @@ struct StatusSummaryView {
     running_run_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ObserveOutput {
+    summary: ObserveSummaryView,
+    runs: Vec<RunRecordSummary>,
+    workflow_logs: Vec<WorkflowRuntimeLogEntry>,
+    trigger_events: Vec<TriggerEventRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ObserveSummaryView {
+    requested_limit: usize,
+    archived: RuntimeHistoryArchiveCounts,
+}
+
 pub fn run_from_env() -> Result<CliOutput, UserFacingError> {
     CliRequest::from_env()?.execute()
 }
@@ -292,20 +353,27 @@ impl CliRequest {
                 command: CliCommand::Help(HelpTopic::General),
                 json_output: false,
                 trigger_operation: None,
+                observe_request: None,
+                daemon_owner_id: None,
             }),
             "-V" | "--version" => Ok(Self {
                 command: CliCommand::Version,
                 json_output: false,
                 trigger_operation: None,
+                observe_request: None,
+                daemon_owner_id: None,
             }),
             "help" => Self::parse_help_args(args),
             "version" => Self::parse_command_args(CliCommand::Version, args),
             "init" => Self::parse_command_args(CliCommand::Init, args),
             "status" => Self::parse_command_args(CliCommand::Status, args),
+            "observe" => Self::parse_observe_args(args),
+            "stop" => Self::parse_command_args(CliCommand::Stop, args),
             "trigger" => Self::parse_trigger_args(args),
             "validate" => Self::parse_command_args(CliCommand::Validate, args),
             "run" => Self::parse_command_args(CliCommand::Run, args),
             "serve" => Self::parse_command_args(CliCommand::Serve, args),
+            "__serve-daemon" => Self::parse_internal_daemon_args(args),
             "list-runs" => Self::parse_command_args(CliCommand::ListRuns, args),
             other => Err(UserFacingError::usage(format!(
                 "{}",
@@ -320,10 +388,13 @@ impl CliRequest {
             CliCommand::Version => Ok(CliOutput::text(render_version_output())),
             CliCommand::Init => self.execute_init(),
             CliCommand::Status => self.execute_status(),
+            CliCommand::Observe => self.execute_observe(),
+            CliCommand::Stop => self.execute_stop(),
             CliCommand::Trigger => self.execute_trigger(),
             CliCommand::Validate => self.execute_validate(),
             CliCommand::Run => self.execute_run(),
             CliCommand::Serve => self.execute_serve(),
+            CliCommand::InternalServeDaemon => self.execute_internal_serve_daemon(),
             CliCommand::ListRuns => self.execute_list_runs(),
         }
     }
@@ -348,6 +419,8 @@ impl CliRequest {
             command: CliCommand::Help(topic),
             json_output: false,
             trigger_operation: None,
+            observe_request: None,
+            daemon_owner_id: None,
         })
     }
 
@@ -366,14 +439,18 @@ impl CliRequest {
                         command: CliCommand::Help(help_topic_for(command)),
                         json_output: false,
                         trigger_operation: None,
+                        observe_request: None,
+                        daemon_owner_id: None,
                     });
                 }
-                "--json" if matches!(command, CliCommand::Status) => {
+                "--json" if matches!(command, CliCommand::Status | CliCommand::Observe) => {
                     json_output = true;
                 }
                 _ => {
                     if let Some((flag, value)) = raw.split_once('=') {
-                        if flag == "--json" && matches!(command, CliCommand::Status) {
+                        if flag == "--json"
+                            && matches!(command, CliCommand::Status | CliCommand::Observe)
+                        {
                             json_output = parse_bool_flag_value(
                                 "--json",
                                 value,
@@ -397,6 +474,164 @@ impl CliRequest {
             command,
             json_output,
             trigger_operation: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        })
+    }
+
+    fn parse_internal_daemon_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let mut daemon_owner_id = None;
+        let mut position = 0usize;
+
+        while let Some(arg) = args.next() {
+            position += 1;
+            let raw = arg.to_string_lossy().into_owned();
+            match raw.as_str() {
+                "--owner-id" => {
+                    let Some(value) = args.next() else {
+                        return Err(UserFacingError::usage_with_code(
+                            "daemon_start_failed",
+                            "`chainbot __serve-daemon --owner-id` requires a daemon owner identifier.",
+                        ));
+                    };
+                    position += 1;
+                    daemon_owner_id = Some(value.to_string_lossy().into_owned());
+                }
+                _ => {
+                    if let Some((flag, value)) = raw.split_once('=') {
+                        if flag == "--owner-id" {
+                            daemon_owner_id = Some(value.to_owned());
+                            continue;
+                        }
+                    }
+
+                    return Err(UserFacingError::usage_with_code(
+                        "daemon_start_failed",
+                        format!(
+                            "Unexpected argument #{position} after `chainbot __serve-daemon`: `{raw}`."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let daemon_owner_id = daemon_owner_id.ok_or_else(|| {
+            UserFacingError::usage_with_code(
+                "daemon_start_failed",
+                "`chainbot __serve-daemon` requires `--owner-id <owner-id>`.",
+            )
+        })?;
+
+        Ok(Self {
+            command: CliCommand::InternalServeDaemon,
+            json_output: false,
+            trigger_operation: None,
+            observe_request: None,
+            daemon_owner_id: Some(daemon_owner_id),
+        })
+    }
+
+    fn parse_observe_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let mut json_output = false;
+        let mut limit = 10usize;
+        let mut trigger_id = None;
+        let mut run_id = None;
+        let mut position = 0usize;
+
+        while let Some(arg) = args.next() {
+            position += 1;
+            let raw = arg.to_string_lossy().into_owned();
+            match raw.as_str() {
+                "-h" | "--help" => {
+                    return Ok(Self {
+                        command: CliCommand::Help(HelpTopic::Observe),
+                        json_output: false,
+                        trigger_operation: None,
+                        observe_request: None,
+                        daemon_owner_id: None,
+                    });
+                }
+                "--json" => {
+                    json_output = true;
+                }
+                "--limit" => {
+                    let Some(value) = args.next() else {
+                        return Err(UserFacingError::usage(
+                            "`chainbot observe --limit` requires a positive integer value.",
+                        ));
+                    };
+                    position += 1;
+                    limit = parse_observe_limit(&value.to_string_lossy(), position)?;
+                }
+                "--trigger-id" => {
+                    let Some(value) = args.next() else {
+                        return Err(UserFacingError::usage(
+                            "`chainbot observe --trigger-id` requires a trigger identifier.",
+                        ));
+                    };
+                    position += 1;
+                    trigger_id = Some(value.to_string_lossy().into_owned());
+                }
+                "--run-id" => {
+                    let Some(value) = args.next() else {
+                        return Err(UserFacingError::usage(
+                            "`chainbot observe --run-id` requires a run identifier.",
+                        ));
+                    };
+                    position += 1;
+                    run_id = Some(value.to_string_lossy().into_owned());
+                }
+                _ => {
+                    if let Some((flag, value)) = raw.split_once('=') {
+                        match flag {
+                            "--json" => {
+                                json_output = parse_bool_flag_value(
+                                    "--json",
+                                    value,
+                                    position,
+                                    "chainbot observe",
+                                )?;
+                                continue;
+                            }
+                            "--limit" => {
+                                limit = parse_observe_limit(value, position)?;
+                                continue;
+                            }
+                            "--trigger-id" => {
+                                trigger_id = Some(value.to_owned());
+                                continue;
+                            }
+                            "--run-id" => {
+                                run_id = Some(value.to_owned());
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    return Err(UserFacingError::usage(format!(
+                        "Unexpected argument #{position} after `chainbot observe`: `{raw}`. Run `chainbot help observe` for valid forms."
+                    )));
+                }
+            }
+        }
+
+        Ok(Self {
+            command: CliCommand::Observe,
+            json_output,
+            trigger_operation: None,
+            observe_request: Some(ObserveRequest {
+                limit,
+                trigger_id,
+                run_id,
+            }),
+            daemon_owner_id: None,
         })
     }
 
@@ -415,6 +650,8 @@ impl CliRequest {
                 command: CliCommand::Help(HelpTopic::Trigger),
                 json_output: false,
                 trigger_operation: None,
+                observe_request: None,
+                daemon_owner_id: None,
             });
         }
 
@@ -452,6 +689,8 @@ impl CliRequest {
                 command: CliCommand::Trigger,
                 json_output,
                 trigger_operation: Some(TriggerOperation::List),
+                observe_request: None,
+                daemon_owner_id: None,
             });
         }
 
@@ -476,6 +715,8 @@ impl CliRequest {
                         command: CliCommand::Help(HelpTopic::Trigger),
                         json_output: false,
                         trigger_operation: None,
+                        observe_request: None,
+                        daemon_owner_id: None,
                     });
                 }
                 _ => {
@@ -506,6 +747,8 @@ impl CliRequest {
             } else {
                 TriggerOperation::Disable { trigger_id }
             }),
+            observe_request: None,
+            daemon_owner_id: None,
         })
     }
 
@@ -533,9 +776,9 @@ impl CliRequest {
         let trigger_snapshots = state_store
             .list_trigger_snapshots()
             .map_err(|error| map_runtime_state_error("load trigger snapshots", error))?;
-        let serve_lease = state_store
-            .inspect_serve_lease(observed_at_ms)
-            .map_err(|error| map_runtime_state_error("inspect serve lease", error))?;
+        let daemon_status = state_store
+            .inspect_daemon_status(observed_at_ms)
+            .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
 
         let payload = build_status_output(
             &root_layout,
@@ -544,7 +787,7 @@ impl CliRequest {
             &definitions.triggers,
             &run_summaries,
             &trigger_snapshots,
-            serve_lease,
+            daemon_status,
         );
 
         if self.json_output {
@@ -555,6 +798,53 @@ impl CliRequest {
         }
 
         Ok(CliOutput::text(render_status_output(&payload)))
+    }
+
+    fn execute_observe(&self) -> Result<CliOutput, UserFacingError> {
+        let root_layout = self.resolve_existing_root()?;
+        let definitions =
+            RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&root_layout.root)
+            .map_err(UserFacingError::from_contract)?;
+        let mut state_store = RuntimeStateStore::open(&storage_config, current_time_ms()?)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        let observe_request = self.observe_request.as_ref().ok_or_else(|| {
+            UserFacingError::usage("Missing observe request. Run `chainbot help observe`.")
+        })?;
+        let payload = ObserveOutput {
+            summary: ObserveSummaryView {
+                requested_limit: observe_request.limit,
+                archived: state_store.archived_history_counts().map_err(|error| {
+                    map_runtime_state_error("count archived runtime history", error)
+                })?,
+            },
+            runs: state_store
+                .list_recent_run_summaries(observe_request.limit)
+                .map_err(|error| map_runtime_state_error("list recent run summaries", error))?,
+            workflow_logs: state_store
+                .list_recent_workflow_log_entries(
+                    observe_request.limit,
+                    observe_request.run_id.as_deref(),
+                )
+                .map_err(|error| map_runtime_state_error("list recent workflow logs", error))?,
+            trigger_events: state_store
+                .list_recent_trigger_records(
+                    observe_request.limit,
+                    observe_request.trigger_id.as_deref(),
+                )
+                .map_err(|error| map_runtime_state_error("list recent trigger events", error))?,
+        };
+
+        if self.json_output {
+            let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                UserFacingError::state(format!("Failed to serialize observe payload: {source}"))
+            })?;
+            return Ok(CliOutput::text(stdout));
+        }
+
+        Ok(CliOutput::text(render_observe_output(&payload)))
     }
 
     fn execute_validate(&self) -> Result<CliOutput, UserFacingError> {
@@ -645,10 +935,16 @@ impl CliRequest {
     }
 
     fn execute_serve(&self) -> Result<CliOutput, UserFacingError> {
-        let mut runtime = self.load_runtime_context()?;
+        let root_layout = self.resolve_existing_root()?;
+        let definitions =
+            RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&root_layout.root)
+            .map_err(UserFacingError::from_contract)?;
         let now_ms = current_time_ms()?;
-        let owner_id = format!("{SERVE_OWNER_ID_PREFIX}{}", std::process::id());
-        let mut store = RuntimeStateStore::open(&runtime.storage_config, now_ms)
+        let owner_id = format!("{SERVE_OWNER_ID_PREFIX}{}-{now_ms}", std::process::id());
+        let mut store = RuntimeStateStore::open(&storage_config, now_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
 
         match store
@@ -656,29 +952,176 @@ impl CliRequest {
             .map_err(|error| map_runtime_state_error("acquire serve lease", error))?
         {
             LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
-                let mut lease_supervisor = ServeLeaseSupervisor::new(
-                    runtime.storage_config.clone(),
-                    owner_id.clone(),
-                    now_ms,
-                );
-                let run_result = serve_once_with_lease(&mut runtime, now_ms, &mut lease_supervisor);
-                let released = store
-                    .release_serve_lease(&owner_id)
-                    .map_err(|error| map_runtime_state_error("release serve lease", error))?;
-                if !released {
-                    return Err(UserFacingError::state(
-                        "Failed to release serve lease for current owner.",
+                store
+                    .register_daemon_start(&owner_id, None, now_ms, now_ms + SERVE_LEASE_TTL_MS)
+                    .map_err(|error| map_runtime_state_error("register daemon start", error))?;
+                let mut child = match spawn_serve_daemon_process(&owner_id) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        let cleanup_at_ms = current_time_ms().unwrap_or(now_ms);
+                        let _ = store.mark_daemon_stopped(&owner_id, cleanup_at_ms);
+                        let _ = store.release_serve_lease(&owner_id);
+                        return Err(error);
+                    }
+                };
+                if !store
+                    .attach_daemon_pid(&owner_id, i64::from(child.id()))
+                    .map_err(|error| map_runtime_state_error("attach daemon pid", error))?
+                {
+                    let cleanup_at_ms = current_time_ms().unwrap_or(now_ms);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = store.mark_daemon_stopped(&owner_id, cleanup_at_ms);
+                    let _ = store.release_serve_lease(&owner_id);
+                    return Err(UserFacingError::state_with_code(
+                        "daemon_start_failed",
+                        "The daemon session disappeared before the child PID could be recorded.",
                     ));
                 }
-                run_result
+                wait_for_daemon_start(&storage_config, &owner_id, child.id(), now_ms)
+                    .or_else(|error| {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let cleanup_at_ms = current_time_ms().unwrap_or(now_ms);
+                        let _ = store.mark_daemon_stopped(&owner_id, cleanup_at_ms);
+                        let _ = store.release_serve_lease(&owner_id);
+                        Err(error)
+                    })?;
+                Ok(CliOutput::text(format!(
+                    "serve started: owner={} pid={} root={}\nuse `chainbot status --json` for health and `chainbot observe` for persisted runtime output",
+                    owner_id,
+                    child.id(),
+                    root_layout.root.display()
+                )))
             }
             LeaseAcquireResult::Rejected {
                 current_owner,
                 expires_at_ms,
-            } => Err(UserFacingError::conflict(format!(
+            } => Err(UserFacingError::conflict_with_code("daemon_already_running", format!(
                 "Serve is already active for this root (owner: {current_owner}, expires_at_ms: {expires_at_ms})."
             ))),
         }
+    }
+
+    fn execute_stop(&self) -> Result<CliOutput, UserFacingError> {
+        let root_layout = self.resolve_existing_root()?;
+        let definitions =
+            RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&root_layout.root)
+            .map_err(UserFacingError::from_contract)?;
+        let now_ms = current_time_ms()?;
+        let mut store = RuntimeStateStore::open(&storage_config, now_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        let status = store
+            .inspect_daemon_status(now_ms)
+            .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
+
+        match status.state {
+            ServeLeaseState::Idle => {
+                return Ok(CliOutput::text("stop completed: no active daemon"));
+            }
+            ServeLeaseState::Stale => {
+                if let Some(owner_id) = status.owner_id.as_deref() {
+                    let _ = store.mark_daemon_stopped(owner_id, now_ms);
+                    let _ = store.release_serve_lease(owner_id);
+                }
+                return Ok(CliOutput::text(
+                    "stop completed: stale daemon state cleaned up",
+                ));
+            }
+            ServeLeaseState::Active => {}
+        }
+
+        if !store
+            .request_daemon_stop(now_ms)
+            .map_err(|error| map_runtime_state_error("request daemon stop", error))?
+        {
+            if let Some(owner_id) = status.owner_id.as_deref() {
+                let _ = store.mark_daemon_stopped(owner_id, now_ms);
+                let _ = store.release_serve_lease(owner_id);
+                return Ok(CliOutput::text("stop completed: active lease cleared"));
+            }
+            return Ok(CliOutput::text("stop completed: no active daemon"));
+        }
+
+        wait_for_daemon_stop(&storage_config)?;
+        Ok(CliOutput::text("stop completed: daemon shutdown requested"))
+    }
+
+    fn execute_internal_serve_daemon(&self) -> Result<CliOutput, UserFacingError> {
+        let owner_id = self.daemon_owner_id.clone().ok_or_else(|| {
+            UserFacingError::state_with_code(
+                "daemon_start_failed",
+                "Internal daemon start is missing the daemon owner identifier.",
+            )
+        })?;
+        let now_ms = current_time_ms()?;
+        let root_layout = self.resolve_existing_root()?;
+        let definitions =
+            RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+        let storage_config = definitions
+            .root_config
+            .resolve_runtime_storage(&root_layout.root)
+            .map_err(UserFacingError::from_contract)?;
+        let pid = i64::from(std::process::id());
+
+        {
+            let mut store = RuntimeStateStore::open(&storage_config, now_ms)
+                .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+            let status = store
+                .inspect_daemon_status(now_ms)
+                .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
+            if status.owner_id.as_deref() != Some(owner_id.as_str()) {
+                return Ok(CliOutput::text(String::new()));
+            }
+            if status.stop_requested_at_ms.is_some() {
+                return Ok(CliOutput::text(String::new()));
+            }
+            maybe_delay_daemon_start_for_tests()?;
+            let status = store
+                .inspect_daemon_status(current_time_ms()?)
+                .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
+            if status.owner_id.as_deref() != Some(owner_id.as_str()) {
+                return Ok(CliOutput::text(String::new()));
+            }
+            if status.stop_requested_at_ms.is_some() {
+                return Ok(CliOutput::text(String::new()));
+            }
+            let acked_at_ms = status
+                .started_at_ms
+                .map(|started_at_ms| {
+                    current_time_ms()
+                        .unwrap_or(now_ms)
+                        .max(started_at_ms.saturating_add(1))
+                })
+                .unwrap_or_else(|| current_time_ms().unwrap_or(now_ms));
+            store
+                .heartbeat_daemon(
+                    &owner_id,
+                    Some(pid),
+                    acked_at_ms,
+                    acked_at_ms + SERVE_LEASE_TTL_MS,
+                )
+                .map_err(|error| map_runtime_state_error("acknowledge daemon start", error))?;
+            if store
+                .daemon_stop_requested(&owner_id)
+                .map_err(|error| map_runtime_state_error("inspect daemon stop request", error))?
+            {
+                return Ok(CliOutput::text(String::new()));
+            }
+        }
+
+        let loop_result = run_internal_serve_daemon_loop(self, &storage_config, &owner_id, pid);
+        let stopped_at_ms = current_time_ms().unwrap_or(now_ms);
+        if let Ok(mut store) = RuntimeStateStore::open(&storage_config, stopped_at_ms) {
+            let _ = store.mark_daemon_stopped(&owner_id, stopped_at_ms);
+            let _ = store.release_serve_lease(&owner_id);
+        }
+
+        loop_result?;
+        Ok(CliOutput::text(String::new()))
     }
 
     fn resolve_existing_root(&self) -> Result<RootLayout, UserFacingError> {
@@ -719,6 +1162,13 @@ impl CliRequest {
         let _ = state_store
             .recover_runtime_state(recovered_at_ms)
             .map_err(|error| map_runtime_state_error("recover runtime state", error))?;
+        if let Some(policy) = storage_config.history_retention.as_ref() {
+            let _ = state_store
+                .apply_history_retention(policy, recovered_at_ms)
+                .map_err(|error| {
+                    map_runtime_state_error("apply runtime history retention", error)
+                })?;
+        }
 
         Ok(RuntimeContext {
             root_layout,
@@ -784,6 +1234,8 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
         "version" => Ok(HelpTopic::Version),
         "init" => Ok(HelpTopic::Init),
         "status" => Ok(HelpTopic::Status),
+        "observe" => Ok(HelpTopic::Observe),
+        "stop" => Ok(HelpTopic::Stop),
         "trigger" => Ok(HelpTopic::Trigger),
         "validate" => Ok(HelpTopic::Validate),
         "run" => Ok(HelpTopic::Run),
@@ -801,10 +1253,13 @@ fn help_topic_for(command: CliCommand) -> HelpTopic {
         CliCommand::Version => HelpTopic::Version,
         CliCommand::Init => HelpTopic::Init,
         CliCommand::Status => HelpTopic::Status,
+        CliCommand::Observe => HelpTopic::Observe,
+        CliCommand::Stop => HelpTopic::Stop,
         CliCommand::Trigger => HelpTopic::Trigger,
         CliCommand::Validate => HelpTopic::Validate,
         CliCommand::Run => HelpTopic::Run,
         CliCommand::Serve => HelpTopic::Serve,
+        CliCommand::InternalServeDaemon => HelpTopic::Serve,
         CliCommand::ListRuns => HelpTopic::ListRuns,
     }
 }
@@ -815,10 +1270,13 @@ fn command_name(command: CliCommand) -> &'static str {
         CliCommand::Version => "version",
         CliCommand::Init => "init",
         CliCommand::Status => "status",
+        CliCommand::Observe => "observe",
+        CliCommand::Stop => "stop",
         CliCommand::Trigger => "trigger",
         CliCommand::Validate => "validate",
         CliCommand::Run => "run",
         CliCommand::Serve => "serve",
+        CliCommand::InternalServeDaemon => "__serve-daemon",
         CliCommand::ListRuns => "list-runs",
     }
 }
@@ -891,6 +1349,8 @@ fn general_help_text() -> String {
             "chainbot version",
             "chainbot init",
             "chainbot status [--json]",
+            "chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]",
+            "chainbot stop",
             "chainbot trigger list [--json]",
             "chainbot trigger <enable|disable> <trigger-id>",
             "chainbot validate",
@@ -915,11 +1375,13 @@ fn general_help_text() -> String {
             "version    Print the running ChainBot version.",
             "init       Bootstrap a minimal ChainBot root.",
             "status     Inspect runtime state without executing workflows.",
+            "observe    Inspect persisted trigger events, workflow logs, and runs.",
+            "stop       Request graceful daemon shutdown.",
             "trigger    Inspect or persist trigger package state.",
             "validate   Validate config and package contracts.",
             "list-runs  Print persisted run summaries as JSON.",
             "run        Execute one single-shot manual run.",
-            "serve      Drain one trigger snapshot under a serve lease.",
+            "serve      Start the background daemon control plane.",
         ],
     );
     push_help_list_section(
@@ -929,6 +1391,7 @@ fn general_help_text() -> String {
             "start with `chainbot help <command>` before generating automation around a command",
             GENERAL_HELP_EXAMPLE_HINT,
             "prefer `chainbot status --json` and `chainbot trigger list --json` for machine-readable snapshots",
+            "use `chainbot observe --json` when an agent needs recent persisted events or logs",
         ],
     );
     lines.join("\n")
@@ -1025,6 +1488,75 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot status --json",
             ],
             &["validate", "list-runs", "serve"],
+        ),
+        HelpTopic::Observe => render_help_card(
+            "observe",
+            "Inspect persisted trigger events, workflow logs, and run history",
+            &[
+                "chainbot observe",
+                "chainbot observe --json",
+                "chainbot observe --limit 20 --trigger-id tr-market",
+                "chainbot observe --run-id manual-wf-alpha-1710000000000",
+            ],
+            &[
+                "you need the recent persisted trigger-event stream without opening the database manually",
+                "you want workflow log lines and run summaries that agree with runtime history",
+                "you need to see whether older data has already moved into archive tables",
+            ],
+            &[
+                "persisted run summaries",
+                "persisted workflow runtime logs",
+                "persisted trigger event records",
+                "archive table counts when retention is enabled",
+            ],
+            &[],
+            &["workflow execution", "trigger collection", "runtime recovery"],
+            &[
+                "prints recent runs, workflow logs, trigger events, and archive counts",
+                "supports JSON output for automation and optional trigger/run filters",
+            ],
+            &[
+                "resolve root config before reading runtime history",
+                "respect the configured runtime storage backend without mutating active history",
+            ],
+            &[],
+            &[
+                "invalid `--limit` values are rejected with the exact argv position",
+                "storage read failures surface as state errors without partial output",
+            ],
+            &[
+                "chainbot observe",
+                "chainbot observe --json --limit 5",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot observe --trigger-id tr-market",
+            ],
+            &["status", "list-runs", "serve"],
+        ),
+        HelpTopic::Stop => render_help_card(
+            "stop",
+            "Request graceful daemon shutdown",
+            &["chainbot stop"],
+            &[
+                "you want the running daemon to stop without using kill manually",
+                "you need an operator-safe lifecycle command for automation",
+            ],
+            &["persisted daemon session state"],
+            &["persisted daemon stop request state"],
+            &[],
+            &[
+                "prints whether a shutdown was requested or no daemon was running",
+                "waits briefly for the daemon to release its lease",
+            ],
+            &[
+                "resolve root config before inspecting or updating daemon state",
+                "return success when the daemon is already inactive or stale",
+            ],
+            &[],
+            &[
+                "timeout paths surface a stable daemon stop error code",
+                "invalid root config is reported before any stop request is written",
+            ],
+            &["chainbot stop", "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot stop"],
+            &["serve", "status", "observe"],
         ),
         HelpTopic::Trigger => render_help_card(
             "trigger",
@@ -1171,12 +1703,12 @@ fn help_text(topic: HelpTopic) -> String {
         ),
         HelpTopic::Serve => render_help_card(
             "serve",
-            "Drain one trigger snapshot under a serve lease",
+            "Start the background daemon control plane",
             &["chainbot serve"],
             &[
-                "you want to evaluate configured triggers once",
-                "you need runtime recovery plus duplicate-suppression coordination",
-                "you want accepted trigger events normalized into workflow runs",
+                "you want a long-running daemon that keeps trigger evaluation active",
+                "you need a stable control-plane entrypoint for automation",
+                "you want `status --json` and `observe` to read persisted daemon truth",
             ],
             &[
                 "configured root config",
@@ -1193,26 +1725,26 @@ fn help_text(topic: HelpTopic) -> String {
             ],
             &[],
             &[
-                "prints accepted trigger-event count and each resulting run on success",
-                "returns conflict errors when another serve owner holds the lease",
+                "prints a start acknowledgement with daemon owner information",
+                "returns conflict errors when another daemon already holds the lease",
             ],
             &[
-                "acquire a serve lease before evaluating the trigger snapshot",
-                "load trigger packages and plugin manifests from the canonical root layout",
+                "acquire the daemon lease before spawning the background child",
+                "the daemon reloads config and evaluates triggers on loop boundaries",
             ],
             &[
                 ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
                 ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
             ],
             &[
-                "lease acquisition failures include the current owner and expiry",
-                "trigger/config decode failures report the owning file before any execution starts",
+                "conflict paths expose a stable daemon-already-running error code",
+                "daemon start failures release the preflight lease before returning",
             ],
             &[
                 "chainbot serve",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot serve",
             ],
-            &["status", "validate", "list-runs"],
+            &["status", "observe", "stop"],
         ),
     }
 }
@@ -1228,7 +1760,7 @@ fn build_status_output(
     triggers: &[TriggerDefinition],
     run_summaries: &[RunRecordSummary],
     trigger_snapshots: &[TriggerSnapshotRecord],
-    serve_lease: ServeLeaseSnapshot,
+    daemon_status: RuntimeDaemonStatus,
 ) -> StatusOutput {
     let mut latest_runs = BTreeMap::<String, RunRecordSummary>::new();
     for summary in run_summaries {
@@ -1279,9 +1811,16 @@ fn build_status_output(
             profile,
         },
         serve: StatusServeView {
-            state: serve_lease.state,
-            owner: serve_lease.owner_id,
-            expires_at_ms: serve_lease.expires_at_ms,
+            state: daemon_status.state,
+            owner: daemon_status.owner_id,
+            pid: daemon_status.pid,
+            started_at_ms: daemon_status.started_at_ms,
+            last_heartbeat_at_ms: daemon_status.last_heartbeat_at_ms,
+            lease_expires_at_ms: daemon_status.lease_expires_at_ms,
+            last_reload_at_ms: daemon_status.last_reload_at_ms,
+            stop_requested_at_ms: daemon_status.stop_requested_at_ms,
+            last_error_code: daemon_status.last_error_code,
+            last_error_message: daemon_status.last_error_message,
         },
         workflows: workflow_views,
         triggers: trigger_views,
@@ -1311,8 +1850,35 @@ fn render_status_output(status: &StatusOutput) -> String {
     if let Some(owner) = &status.serve.owner {
         lines.push(format!("  serve_owner: {owner}"));
     }
-    if let Some(expires_at_ms) = status.serve.expires_at_ms {
-        lines.push(format!("  serve_expires_at_ms: {expires_at_ms}"));
+    if let Some(pid) = status.serve.pid {
+        lines.push(format!("  serve_pid: {pid}"));
+    }
+    if let Some(started_at_ms) = status.serve.started_at_ms {
+        lines.push(format!("  serve_started_at_ms: {started_at_ms}"));
+    }
+    if let Some(last_heartbeat_at_ms) = status.serve.last_heartbeat_at_ms {
+        lines.push(format!(
+            "  serve_last_heartbeat_at_ms: {last_heartbeat_at_ms}"
+        ));
+    }
+    if let Some(lease_expires_at_ms) = status.serve.lease_expires_at_ms {
+        lines.push(format!(
+            "  serve_lease_expires_at_ms: {lease_expires_at_ms}"
+        ));
+    }
+    if let Some(last_reload_at_ms) = status.serve.last_reload_at_ms {
+        lines.push(format!("  serve_last_reload_at_ms: {last_reload_at_ms}"));
+    }
+    if let Some(stop_requested_at_ms) = status.serve.stop_requested_at_ms {
+        lines.push(format!(
+            "  serve_stop_requested_at_ms: {stop_requested_at_ms}"
+        ));
+    }
+    if let Some(last_error_code) = &status.serve.last_error_code {
+        lines.push(format!("  serve_last_error_code: {last_error_code}"));
+    }
+    if let Some(last_error_message) = &status.serve.last_error_message {
+        lines.push(format!("  serve_last_error_message: {last_error_message}"));
     }
 
     lines.push(String::from("Workflows"));
@@ -1365,6 +1931,67 @@ fn render_status_output(status: &StatusOutput) -> String {
     lines.join("\n")
 }
 
+fn render_observe_output(output: &ObserveOutput) -> String {
+    let mut lines = vec![
+        String::from("Observe"),
+        format!("  requested_limit: {}", output.summary.requested_limit),
+        format!(
+            "  archived_runs: {} archived_logs: {} archived_trigger_events: {}",
+            output.summary.archived.run_summaries,
+            output.summary.archived.workflow_logs,
+            output.summary.archived.trigger_events
+        ),
+        String::new(),
+        String::from("Runs"),
+    ];
+
+    if output.runs.is_empty() {
+        lines.push(String::from("  none"));
+    } else {
+        for run in &output.runs {
+            lines.push(format!(
+                "  {}  workflow={}  status={}  started_at_ms={}",
+                run.run_id,
+                run.workflow_id,
+                render_run_status(run.status),
+                run.started_at_ms
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(String::from("Workflow Logs"));
+    if output.workflow_logs.is_empty() {
+        lines.push(String::from("  none"));
+    } else {
+        for entry in &output.workflow_logs {
+            lines.push(format!(
+                "  {}#{}  {}  occurred_at_ms={}  {}",
+                entry.run_id, entry.sequence, entry.event, entry.occurred_at_ms, entry.message
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(String::from("Trigger Events"));
+    if output.trigger_events.is_empty() {
+        lines.push(String::from("  none"));
+    } else {
+        for event in &output.trigger_events {
+            lines.push(format!(
+                "  {}#{}  workflow={}  event_id={}  accepted_at_ms={}",
+                event.trigger_id,
+                event.sequence,
+                event.workflow_id,
+                event.event_id,
+                event.accepted_at_ms
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn run_summary_is_newer(candidate: &RunRecordSummary, current: &RunRecordSummary) -> bool {
     (
         candidate.started_at_ms,
@@ -1400,6 +2027,20 @@ fn parse_bool_flag_value(
     }
 }
 
+fn parse_observe_limit(value: &str, position: usize) -> Result<usize, UserFacingError> {
+    let parsed = value.parse::<usize>().map_err(|_| {
+        UserFacingError::usage(format!(
+            "Unsupported --limit value at argument #{position} after `chainbot observe`: `{value}`. Use a positive integer."
+        ))
+    })?;
+    if parsed == 0 {
+        return Err(UserFacingError::usage(format!(
+            "Unsupported --limit value at argument #{position} after `chainbot observe`: `{value}`. Use a positive integer."
+        )));
+    }
+    Ok(parsed)
+}
+
 fn unsupported_command_message(value: &str) -> String {
     match suggest_command(value) {
         Some(suggestion) => format!(
@@ -1424,6 +2065,7 @@ fn suggest_command(value: &str) -> Option<&'static str> {
         "help",
         "version",
         "status",
+        "observe",
         "init",
         "trigger",
         "validate",
@@ -1672,6 +2314,7 @@ fn default_root_config() -> RootConfigDefinition {
                 database_path: Some(String::from("state/runtime.sqlite3")),
             }),
             postgres: None,
+            retention: RuntimeHistoryRetentionDefinition::default(),
             raw_debug: RawDebugArtifactsDefinition::default(),
         },
     }
@@ -1704,6 +2347,26 @@ fn current_time_ms() -> Result<i64, UserFacingError> {
         UserFacingError::state("System clock is before UNIX_EPOCH; cannot continue.")
     })?;
     Ok(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn serve_start_ack_timeout_ms() -> u64 {
+    std::env::var(CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(SERVE_START_ACK_TIMEOUT_MS)
+}
+
+fn maybe_delay_daemon_start_for_tests() -> Result<(), UserFacingError> {
+    let Some(delay_ms) = std::env::var(CHAINBOT_TEST_DAEMON_START_DELAY_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    else {
+        return Ok(());
+    };
+    thread::sleep(std::time::Duration::from_millis(delay_ms));
+    Ok(())
 }
 
 fn map_runtime_state_error(action: &str, error: RuntimeStateError) -> UserFacingError {
@@ -1760,6 +2423,150 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), std
     }
 
     Ok(())
+}
+
+fn spawn_serve_daemon_process(owner_id: &str) -> Result<std::process::Child, UserFacingError> {
+    std::process::Command::new(std::env::current_exe().map_err(|source| {
+        UserFacingError::state_with_code(
+            "daemon_start_failed",
+            format!("Failed to resolve the running chainbot binary for daemon spawn: {source}"),
+        )
+    })?)
+    .args(["__serve-daemon", "--owner-id", owner_id])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .map_err(|source| {
+        UserFacingError::state_with_code(
+            "daemon_start_failed",
+            format!("Failed to spawn the background daemon process: {source}"),
+        )
+    })
+}
+
+fn wait_for_daemon_start(
+    storage_config: &RuntimeStorageConfig,
+    owner_id: &str,
+    child_pid: u32,
+    started_at_ms: i64,
+) -> Result<(), UserFacingError> {
+    let deadline_ms = started_at_ms.saturating_add(serve_start_ack_timeout_ms() as i64);
+    while current_time_ms()? <= deadline_ms {
+        let observed_at_ms = current_time_ms()?;
+        let mut store = RuntimeStateStore::open(storage_config, observed_at_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        let daemon_status = store
+            .inspect_daemon_status(observed_at_ms)
+            .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
+        if daemon_status.owner_id.as_deref() == Some(owner_id)
+            && daemon_status.pid == Some(i64::from(child_pid))
+            && daemon_status.started_at_ms == Some(started_at_ms)
+            && daemon_status
+                .last_heartbeat_at_ms
+                .is_some_and(|heartbeat_at_ms| heartbeat_at_ms > started_at_ms)
+        {
+            return Ok(());
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    Err(UserFacingError::unavailable_with_code(
+        "daemon_start_failed",
+        "The background daemon did not become observable before the start acknowledgement timeout.",
+    ))
+}
+
+fn wait_for_daemon_stop(storage_config: &RuntimeStorageConfig) -> Result<(), UserFacingError> {
+    let started_wait_ms = current_time_ms()?;
+    let deadline_ms = started_wait_ms.saturating_add(SERVE_STOP_TIMEOUT_MS as i64);
+    while current_time_ms()? <= deadline_ms {
+        let observed_at_ms = current_time_ms()?;
+        let mut store = RuntimeStateStore::open(storage_config, observed_at_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        let daemon_status = store
+            .inspect_daemon_status(observed_at_ms)
+            .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
+        if daemon_status.state == ServeLeaseState::Idle {
+            return Ok(());
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    Err(UserFacingError::unavailable_with_code(
+        "daemon_stop_timeout",
+        "Timed out while waiting for the daemon to stop gracefully.",
+    ))
+}
+
+fn run_internal_serve_daemon_loop(
+    request: &CliRequest,
+    storage_config: &RuntimeStorageConfig,
+    owner_id: &str,
+    pid: i64,
+) -> Result<(), UserFacingError> {
+    let mut lease_supervisor = ServeLeaseSupervisor::new(
+        storage_config.clone(),
+        owner_id.to_owned(),
+        pid,
+        current_time_ms()?,
+    );
+
+    loop {
+        let observed_at_ms = current_time_ms()?;
+        let mut control_store = RuntimeStateStore::open(storage_config, observed_at_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        if control_store
+            .daemon_stop_requested(owner_id)
+            .map_err(|error| map_runtime_state_error("inspect daemon stop request", error))?
+        {
+            return Ok(());
+        }
+
+        lease_supervisor.maybe_renew(observed_at_ms)?;
+
+        let mut runtime = match request.load_runtime_context() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
+                    .map_err(|open_error| {
+                    map_runtime_state_error("open runtime state store", open_error)
+                })?;
+                error_store
+                    .record_daemon_error(owner_id, error.error_code(), &error.to_string())
+                    .map_err(|store_error| {
+                        map_runtime_state_error("record daemon error", store_error)
+                    })?;
+                thread::sleep(std::time::Duration::from_millis(SERVE_ERROR_BACKOFF_MS));
+                continue;
+            }
+        };
+        let mut iteration_store = RuntimeStateStore::open(&runtime.storage_config, observed_at_ms)
+            .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
+        iteration_store
+            .mark_daemon_reload(owner_id, observed_at_ms)
+            .map_err(|error| map_runtime_state_error("mark daemon reload", error))?;
+
+        match serve_once_with_lease(&mut runtime, observed_at_ms, &mut lease_supervisor) {
+            Ok(_) => {
+                thread::sleep(std::time::Duration::from_millis(
+                    SERVE_IDLE_POLL_INTERVAL_MS,
+                ));
+            }
+            Err(error) => {
+                let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
+                    .map_err(|open_error| {
+                    map_runtime_state_error("open runtime state store", open_error)
+                })?;
+                error_store
+                    .record_daemon_error(owner_id, error.error_code(), &error.to_string())
+                    .map_err(|store_error| {
+                        map_runtime_state_error("record daemon error", store_error)
+                    })?;
+                thread::sleep(std::time::Duration::from_millis(SERVE_ERROR_BACKOFF_MS));
+            }
+        }
+    }
 }
 
 fn serve_once_with_lease(
@@ -2107,6 +2914,8 @@ mod tests {
             command: CliCommand::Serve,
             json_output: false,
             trigger_operation: None,
+            observe_request: None,
+            daemon_owner_id: None,
         };
 
         unsafe {
@@ -2129,6 +2938,7 @@ mod tests {
         let mut lease_supervisor = ServeLeaseSupervisor::new(
             runtime.storage_config.clone(),
             String::from("test-owner"),
+            i64::from(std::process::id()),
             1_710_300_000_000,
         );
         let serve_output =
@@ -2173,6 +2983,8 @@ mod tests {
             command: CliCommand::Serve,
             json_output: false,
             trigger_operation: None,
+            observe_request: None,
+            daemon_owner_id: None,
         };
 
         unsafe {
@@ -2186,6 +2998,7 @@ mod tests {
         let mut lease_supervisor = ServeLeaseSupervisor::new(
             runtime.storage_config.clone(),
             String::from("test-owner"),
+            i64::from(std::process::id()),
             1_710_300_100_000,
         );
         let serve_output =
@@ -2221,6 +3034,7 @@ mod tests {
             backend: crate::config::RuntimeStorageBackend::Local {
                 database_path: root.join("state").join("runtime.sqlite3"),
             },
+            history_retention: None,
             raw_debug_enabled: false,
             raw_debug_artifacts_dir: None,
         };
@@ -2236,6 +3050,7 @@ mod tests {
         let mut supervisor = ServeLeaseSupervisor::new(
             storage_config,
             String::from("owner-renew"),
+            i64::from(std::process::id()),
             1_710_300_200_000,
         );
         supervisor
@@ -2265,6 +3080,22 @@ mod tests {
             .join("e2e")
             .join(case_name);
         copy_directory_recursive(&source, &root).expect("fixture root should copy");
+        let root_config_path = root.join("chainbot.toml");
+        let root_config = fs::read_to_string(&root_config_path)
+            .expect("copied fixture root config should be readable");
+        let updated_root_config = root_config
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("chainbot_version = ") {
+                    format!("chainbot_version = \"{}\"", CHAINBOT_VERSION)
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&root_config_path, format!("{updated_root_config}\n"))
+            .expect("fixture root config should be rewritten with the running version");
 
         make_executable(&root.join("plugins").join("bin").join("external_trigger.sh"));
         make_executable(&root.join("plugins").join("bin").join("external_node.sh"));

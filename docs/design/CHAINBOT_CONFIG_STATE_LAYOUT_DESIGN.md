@@ -113,11 +113,15 @@ Manifest and executable locality are part of the package contract.
 - `trigger_checkpoints`
 - `trigger_snapshots`（derived read model）
 - `serve_leases`
+- `archived_run_summaries`
+- `archived_workflow_runtime_logs`
+- `archived_trigger_event_records`
 
 其中：
 
 - `run_summaries` 与 `trigger_event_records` 是 run/trigger history 的主权威来源
 - `trigger_snapshots` 是可由 accepted records 重建的 read model
+- archived tables 保留超出 retention window 的 durable history，不再参与热路径 `status` / `observe` 最近窗口查询
 - raw debug artifact 不参与正确性判定
 
 ## State Invariants
@@ -125,9 +129,11 @@ Manifest and executable locality are part of the package contract.
 - run summaries are authoritative for persisted run status
 - workflow runtime logs remain append-only by `(run_id, sequence)`
 - trigger event records remain append-only by `(trigger_id, sequence)`
+- archived runtime tables remain append-only by `(archived_at_ms, primary identity...)`
 - trigger checkpoints remain the last acknowledged trigger progress
 - trigger snapshots remain derived, replaceable state
 - trigger dedup and cooldown decisions must remain restart-safe from persisted trigger history
+- retention may move old history into archive tables, but must not silently drop the most recent retained observation window
 
 ## Discovery Rules
 

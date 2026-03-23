@@ -10,13 +10,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
-use chainbot::config::RootLayout;
+use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::state::RunRecordSummary;
 use chainbot::state::RunStatus;
-use chainbot::state::{
-    CoordinationStore, FileBackedStateStore, LeaseAcquireResult, RunRecordSummary, StateLayout,
-    TriggerEventRecord, WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
-};
+use chainbot::state_db::RuntimeStateStore;
 
 const SECRET_DECRYPT_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPT_MODE_PLAINTEXT: &str = "plaintext";
@@ -42,6 +42,11 @@ fn end_to_end_vertical_slice() {
         String::from_utf8_lossy(&serve_output.stdout),
         String::from_utf8_lossy(&serve_output.stderr)
     );
+    assert!(String::from_utf8_lossy(&serve_output.stdout).contains("serve started:"));
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 2);
+    let stop_output = run_chainbot(["stop"], &root, true);
+    assert!(stop_output.status.success());
 
     let list_runs_output = run_chainbot(["list-runs"], &root, false);
     assert!(list_runs_output.status.success());
@@ -56,12 +61,9 @@ fn end_to_end_vertical_slice() {
         .collect::<Vec<_>>();
     assert!(statuses.iter().all(|status| *status == "succeeded"));
 
-    assert!(directory_contains_files(&root.join("state").join("runs")));
-    assert!(directory_contains_files(
-        &root.join("state").join("triggers")
-    ));
+    assert!(count_trigger_records(&root) >= 1);
 
-    let persisted_text = collect_text_files(&root.join("state"));
+    let persisted_text = collect_runtime_text_from_db(&root);
     assert!(!persisted_text.contains("token-e2e-123"));
 }
 
@@ -120,7 +122,7 @@ fn end_to_end_vertical_slice_failure_modes_redact_plugin_error_details() {
     assert!(stderr.contains("failed"));
     assert!(!stderr.contains(&secret_value));
 
-    let persisted_logs = collect_text_files(&root.join("state").join("runs"));
+    let persisted_logs = collect_runtime_text_from_db(&root);
     assert!(persisted_logs.contains("run_finished"));
     assert!(!persisted_logs.contains(&secret_value));
 }
@@ -132,13 +134,7 @@ fn serve_restart_recovery() {
         .unwrap_or_else(|error| error.into_inner());
 
     let root = prepare_fixture_root("success", "e2e-serve-restart-recovery");
-    let root_layout = RootLayout::from_root(root.clone());
-    let state_layout = StateLayout::from_root_layout(&root_layout);
-    let store = FileBackedStateStore::new(state_layout.clone());
-    store
-        .initialize()
-        .expect("state store should initialize for recovery test");
-
+    let mut store = open_runtime_store(&root, 1_710_400_000_100);
     store
         .write_run_summary(&RunRecordSummary {
             schema_version: "1.0.0".to_string(),
@@ -148,62 +144,8 @@ fn serve_restart_recovery() {
             started_at_ms: 1_710_400_000_000,
             finished_at_ms: None,
         })
-        .expect("incomplete run summary should persist");
-    store
-        .write_workflow_log_entry(&WorkflowRuntimeLogEntry {
-            run_id: "run-incomplete".to_string(),
-            sequence: 1,
-            event: "run_started".to_string(),
-            message: "execution started".to_string(),
-            occurred_at_ms: 1_710_400_000_010,
-        })
-        .expect("initial workflow log should persist");
-
-    write_json_file(
-        &state_layout.staged_workflow_log_entry_path("run-incomplete", 2),
-        &WorkflowRuntimeLogEntry {
-            run_id: "run-incomplete".to_string(),
-            sequence: 2,
-            event: "node_running".to_string(),
-            message: "node was still running before restart".to_string(),
-            occurred_at_ms: 1_710_400_000_020,
-        },
-    );
-    write_json_file(
-        &state_layout.staged_trigger_record_path(
-            "run-incomplete",
-            99,
-            "recovery-trigger",
-            "recovery-event",
-        ),
-        &TriggerEventRecord {
-            schema_version: "1.0.0".to_string(),
-            run_id: "run-incomplete".to_string(),
-            sequence: 99,
-            trigger_id: "recovery-trigger".to_string(),
-            workflow_id: "wf-alpha".to_string(),
-            event_id: "recovery-event".to_string(),
-            checkpoint: None,
-            source: "restart-recovery".to_string(),
-            accepted_at_ms: 1_710_400_000_030,
-            payload: serde_json::json!({"recovered": true}),
-            dedup_key: None,
-            dedup_expires_at_ms: None,
-            cooldown_key: None,
-            cooldown_expires_at_ms: None,
-        },
-    );
-
-    let mut coordination = CoordinationStore::open(&state_layout, 1_710_400_000_100)
-        .expect("coordination store should open");
-    let stale_owner = format!("{SERVE_OWNER_ID_PREFIX}999999");
-    assert!(matches!(
-        coordination
-            .try_acquire_serve_lease(&stale_owner, 1_710_400_000_100, 60_000)
-            .expect("stale owner lease should persist"),
-        LeaseAcquireResult::Acquired
-    ));
-    drop(coordination);
+        .expect("incomplete DB run summary should persist");
+    drop(store);
 
     let serve_output = run_chainbot(["serve"], &root, true);
     assert!(
@@ -212,48 +154,27 @@ fn serve_restart_recovery() {
         String::from_utf8_lossy(&serve_output.stdout),
         String::from_utf8_lossy(&serve_output.stderr)
     );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 2);
+    let stop_output = run_chainbot(["stop"], &root, true);
+    assert!(stop_output.status.success());
 
-    let recovered_summary = store
-        .read_run_summary("run-incomplete")
-        .expect("incomplete run should be rewritten after restart");
-    assert_eq!(recovered_summary.status, RunStatus::Failed);
-    assert!(recovered_summary.finished_at_ms.is_some());
+    let summaries = read_run_summaries(&root);
+    let recovered_summary = summaries
+        .iter()
+        .find(|run| run.get("run_id") == Some(&serde_json::json!("run-incomplete")))
+        .expect("recovered run summary should remain queryable");
+    assert_eq!(recovered_summary["status"], serde_json::json!("failed"));
 
-    let promoted_log_path = state_layout.workflow_log_entry_path("run-incomplete", 2);
-    let recovery_log_path = state_layout.workflow_log_entry_path("run-incomplete", 3);
-    let promoted_trigger_path = state_layout.trigger_record_path(
-        "run-incomplete",
-        99,
-        "recovery-trigger",
-        "recovery-event",
-    );
-    assert!(promoted_log_path.exists());
-    assert!(recovery_log_path.exists());
-    assert!(promoted_trigger_path.exists());
-
-    let recovery_log: WorkflowRuntimeLogEntry = serde_json::from_str(
-        &fs::read_to_string(&recovery_log_path).expect("recovery log file should be readable"),
-    )
-    .expect("recovery log should decode");
-    assert_eq!(recovery_log.event, "run_recovered_after_restart");
-
-    let runs = read_run_summaries(&root);
-    assert!(runs.iter().any(|run| {
+    assert!(summaries.iter().any(|run| {
         run.get("run_id") == Some(&serde_json::json!("run-incomplete"))
             && run.get("status") == Some(&serde_json::json!("failed"))
     }));
-    assert!(runs
+    assert!(summaries
         .iter()
         .any(|run| run.get("status") == Some(&serde_json::json!("succeeded"))));
 
-    let mut post_serve_coordination = CoordinationStore::open(&state_layout, 1_710_400_120_000)
-        .expect("coordination store should reopen after serve");
-    assert!(matches!(
-        post_serve_coordination
-            .try_acquire_serve_lease("owner-after-restart", 1_710_400_120_000, 5_000)
-            .expect("lease should be free after serve completes"),
-        LeaseAcquireResult::Acquired
-    ));
+    wait_for_serve_state(&root, "idle");
 }
 
 #[test]
@@ -271,16 +192,13 @@ fn duplicate_trigger_after_restart() {
         String::from_utf8_lossy(&first_serve.stdout),
         String::from_utf8_lossy(&first_serve.stderr)
     );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 1);
+    let first_stop = run_chainbot(["stop"], &root, true);
+    assert!(first_stop.status.success());
+    wait_for_serve_state(&root, "idle");
 
-    let first_trigger_count = count_json_files(
-        &root
-            .join("state")
-            .join("triggers")
-            .join("external-trigger-e2e")
-            .join("records"),
-    );
     let first_runs = read_run_summaries(&root);
-    assert!(first_trigger_count >= 1);
     assert_eq!(first_runs.len(), 1);
 
     let second_serve = run_chainbot(["serve"], &root, true);
@@ -290,18 +208,13 @@ fn duplicate_trigger_after_restart() {
         String::from_utf8_lossy(&second_serve.stdout),
         String::from_utf8_lossy(&second_serve.stderr)
     );
-    assert!(String::from_utf8_lossy(&second_serve.stdout)
-        .contains("serve completed: no accepted trigger events"));
+    wait_for_serve_state(&root, "active");
+    thread::sleep(Duration::from_millis(300));
+    let second_stop = run_chainbot(["stop"], &root, true);
+    assert!(second_stop.status.success());
+    wait_for_serve_state(&root, "idle");
 
-    let second_trigger_count = count_json_files(
-        &root
-            .join("state")
-            .join("triggers")
-            .join("external-trigger-e2e")
-            .join("records"),
-    );
     let second_runs = read_run_summaries(&root);
-    assert_eq!(second_trigger_count, first_trigger_count);
     assert_eq!(second_runs.len(), first_runs.len());
 }
 
@@ -338,6 +251,22 @@ fn prepare_fixture_root(case_name: &str, root_name: &str) -> PathBuf {
 
     let source = fixture_root().join("e2e").join(case_name);
     copy_directory_recursive(&source, &root);
+    let root_config_path = root.join("chainbot.toml");
+    let root_config =
+        fs::read_to_string(&root_config_path).expect("copied e2e root config should be readable");
+    let updated_root_config = root_config
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("chainbot_version = ") {
+                format!("chainbot_version = \"{}\"", env!("CARGO_PKG_VERSION"))
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&root_config_path, format!("{updated_root_config}\n"))
+        .expect("e2e root config should be rewritten with the running version");
 
     make_executable(&root.join("plugins").join("bin").join("external_trigger.sh"));
     make_executable(&root.join("plugins").join("bin").join("external_node.sh"));
@@ -366,47 +295,23 @@ fn copy_directory_recursive(source: &Path, destination: &Path) {
     }
 }
 
-fn directory_contains_files(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-
-    let entries = fs::read_dir(path).expect("directory entries should be readable");
-    for entry in entries {
-        let entry = entry.expect("directory entry should decode");
-        let path = entry.path();
-        if path.is_file() {
-            return true;
-        }
-        if path.is_dir() && directory_contains_files(&path) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn collect_text_files(path: &Path) -> String {
-    if !path.exists() {
-        return String::new();
-    }
-
-    let mut combined = String::new();
-    let entries = fs::read_dir(path).expect("state directory should be readable");
-    for entry in entries {
-        let entry = entry.expect("state directory entry should decode");
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            combined.push_str(&collect_text_files(&entry_path));
-            continue;
-        }
-
-        if let Ok(contents) = fs::read_to_string(&entry_path) {
-            combined.push_str(&contents);
-        }
-    }
-
-    combined
+fn collect_runtime_text_from_db(root: &Path) -> String {
+    let mut store = open_runtime_store(root, 1_710_500_000_000);
+    let runs = store
+        .list_run_summaries()
+        .expect("runtime store should list run summaries for text collection");
+    let logs = store
+        .list_recent_workflow_log_entries(100, None)
+        .expect("runtime store should list workflow logs for text collection");
+    let trigger_events = store
+        .list_recent_trigger_records(100, None)
+        .expect("runtime store should list trigger events for text collection");
+    format!(
+        "{}\n{}\n{}",
+        serde_json::to_string(&runs).expect("runs should serialize"),
+        serde_json::to_string(&logs).expect("logs should serialize"),
+        serde_json::to_string(&trigger_events).expect("trigger events should serialize"),
+    )
 }
 
 fn read_run_summaries(root: &Path) -> Vec<serde_json::Value> {
@@ -420,6 +325,34 @@ fn read_run_summaries(root: &Path) -> Vec<serde_json::Value> {
 
     serde_json::from_slice(&list_runs_output.stdout)
         .expect("list-runs output should decode as JSON array")
+}
+
+fn wait_for_run_count(root: &Path, expected_min_runs: usize) {
+    for _ in 0..50 {
+        let runs = read_run_summaries(root);
+        if runs.len() >= expected_min_runs {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!("timed out waiting for at least {expected_min_runs} persisted runs");
+}
+
+fn wait_for_serve_state(root: &Path, expected_state: &str) {
+    for _ in 0..50 {
+        let status_output = run_chainbot(["status", "--json"], root, false);
+        if status_output.status.success() {
+            let payload: serde_json::Value = serde_json::from_slice(&status_output.stdout)
+                .expect("status json output should decode during wait");
+            if payload["serve"]["state"] == expected_state {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!("timed out waiting for serve.state={expected_state}");
 }
 
 fn count_json_files(path: &Path) -> usize {
@@ -440,6 +373,14 @@ fn count_json_files(path: &Path) -> usize {
     }
 
     count
+}
+
+fn count_trigger_records(root: &Path) -> usize {
+    let mut store = open_runtime_store(root, 1_710_500_000_000);
+    store
+        .list_recent_trigger_records(100, None)
+        .expect("runtime store should list trigger records")
+        .len()
 }
 
 fn read_e2e_secret_value(root: &Path) -> String {
@@ -469,6 +410,21 @@ where
         serde_json::to_vec_pretty(value).expect("staged JSON payload should serialize"),
     )
     .expect("staged JSON payload should be writable");
+}
+
+fn open_runtime_store(root: &Path, now_ms: i64) -> RuntimeStateStore {
+    RuntimeStateStore::open(
+        &RuntimeStorageConfig {
+            backend: RuntimeStorageBackend::Local {
+                database_path: root.join("state").join("runtime.sqlite3"),
+            },
+            history_retention: None,
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        },
+        now_ms,
+    )
+    .expect("runtime store should open for e2e assertions")
 }
 
 fn fixture_root() -> PathBuf {

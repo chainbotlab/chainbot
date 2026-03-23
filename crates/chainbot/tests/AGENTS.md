@@ -10,6 +10,7 @@
 - `cli_surface.rs`: Verifies help output, validate/list-runs success paths, and bounded user-facing failures for unimplemented commands.
 - `config_loading.rs`: Verifies v2.1 root layout resolution plus package-manifest loader behavior for valid fixtures, missing paths, and invalid TOML.
 - `runtime_state_parity.rs`: Verifies DB-primary runtime-state semantics stay aligned between SQLite local mode and PostgreSQL mode for leases, run summaries, trigger snapshots/checkpoints, and trigger history visibility.
+- `runtime_guardrails.rs`: Guards SQLite runtime read-query plans and repeated read-only observation loops for status/observe hot paths.
 - `state_runtime_persistence.rs`: Verifies legacy file-backed runtime persistence plus SQLite coordination behavior that remains available outside the DB-primary main runtime path.
 - `workflow_dag_semantics.rs`: Verifies DAG cycle/dependency validation, deterministic runtime variable precedence, and explicit subflow import/export boundary enforcement.
 - `execution_scheduler.rs`: Verifies Rust-owned scheduler wave planning, `depends_mode`/`when` behavior, and builtin node registry typed dispatch failures.

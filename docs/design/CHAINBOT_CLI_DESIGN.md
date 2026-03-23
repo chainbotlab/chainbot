@@ -13,6 +13,8 @@ chainbot help [command]
 chainbot version
 chainbot init
 chainbot status [--json]
+chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]
+chainbot stop
 chainbot trigger <list|enable|disable> [trigger-id]
 chainbot validate
 chainbot list-runs
@@ -25,7 +27,7 @@ chainbot serve
 - CLI 通过 `CHAINBOT_CONFIG_DIR` 环境变量解析 ChainBot root。
 - 当 `CHAINBOT_CONFIG_DIR` 未设置或为空字符串时，默认 root 为 `~/.chainbot`。
 - `CHAINBOT_CONFIG_DIR` 必须指向一个完整 ChainBot root，而不是单个配置文件。
-- `status` 支持 `--json`；其他命令保持既有输出模式。
+- `status` 与 `observe` 支持 `--json`；其他命令保持既有输出模式。
 - `trigger` 负责持久化变更 trigger package 的 `enabled` 字段，不引入独立运行态开关面。
 
 ## Command Roles
@@ -47,12 +49,27 @@ chainbot serve
 - 不启动 workflow execution。
 - 不消费 trigger snapshot。
 - 不执行 runtime recovery。
-- 输出 root、serve lease、workflow 最近运行状态、trigger 最近活动与摘要计数。
+- 输出 root、daemon health、workflow 最近运行状态、trigger 最近活动与摘要计数。
+
+### `stop`
+
+- 请求后台 daemon 优雅停止。
+- 不要求 operator 直接使用 `kill`。
+- 若 daemon 已经 inactive 或 stale，返回稳定且可诊断的结果。
 
 ### `validate`
 
 - 校验 root layout、root config、workflow package、trigger package 与 plugin manifest contract。
 - 不启动执行。
+
+### `observe`
+
+- 提供 runtime history 的只读观察面。
+- 聚合最近的 `run_summaries`、`workflow_runtime_logs` 与 `trigger_event_records`。
+- 支持 `--limit` 控制最近记录窗口。
+- 支持 `--trigger-id` 与 `--run-id` 过滤。
+- 输出当前 archived history 计数，便于 operator/agent 判断 retention 是否已经搬迁旧数据。
+- 不触发 runtime recovery，不回放 trigger，不修改 active/archived history。
 
 ### `trigger`
 
@@ -87,8 +104,9 @@ chainbot serve
 
 ### `serve`
 
-- 在 serve lease 保护下评估一次 trigger snapshot。
-- 负责 runtime recovery、trigger-plane coordination 与 accepted run 执行。
+- 启动后台 long-running daemon。
+- 前台命令只负责 daemon start preflight 与 start acknowledgement。
+- daemon 在 loop boundary reload config，并将健康状态持久化到 DB truth。
 
 ## Help System Contract
 
@@ -243,6 +261,7 @@ CLI 错误不仅描述失败，还必须给出下一步动作。
 - `init`: human-readable bootstrap result
 - `status`: human-readable by default, `--json` optional
 - `trigger`: human-readable list or mutation result
+- `observe`: human-readable by default, `--json` optional
 - `validate`: human-readable success / validation failure
 - `list-runs`: JSON output
 - `run`: human-readable execution result
