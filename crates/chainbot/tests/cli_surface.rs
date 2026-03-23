@@ -9,8 +9,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
@@ -42,6 +44,8 @@ fn help_lists_expected_commands() {
     assert!(stdout.contains("version"));
     assert!(stdout.contains("init"));
     assert!(stdout.contains("status"));
+    assert!(stdout.contains("observe"));
+    assert!(stdout.contains("stop"));
     assert!(stdout.contains("trigger"));
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("run"));
@@ -152,6 +156,47 @@ fn help_status_includes_skill_guidance() {
     assert!(stdout.contains("Use when:"));
     assert!(stdout.contains("chainbot status --json"));
     assert!(stdout.contains("See also:"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_observe_includes_history_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "observe"])
+        .output()
+        .expect("chainbot help observe should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Inspect persisted trigger events"));
+    assert!(stdout.contains("chainbot observe --json"));
+    assert!(stdout.contains("--trigger-id tr-market"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_stop_includes_shutdown_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "stop"])
+        .output()
+        .expect("chainbot help stop should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Request graceful daemon shutdown"));
+    assert!(stdout.contains("chainbot stop"));
     assert!(stderr.is_empty());
 }
 
@@ -454,6 +499,121 @@ fn status_prints_human_summary_for_basic_root() {
     assert!(stdout.contains("tr-market"));
     assert!(!stdout.contains("Legacy Layout"));
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn observe_json_reports_recent_runtime_history() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+    let root = basic_root().to_path_buf();
+    let mut state_store =
+        RuntimeStateStore::open(&storage_config_for_root(&root), 1_710_555_000_000)
+            .expect("runtime state store should open for observe fixture");
+
+    state_store
+        .write_run_summary(&RunRecordSummary {
+            schema_version: "1.0.0".to_owned(),
+            run_id: "observe-run-1".to_owned(),
+            workflow_id: "wf-alpha".to_owned(),
+            status: RunStatus::Succeeded,
+            started_at_ms: 1_710_555_000_000,
+            finished_at_ms: Some(1_710_555_001_000),
+        })
+        .expect("run summary fixture should persist");
+    state_store
+        .append_workflow_log_entry(
+            "observe-run-1",
+            "run_finished",
+            "fixture completed",
+            1_710_555_001_000,
+        )
+        .expect("workflow log fixture should persist");
+    state_store
+        .write_trigger_record(&chainbot::state::TriggerEventRecord {
+            schema_version: "1.0.0".to_owned(),
+            run_id: "observe-run-1".to_owned(),
+            sequence: 1,
+            trigger_id: "tr-market".to_owned(),
+            workflow_id: "wf-alpha".to_owned(),
+            event_id: "event-observe-1".to_owned(),
+            checkpoint: None,
+            source: "builtin.market".to_owned(),
+            accepted_at_ms: 1_710_555_000_500,
+            payload: serde_json::json!({"price": 101}),
+            dedup_key: None,
+            dedup_expires_at_ms: None,
+            cooldown_key: None,
+            cooldown_expires_at_ms: None,
+        })
+        .expect("trigger event fixture should persist");
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["observe", "--json", "--limit", "5"])
+        .output()
+        .expect("observe should execute");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).expect("observe JSON should decode");
+
+    assert_eq!(payload["summary"]["requested_limit"], 5);
+    assert_eq!(payload["summary"]["archived"]["run_summaries"], 0);
+    assert_eq!(payload["runs"][0]["run_id"], "observe-run-1");
+    assert_eq!(payload["workflow_logs"][0]["run_id"], "observe-run-1");
+    assert_eq!(payload["trigger_events"][0]["trigger_id"], "tr-market");
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn repeated_status_json_reads_remain_read_only() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+    let root = basic_root().to_path_buf();
+    let mut state_store =
+        RuntimeStateStore::open(&storage_config_for_root(&root), 1_710_556_000_000)
+            .expect("runtime state store should open for status soak");
+
+    state_store
+        .write_run_summary(&RunRecordSummary {
+            schema_version: "1.0.0".to_owned(),
+            run_id: "status-soak-run-1".to_owned(),
+            workflow_id: "wf-alpha".to_owned(),
+            status: RunStatus::Succeeded,
+            started_at_ms: 1_710_556_000_000,
+            finished_at_ms: Some(1_710_556_001_000),
+        })
+        .expect("status soak run should persist");
+
+    for _ in 0..64 {
+        let output = Command::new(chainbot_bin())
+            .env("CHAINBOT_CONFIG_DIR", &root)
+            .args(["status", "--json"])
+            .output()
+            .expect("status --json should execute repeatedly");
+        assert!(output.status.success());
+        let payload: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("status JSON should decode");
+        assert_eq!(payload["summary"]["run_count"], 1);
+        assert_eq!(payload["serve"]["state"], "idle");
+    }
+
+    assert_eq!(
+        state_store
+            .list_run_summaries()
+            .expect("run summaries should remain stable after status soak")
+            .len(),
+        1
+    );
+    assert_eq!(
+        state_store
+            .list_recent_trigger_records(5, None)
+            .expect("trigger history should remain empty after status soak")
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -925,30 +1085,16 @@ fn invalid_root_returns_stable_user_facing_error() {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
 
     assert!(stdout.is_empty());
+    assert!(stderr.contains("error_code=validation_error"));
     assert!(stderr.contains("Root is missing required root directory:"));
     assert!(!stderr.contains("panicked at"));
     assert!(!stderr.contains("thread 'main'"));
 }
 
 #[test]
-fn run_and_serve_have_bounded_runtime_outcomes() {
+fn serve_starts_background_daemon_and_stop_shuts_it_down() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
-
-    let run_output = Command::new(chainbot_bin())
-        .env("CHAINBOT_CONFIG_DIR", basic_root())
-        .arg("run")
-        .output()
-        .expect("run should execute");
-    assert_eq!(run_output.status.code(), Some(5));
-    let run_stderr = String::from_utf8(run_output.stderr).expect("stderr should be UTF-8");
-    assert!(run_stderr.contains("Run manual-"));
-    assert!(run_stderr.contains("failed"));
-
-    // Clean up trigger records created by run before serve to ensure deterministic outcome
-    let state_root = basic_root().join("state");
-    let _ = fs::remove_dir_all(state_root.join("triggers"));
-    let _ = fs::create_dir_all(state_root.join("triggers"));
 
     let serve_output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -958,8 +1104,154 @@ fn run_and_serve_have_bounded_runtime_outcomes() {
     assert!(serve_output.status.success());
     let serve_stdout = String::from_utf8(serve_output.stdout).expect("stdout should be UTF-8");
     let serve_stderr = String::from_utf8(serve_output.stderr).expect("stderr should be UTF-8");
-    assert!(serve_stdout.contains("serve completed: no accepted trigger events"));
+    assert!(serve_stdout.contains("serve started: owner="));
     assert!(serve_stderr.is_empty());
+
+    let status_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status should execute after daemon start");
+    assert!(status_output.status.success());
+    let status_payload = serde_json::from_slice::<serde_json::Value>(&status_output.stdout)
+        .expect("status json should decode after daemon start");
+    assert_eq!(status_payload["serve"]["state"], "active");
+    assert!(status_payload["serve"]["pid"].as_i64().is_some());
+    assert!(status_payload["serve"]["started_at_ms"].as_i64().is_some());
+    assert!(status_payload["serve"]["last_heartbeat_at_ms"]
+        .as_i64()
+        .is_some());
+
+    let stop_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("stop")
+        .output()
+        .expect("stop should execute");
+    assert!(stop_output.status.success());
+    let stop_stdout = String::from_utf8(stop_output.stdout).expect("stdout should be UTF-8");
+    let stop_stderr = String::from_utf8(stop_output.stderr).expect("stderr should be UTF-8");
+    assert!(stop_stdout.contains("stop completed:"));
+    assert!(stop_stderr.is_empty());
+
+    let stopped_status_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status should execute after stop");
+    assert!(stopped_status_output.status.success());
+    let stopped_status_payload =
+        serde_json::from_slice::<serde_json::Value>(&stopped_status_output.stdout)
+            .expect("status json should decode after stop");
+    assert_eq!(stopped_status_payload["serve"]["state"], "idle");
+}
+
+#[test]
+fn second_serve_returns_conflict_with_stable_error_code() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let first_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("serve")
+        .output()
+        .expect("first serve should execute");
+    assert!(first_output.status.success());
+
+    let second_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("serve")
+        .output()
+        .expect("second serve should execute");
+    assert_eq!(second_output.status.code(), Some(6));
+    let second_stdout = String::from_utf8(second_output.stdout).expect("stdout should be UTF-8");
+    let second_stderr = String::from_utf8(second_output.stderr).expect("stderr should be UTF-8");
+    assert!(second_stdout.is_empty());
+    assert!(second_stderr.contains("error_code=daemon_already_running"));
+
+    let stop_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("stop")
+        .output()
+        .expect("stop should execute for cleanup");
+    assert!(stop_output.status.success());
+}
+
+#[test]
+fn serve_start_timeout_does_not_leave_a_ghost_daemon() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .env("CHAINBOT_TEST_DAEMON_START_DELAY_MS", "300")
+        .env("CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS", "100")
+        .arg("serve")
+        .output()
+        .expect("serve should execute with delayed daemon start");
+
+    assert_eq!(output.status.code(), Some(5));
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("error_code=daemon_start_failed"));
+
+    let status_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status should execute after failed daemon start");
+    assert!(status_output.status.success());
+    let status_payload = serde_json::from_slice::<serde_json::Value>(&status_output.stdout)
+        .expect("status json should decode after failed daemon start");
+    assert_eq!(status_payload["serve"]["state"], "idle");
+}
+
+#[test]
+fn stop_during_startup_cleans_up_pending_daemon_launch() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let serve_child = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .env("CHAINBOT_TEST_DAEMON_START_DELAY_MS", "300")
+        .env("CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS", "150")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("serve")
+        .spawn()
+        .expect("serve should spawn for startup-stop race coverage");
+
+    thread::sleep(Duration::from_millis(50));
+
+    let stop_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("stop")
+        .output()
+        .expect("stop should execute during delayed startup");
+    assert!(stop_output.status.success());
+    let stop_stdout = String::from_utf8(stop_output.stdout).expect("stdout should be UTF-8");
+    assert!(stop_stdout.contains("stop completed:"));
+
+    let serve_output = serve_child
+        .wait_with_output()
+        .expect("serve child should finish after stop");
+    assert_eq!(serve_output.status.code(), Some(5));
+    let serve_stdout = String::from_utf8(serve_output.stdout).expect("stdout should be UTF-8");
+    let serve_stderr = String::from_utf8(serve_output.stderr).expect("stderr should be UTF-8");
+    assert!(
+        serve_stderr.contains("error_code=daemon_start_failed")
+            || serve_stdout.contains("error_code=daemon_start_failed")
+    );
+
+    let status_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status should execute after startup-stop race");
+    assert!(status_output.status.success());
+    let status_payload = serde_json::from_slice::<serde_json::Value>(&status_output.stdout)
+        .expect("status json should decode after startup-stop race");
+    assert_eq!(status_payload["serve"]["state"], "idle");
 }
 
 fn chainbot_bin() -> PathBuf {
@@ -1047,6 +1339,7 @@ fn storage_config_for_root(root: &Path) -> RuntimeStorageConfig {
         backend: RuntimeStorageBackend::Local {
             database_path: root.join("state").join("runtime.sqlite3"),
         },
+        history_retention: None,
         raw_debug_enabled: false,
         raw_debug_artifacts_dir: None,
     }

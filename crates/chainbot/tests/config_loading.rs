@@ -176,6 +176,30 @@ fn storage_mode_requires_backend_specific_fields() {
 }
 
 #[test]
+fn storage_retention_requires_at_least_one_window_when_enabled() {
+    let root = unique_test_root("storage-retention-missing-window");
+    write_valid_fixture(&root);
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"retention\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n\n[storage.retention]\nenabled = true\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("retention root config should be writable");
+
+    let error = RootDefinitionBundle::load(&RootLayout::from_root(root))
+        .expect_err("enabled retention without a window should fail");
+    assert!(matches!(
+        error,
+        ContractError::InvalidRootConfigField {
+            field: "root_config.storage.retention",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn invalid_toml_fixture_rejected() {
     let invalid_root = unique_test_root("toml-invalid-syntax");
     write_valid_fixture(&invalid_root);

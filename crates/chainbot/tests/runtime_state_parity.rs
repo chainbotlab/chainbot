@@ -9,10 +9,14 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::config::{
+    RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig,
+};
 use chainbot::state::{
     LeaseAcquireResult, RunRecordSummary, RunStatus, TriggerCheckpointRecord, TriggerEventRecord,
     TriggerSnapshotRecord,
@@ -50,10 +54,35 @@ fn runtime_state_backends_share_core_semantics() {
             .try_acquire_serve_lease("owner-a", 1_710_900_000_000, 30_000)
             .expect("lease acquisition should succeed");
         assert!(matches!(lease_result, LeaseAcquireResult::Acquired));
+        store
+            .register_daemon_start("owner-a", Some(321), 1_710_900_000_000, 1_710_900_030_000)
+            .expect("daemon session start should persist");
+        let daemon_status = store
+            .inspect_daemon_status(1_710_900_000_500)
+            .expect("daemon status should inspect after start");
+        assert_eq!(
+            daemon_status.state,
+            chainbot::state::ServeLeaseState::Active
+        );
+        assert_eq!(daemon_status.owner_id.as_deref(), Some("owner-a"));
+        assert_eq!(daemon_status.pid, Some(321));
         let rejected = store
             .try_acquire_serve_lease("owner-b", 1_710_900_001_000, 30_000)
             .expect("conflicting lease acquisition should succeed with rejection result");
         assert!(matches!(rejected, LeaseAcquireResult::Rejected { .. }));
+        store
+            .request_daemon_stop(1_710_900_001_100)
+            .expect("daemon stop request should persist");
+        assert!(store
+            .daemon_stop_requested("owner-a")
+            .expect("daemon stop request should be visible"));
+        store
+            .mark_daemon_stopped("owner-a", 1_710_900_001_200)
+            .expect("daemon stop completion should persist");
+        let stopped_status = store
+            .inspect_daemon_status(1_710_900_001_300)
+            .expect("daemon status should inspect after stop");
+        assert_eq!(stopped_status.state, chainbot::state::ServeLeaseState::Idle);
         assert!(store
             .release_serve_lease("owner-a")
             .expect("lease release should succeed"));
@@ -175,6 +204,356 @@ fn runtime_state_backends_share_core_semantics() {
     }
 }
 
+#[test]
+fn runtime_state_backends_archive_expired_history() {
+    let _guard = backend_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    for backend in available_backends() {
+        backend.ensure_initialized();
+        backend.reset();
+        let mut store =
+            RuntimeStateStore::open(&backend.config, 1_710_910_000_000).unwrap_or_else(|error| {
+                panic!("{} store should reopen after reset: {error}", backend.name)
+            });
+
+        store
+            .write_run_summary(&RunRecordSummary {
+                schema_version: "1.0.0".to_owned(),
+                run_id: format!("{}-old-run", backend.slug),
+                workflow_id: "wf-alpha".to_owned(),
+                status: RunStatus::Succeeded,
+                started_at_ms: 1_710_000_000_000,
+                finished_at_ms: Some(1_710_000_010_000),
+            })
+            .expect("expired run summary should persist");
+        store
+            .append_workflow_log_entry(
+                &format!("{}-old-run", backend.slug),
+                "run_finished",
+                "expired log",
+                1_710_000_010_000,
+            )
+            .expect("expired log should persist");
+        store
+            .write_trigger_record(&TriggerEventRecord {
+                schema_version: "1.0.0".to_owned(),
+                run_id: format!("{}-old-run", backend.slug),
+                sequence: 1,
+                trigger_id: "tr-alpha".to_owned(),
+                workflow_id: "wf-alpha".to_owned(),
+                event_id: format!("{}-old-event", backend.slug),
+                checkpoint: None,
+                source: "builtin.market".to_owned(),
+                accepted_at_ms: 1_710_000_005_000,
+                payload: serde_json::json!({"price": 88}),
+                dedup_key: None,
+                dedup_expires_at_ms: None,
+                cooldown_key: None,
+                cooldown_expires_at_ms: None,
+            })
+            .expect("expired trigger record should persist");
+
+        let archived = store
+            .apply_history_retention(
+                &RuntimeHistoryRetentionPolicy {
+                    run_retention_ms: Some(60_000),
+                    workflow_log_retention_ms: Some(60_000),
+                    trigger_event_retention_ms: Some(60_000),
+                },
+                1_710_910_000_000,
+            )
+            .expect("retention should archive expired history");
+        assert_eq!(
+            archived.archived_run_summaries, 1,
+            "{} run should archive",
+            backend.name
+        );
+        assert_eq!(
+            archived.archived_workflow_logs, 1,
+            "{} log should archive",
+            backend.name
+        );
+        assert_eq!(
+            archived.archived_trigger_events, 1,
+            "{} trigger event should archive",
+            backend.name
+        );
+
+        assert!(
+            store
+                .list_run_summaries()
+                .expect("active runs should list")
+                .is_empty(),
+            "{} active runs should be empty after archive",
+            backend.name
+        );
+        assert!(
+            store
+                .list_recent_workflow_log_entries(5, None)
+                .expect("active workflow logs should list")
+                .is_empty(),
+            "{} active workflow logs should be empty after archive",
+            backend.name
+        );
+        assert!(
+            store
+                .list_recent_trigger_records(5, None)
+                .expect("active trigger records should list")
+                .is_empty(),
+            "{} active trigger records should be empty after archive",
+            backend.name
+        );
+
+        let archive_counts = store
+            .archived_history_counts()
+            .expect("archive counts should load");
+        assert_eq!(
+            archive_counts.run_summaries, 1,
+            "{} archived run count",
+            backend.name
+        );
+        assert_eq!(
+            archive_counts.workflow_logs, 1,
+            "{} archived log count",
+            backend.name
+        );
+        assert_eq!(
+            archive_counts.trigger_events, 1,
+            "{} archived trigger count",
+            backend.name
+        );
+
+        backend.reset();
+    }
+}
+
+#[test]
+fn runtime_state_backends_preserve_live_state_during_retention() {
+    let _guard = backend_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    for backend in available_backends() {
+        backend.ensure_initialized();
+        backend.reset();
+        let mut store =
+            RuntimeStateStore::open(&backend.config, 1_710_920_000_000).unwrap_or_else(|error| {
+                panic!("{} store should reopen after reset: {error}", backend.name)
+            });
+
+        store
+            .write_run_summary(&RunRecordSummary {
+                schema_version: "1.0.0".to_owned(),
+                run_id: format!("{}-running-run", backend.slug),
+                workflow_id: "wf-alpha".to_owned(),
+                status: RunStatus::Running,
+                started_at_ms: 1_710_000_000_000,
+                finished_at_ms: None,
+            })
+            .expect("running run should persist");
+        store
+            .write_run_summary(&RunRecordSummary {
+                schema_version: "1.0.0".to_owned(),
+                run_id: format!("{}-finished-run", backend.slug),
+                workflow_id: "wf-alpha".to_owned(),
+                status: RunStatus::Succeeded,
+                started_at_ms: 1_710_000_010_000,
+                finished_at_ms: Some(1_710_000_020_000),
+            })
+            .expect("finished run should persist");
+
+        let live_trigger = TriggerEventRecord {
+            schema_version: "1.0.0".to_owned(),
+            run_id: format!("{}-running-run", backend.slug),
+            sequence: 1,
+            trigger_id: "tr-alpha".to_owned(),
+            workflow_id: "wf-alpha".to_owned(),
+            event_id: format!("{}-live-event", backend.slug),
+            checkpoint: None,
+            source: "builtin.market".to_owned(),
+            accepted_at_ms: 1_710_000_030_000,
+            payload: serde_json::json!({"price": 99}),
+            dedup_key: Some(format!("{}-live-dedup", backend.slug)),
+            dedup_expires_at_ms: Some(1_710_920_060_000),
+            cooldown_key: Some(format!("{}-live-cooldown", backend.slug)),
+            cooldown_expires_at_ms: Some(1_710_920_070_000),
+        };
+        store
+            .write_trigger_record(&live_trigger)
+            .expect("live trigger event should persist");
+        store
+            .write_trigger_record(&TriggerEventRecord {
+                schema_version: "1.0.0".to_owned(),
+                run_id: format!("{}-finished-run", backend.slug),
+                sequence: 2,
+                trigger_id: "tr-alpha".to_owned(),
+                workflow_id: "wf-alpha".to_owned(),
+                event_id: format!("{}-expired-event", backend.slug),
+                checkpoint: None,
+                source: "builtin.market".to_owned(),
+                accepted_at_ms: 1_710_000_040_000,
+                payload: serde_json::json!({"price": 88}),
+                dedup_key: None,
+                dedup_expires_at_ms: None,
+                cooldown_key: None,
+                cooldown_expires_at_ms: None,
+            })
+            .expect("expired trigger event should persist");
+
+        let archived = store
+            .apply_history_retention(
+                &RuntimeHistoryRetentionPolicy {
+                    run_retention_ms: Some(60_000),
+                    workflow_log_retention_ms: Some(60_000),
+                    trigger_event_retention_ms: Some(60_000),
+                },
+                1_710_920_000_000,
+            )
+            .expect("retention should archive only fully expired history");
+        assert_eq!(
+            archived.archived_run_summaries, 1,
+            "{} finished run should archive",
+            backend.name
+        );
+        assert_eq!(
+            archived.archived_trigger_events, 1,
+            "{} only expired trigger event should archive",
+            backend.name
+        );
+
+        let active_runs = store
+            .list_run_summaries()
+            .expect("active runs should stay queryable after retention");
+        assert_eq!(
+            active_runs.len(),
+            1,
+            "{} should keep only the running run active",
+            backend.name
+        );
+        assert_eq!(active_runs[0].status, RunStatus::Running);
+
+        let active_events = store
+            .list_recent_trigger_records(10, Some("tr-alpha"))
+            .expect("active trigger events should stay queryable after retention");
+        assert_eq!(
+            active_events.len(),
+            1,
+            "{} should keep only the live trigger event active",
+            backend.name
+        );
+        assert_eq!(active_events[0].event_id, live_trigger.event_id);
+        assert!(
+            !store
+                .dedup_is_ready(
+                    live_trigger.dedup_key.as_deref().unwrap(),
+                    1_710_920_000_001
+                )
+                .expect("live dedup token should remain active"),
+            "{} dedup token should still block duplicate events",
+            backend.name,
+        );
+        assert!(
+            !store
+                .cooldown_is_ready(
+                    live_trigger.cooldown_key.as_deref().unwrap(),
+                    1_710_920_000_001,
+                )
+                .expect("live cooldown token should remain active"),
+            "{} cooldown token should still block duplicate events",
+            backend.name,
+        );
+
+        let second_archived = store
+            .apply_history_retention(
+                &RuntimeHistoryRetentionPolicy {
+                    run_retention_ms: Some(60_000),
+                    workflow_log_retention_ms: Some(60_000),
+                    trigger_event_retention_ms: Some(60_000),
+                },
+                1_710_920_000_100,
+            )
+            .expect("second retention pass should be idempotent");
+        assert_eq!(
+            second_archived.archived_run_summaries, 0,
+            "{} second pass should not duplicate archived runs",
+            backend.name
+        );
+        assert_eq!(
+            second_archived.archived_trigger_events, 0,
+            "{} second pass should not duplicate archived trigger events",
+            backend.name
+        );
+
+        backend.reset();
+    }
+}
+
+#[test]
+fn runtime_state_backends_allow_only_one_serve_lease_winner_under_contention() {
+    let _guard = backend_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    for backend in available_backends() {
+        backend.ensure_initialized();
+        backend.reset();
+
+        let config = Arc::new(backend.config.clone());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let first_config = Arc::clone(&config);
+        let first_barrier = Arc::clone(&barrier);
+        let first = thread::spawn(move || {
+            let mut store = RuntimeStateStore::open(&first_config, 1_710_930_000_000)
+                .expect("first contender should open runtime state store");
+            first_barrier.wait();
+            store
+                .try_acquire_serve_lease("owner-a", 1_710_930_000_000, 30_000)
+                .expect("first contender lease acquisition should finish")
+        });
+
+        let second_config = Arc::clone(&config);
+        let second_barrier = Arc::clone(&barrier);
+        let second = thread::spawn(move || {
+            let mut store = RuntimeStateStore::open(&second_config, 1_710_930_000_000)
+                .expect("second contender should open runtime state store");
+            second_barrier.wait();
+            store
+                .try_acquire_serve_lease("owner-b", 1_710_930_000_000, 30_000)
+                .expect("second contender lease acquisition should finish")
+        });
+
+        barrier.wait();
+        let first_result = first.join().expect("first contender should join cleanly");
+        let second_result = second.join().expect("second contender should join cleanly");
+
+        let winners = [first_result.clone(), second_result.clone()]
+            .into_iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed
+                )
+            })
+            .count();
+        assert_eq!(
+            winners, 1,
+            "{} should have exactly one lease winner",
+            backend.name
+        );
+        assert!(
+            matches!(first_result, LeaseAcquireResult::Rejected { .. })
+                || matches!(second_result, LeaseAcquireResult::Rejected { .. }),
+            "{} should reject one contender under contention",
+            backend.name,
+        );
+
+        backend.reset();
+    }
+}
+
 struct BackendFixture {
     name: &'static str,
     slug: &'static str,
@@ -211,6 +590,7 @@ fn sqlite_backend_fixture() -> BackendFixture {
             backend: RuntimeStorageBackend::Local {
                 database_path: database_path.clone(),
             },
+            history_retention: None,
             raw_debug_enabled: false,
             raw_debug_artifacts_dir: None,
         },
@@ -230,6 +610,7 @@ fn postgres_backend_fixture() -> Option<BackendFixture> {
         slug: "postgres",
         config: RuntimeStorageConfig {
             backend: RuntimeStorageBackend::Postgres { database_url },
+            history_retention: None,
             raw_debug_enabled: false,
             raw_debug_artifacts_dir: None,
         },
@@ -239,6 +620,7 @@ fn postgres_backend_fixture() -> Option<BackendFixture> {
                     backend: RuntimeStorageBackend::Postgres {
                         database_url: init_url.clone(),
                     },
+                    history_retention: None,
                     raw_debug_enabled: false,
                     raw_debug_artifacts_dir: None,
                 },
@@ -256,10 +638,14 @@ fn reset_postgres_tables(database_url: &str) {
     client
         .batch_execute(
             "TRUNCATE TABLE \
+                daemon_sessions, \
                 workflow_runtime_logs, \
                 trigger_event_records, \
                 trigger_checkpoints, \
                 trigger_snapshots, \
+                archived_workflow_runtime_logs, \
+                archived_trigger_event_records, \
+                archived_run_summaries, \
                 run_summaries, \
                 serve_leases \
              RESTART IDENTITY",
