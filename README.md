@@ -21,8 +21,11 @@ chainbot status
 # Run the inferred top-level workflow
 chainbot run
 
-# Drain one trigger snapshot under a serve lease
+# Start the background daemon control plane
 chainbot serve
+
+# Request graceful shutdown
+chainbot stop
 
 # Manage triggers
 chainbot trigger list
@@ -57,10 +60,12 @@ The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to overr
 | `chainbot version` | Show the running ChainBot version |
 | `chainbot init` | Initialize a new workspace |
 | `chainbot status` | Show workspace status (use `--json` for structured output) |
+| `chainbot observe` | Inspect persisted trigger events, workflow logs, and runs |
+| `chainbot stop` | Request graceful shutdown of the background daemon |
 | `chainbot trigger` | Manage triggers: `list`, `enable`, `disable` |
 | `chainbot validate` | Validate workspace configuration |
 | `chainbot run` | Execute a workflow |
-| `chainbot serve` | Start the web interface |
+| `chainbot serve` | Start the background daemon control plane |
 | `chainbot list-runs` | List workflow run history |
 
 ## Configuration

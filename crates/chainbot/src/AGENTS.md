@@ -9,7 +9,7 @@
 - `main.rs`: Binary entrypoint that routes CLI stdout/stderr and explicit process exit codes.
 - `lib.rs`: Public module map that freezes the V2 boundary for MVP contracts.
 - `builtins/`: Unified builtin namespace containing workflow node builtins, trigger builtins, and shared dispatch boundaries.
-- `cli.rs`: CLI parser/executor for `help`, `validate`, `list-runs`, `run`, and `serve` with root overrides, canonical-only bootstrap, runtime recovery, and stable user-facing failures.
+- `cli.rs`: CLI parser/executor for `help`, `status`, `observe`, `trigger`, `validate`, `list-runs`, `run`, and `serve` with root overrides, canonical bootstrap, runtime retention hooks, and stable user-facing failures.
 - `config.rs`: Explicit root-layout resolver plus canonical package loaders for root config, workflow packages, trigger packages, and plugin packages.
 - `workflow.rs`: Workflow package semantic contract with nested manifest-header parsing, DAG/cycle validation, typed runtime variable namespaces and precedence layers, explicit subflow input/output boundaries, and deterministic `when` evaluators.
 - `trigger.rs`: Trigger-package runtime contract plus trigger-plane orchestration for builtin/external trigger sources, workflow binding, input mapping, dedup/cooldown coordination, restart-safe duplicate suppression, and normalized run-request emission through builtin trigger dispatch helpers.
@@ -18,6 +18,6 @@
 - `script_protocol.rs`: Versioned script-worker request/response envelope contract shared by config loading, builtin script execution, and protocol tests.
 - `builtins/nodes/script_worker.rs`: Bounded subprocess host for Python/JavaScript builtin script nodes plus timeout cleanup and runtime failure mapping.
 - `state.rs`: Legacy file-backed runtime-state and SQLite coordination implementation retained for compatibility, inspection, and future import paths.
-- `state_db.rs`: DB-primary runtime-state implementation for local SQLite and PostgreSQL backends used by main CLI and trigger execution paths.
+- `state_db.rs`: DB-primary runtime-state implementation for local SQLite and PostgreSQL backends, including recent-history observation reads, archival retention moves, and hot-path index guards for CLI and trigger execution paths.
 - `secrets.rs`: Secret reference parser plus pass-style runtime secret provider, decryptor seam, and redaction helpers that prevent durable plaintext leakage.
 - `errors.rs`: Typed contract error variants plus stable CLI-facing error and exit-code mapping.
