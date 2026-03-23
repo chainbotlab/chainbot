@@ -2,7 +2,7 @@
 //! Environment-derived root paths, on-disk package manifests, plugin manifests, and serialized contract payloads.
 //!
 //! [OUTPUT]
-//! Resolves canonical root layouts, enforces startup-time root config version compatibility, backfills missing ChainBot version metadata, and loads validated root, workflow, trigger, plugin, and worker definition bundles with package-root context.
+//! Resolves canonical root layouts, enforces startup-time root config version compatibility, backfills missing ChainBot version metadata, and loads validated root, workflow, trigger, plugin, worker, and runtime-retention contracts with package-root context.
 //!
 //! [ROLE]
 //! Defines the configuration and package-loading boundary for ChainBot runtime state on disk.
@@ -45,6 +45,8 @@ pub struct StorageDefinition {
     #[serde(default)]
     pub postgres: Option<PostgresStorageDefinition>,
     #[serde(default)]
+    pub retention: RuntimeHistoryRetentionDefinition,
+    #[serde(default)]
     pub raw_debug: RawDebugArtifactsDefinition,
 }
 
@@ -68,6 +70,18 @@ pub struct RawDebugArtifactsDefinition {
     pub artifacts_dir: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RuntimeHistoryRetentionDefinition {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub run_retention_days: Option<u64>,
+    #[serde(default)]
+    pub workflow_log_retention_days: Option<u64>,
+    #[serde(default)]
+    pub trigger_event_retention_days: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeStorageBackend {
     Local { database_path: PathBuf },
@@ -75,8 +89,16 @@ pub enum RuntimeStorageBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeHistoryRetentionPolicy {
+    pub run_retention_ms: Option<i64>,
+    pub workflow_log_retention_ms: Option<i64>,
+    pub trigger_event_retention_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStorageConfig {
     pub backend: RuntimeStorageBackend,
+    pub history_retention: Option<RuntimeHistoryRetentionPolicy>,
     pub raw_debug_enabled: bool,
     pub raw_debug_artifacts_dir: Option<PathBuf>,
 }
@@ -271,6 +293,7 @@ impl RootConfigDefinition {
 
         Ok(RuntimeStorageConfig {
             backend,
+            history_retention: self.storage.retention.resolve_policy()?,
             raw_debug_enabled: self.storage.raw_debug.enabled,
             raw_debug_artifacts_dir,
         })
@@ -320,8 +343,83 @@ impl StorageDefinition {
             }
         }
 
+        self.retention.validate()?;
+
         Ok(())
     }
+}
+
+impl RuntimeHistoryRetentionDefinition {
+    fn validate(&self) -> Result<(), ContractError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let has_any_window = self.run_retention_days.is_some()
+            || self.workflow_log_retention_days.is_some()
+            || self.trigger_event_retention_days.is_some();
+        if !has_any_window {
+            return Err(ContractError::InvalidRootConfigField {
+                field: "root_config.storage.retention",
+                detail: "at least one retention window is required when storage.retention.enabled is true"
+                    .to_owned(),
+            });
+        }
+
+        for (field, value) in [
+            (
+                "root_config.storage.retention.run_retention_days",
+                self.run_retention_days,
+            ),
+            (
+                "root_config.storage.retention.workflow_log_retention_days",
+                self.workflow_log_retention_days,
+            ),
+            (
+                "root_config.storage.retention.trigger_event_retention_days",
+                self.trigger_event_retention_days,
+            ),
+        ] {
+            if matches!(value, Some(0)) {
+                return Err(ContractError::InvalidRootConfigField {
+                    field,
+                    detail: "retention days must be greater than zero".to_owned(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_policy(&self) -> Result<Option<RuntimeHistoryRetentionPolicy>, ContractError> {
+        if !self.enabled {
+            return Ok(None);
+        }
+
+        self.validate()?;
+        Ok(Some(RuntimeHistoryRetentionPolicy {
+            run_retention_ms: retention_days_to_ms(self.run_retention_days)?,
+            workflow_log_retention_ms: retention_days_to_ms(self.workflow_log_retention_days)?,
+            trigger_event_retention_ms: retention_days_to_ms(self.trigger_event_retention_days)?,
+        }))
+    }
+}
+
+fn retention_days_to_ms(days: Option<u64>) -> Result<Option<i64>, ContractError> {
+    let Some(days) = days else {
+        return Ok(None);
+    };
+    let ms = days
+        .checked_mul(24)
+        .and_then(|value| value.checked_mul(60))
+        .and_then(|value| value.checked_mul(60))
+        .and_then(|value| value.checked_mul(1_000))
+        .ok_or_else(|| ContractError::InvalidRootConfigField {
+            field: "root_config.storage.retention",
+            detail: "retention window is too large to fit into runtime millisecond bounds"
+                .to_owned(),
+        })?;
+    Ok(Some(i64::try_from(ms).unwrap_or(i64::MAX)))
 }
 
 impl RootLayout {

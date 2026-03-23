@@ -24,11 +24,26 @@ pub enum CliExitCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserFacingError {
-    Usage { message: String },
-    Validation { message: String },
-    State { message: String },
-    Unavailable { message: String },
-    Conflict { message: String },
+    Usage {
+        message: String,
+        error_code: &'static str,
+    },
+    Validation {
+        message: String,
+        error_code: &'static str,
+    },
+    State {
+        message: String,
+        error_code: &'static str,
+    },
+    Unavailable {
+        message: String,
+        error_code: &'static str,
+    },
+    Conflict {
+        message: String,
+        error_code: &'static str,
+    },
 }
 
 #[derive(Debug)]
@@ -366,32 +381,67 @@ impl CliExitCode {
 
 impl UserFacingError {
     pub fn usage(message: impl Into<String>) -> Self {
+        Self::usage_with_code("usage_error", message)
+    }
+
+    pub fn usage_with_code(error_code: &'static str, message: impl Into<String>) -> Self {
         Self::Usage {
             message: message.into(),
+            error_code,
         }
     }
 
     pub fn validation(message: impl Into<String>) -> Self {
+        Self::validation_with_code("validation_error", message)
+    }
+
+    pub fn validation_with_code(error_code: &'static str, message: impl Into<String>) -> Self {
         Self::Validation {
             message: message.into(),
+            error_code,
         }
     }
 
     pub fn state(message: impl Into<String>) -> Self {
+        Self::state_with_code("state_error", message)
+    }
+
+    pub fn state_with_code(error_code: &'static str, message: impl Into<String>) -> Self {
         Self::State {
             message: message.into(),
+            error_code,
         }
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::unavailable_with_code("unavailable_error", message)
+    }
+
+    pub fn unavailable_with_code(error_code: &'static str, message: impl Into<String>) -> Self {
         Self::Unavailable {
             message: message.into(),
+            error_code,
         }
     }
 
     pub fn conflict(message: impl Into<String>) -> Self {
+        Self::conflict_with_code("conflict_error", message)
+    }
+
+    pub fn conflict_with_code(error_code: &'static str, message: impl Into<String>) -> Self {
         Self::Conflict {
             message: message.into(),
+            error_code,
+        }
+    }
+
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Self::Usage { error_code, .. }
+            | Self::Validation { error_code, .. }
+            | Self::State { error_code, .. }
+            | Self::Unavailable { error_code, .. }
+            | Self::Conflict { error_code, .. } => error_code,
         }
     }
 
@@ -893,11 +943,26 @@ impl Display for ContractError {
 impl Display for UserFacingError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Usage { message }
-            | Self::Validation { message }
-            | Self::State { message }
-            | Self::Unavailable { message }
-            | Self::Conflict { message } => write!(f, "{message}"),
+            Self::Usage {
+                message,
+                error_code,
+            }
+            | Self::Validation {
+                message,
+                error_code,
+            }
+            | Self::State {
+                message,
+                error_code,
+            }
+            | Self::Unavailable {
+                message,
+                error_code,
+            }
+            | Self::Conflict {
+                message,
+                error_code,
+            } => write!(f, "error_code={error_code}\n{message}"),
         }
     }
 }
