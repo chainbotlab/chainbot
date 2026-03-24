@@ -7,6 +7,7 @@
 //! [ROLE]
 //! Owns the trigger builtin subsystem beneath the unified builtin namespace.
 
+pub mod catalog;
 pub mod context;
 pub mod contract;
 pub mod dispatch;
