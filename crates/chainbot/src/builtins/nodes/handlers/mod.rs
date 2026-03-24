@@ -1,5 +1,16 @@
+pub mod assert;
+pub mod data_merge;
+pub mod data_coalesce;
+pub mod data_compare;
+pub mod data_get;
+pub mod data_math;
+pub mod data_parse_json;
+pub mod data_pick;
+pub mod data_stringify_json;
+pub mod data_template;
 pub mod emit_subflow_output;
 pub mod external_node;
+pub mod fail;
 pub mod http;
 pub mod identity;
 pub mod script;
