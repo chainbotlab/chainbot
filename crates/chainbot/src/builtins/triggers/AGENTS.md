@@ -7,6 +7,7 @@
 
 ## Members
 - `mod.rs`: Builtin-trigger subsystem root that exposes context, contract, dispatch, registry, and emitter modules.
+- `catalog.rs`: Static builtin-trigger descriptors for CLI capability discovery plus descriptor completeness tests.
 - `context.rs`: Shared builtin-trigger evaluation context.
 - `contract.rs`: Builtin trigger handler trait, registry type, and function-based extension adapter for tests or custom fanout wiring.
 - `dispatch.rs`: Trigger-definition to builtin subtype resolution helper.

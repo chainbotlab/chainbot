@@ -7,10 +7,11 @@
 
 ## Members
 - `mod.rs`: Builtin-node subsystem root that exposes contract, context, dispatch, registry, and handler modules.
+- `catalog.rs`: Static builtin-node descriptors for CLI capability discovery plus descriptor completeness tests.
 - `context.rs`: Shared runtime context and secret-decrypt mode for builtin node handlers.
 - `contract.rs`: Builtin node request/result types, handler trait, registry type, and the test-seeded handler constructor plus closure-based extension adapter.
 - `dispatch.rs`: Node-definition to builtin-kind resolution helper used by the execution plane.
 - `input_resolver.rs`: Secret-aware input materialization reused by builtin node handlers.
 - `registry.rs`: Canonical builtin node registry assembly plus builtin kind constants and registry tests.
 - `script_worker.rs`: Script-node subprocess host, limits, and runtime failure mapping owned by the builtin node subsystem.
-- `handlers/`: Per-builtin node handlers such as identity, subflow-output, HTTP, script, and external-node execution.
+- `handlers/`: Per-builtin node handlers such as identity, subflow-output, HTTP, and script execution.
