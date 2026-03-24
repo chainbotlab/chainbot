@@ -8,8 +8,8 @@ use super::handlers::{
     data_get::DataGetHandler, data_math::DataMathHandler, data_merge::DataMergeHandler,
     data_parse_json::DataParseJsonHandler, data_pick::DataPickHandler,
     data_stringify_json::DataStringifyJsonHandler, data_template::DataTemplateHandler,
-    emit_subflow_output::EmitSubflowOutputHandler, external_node::ExternalNodeHandler,
-    fail::FailHandler, http::HttpHandler, identity::IdentityHandler, script::ScriptHandler,
+    emit_subflow_output::EmitSubflowOutputHandler, fail::FailHandler, http::HttpHandler,
+    identity::IdentityHandler, script::ScriptHandler,
 };
 
 pub(crate) const BUILTIN_ASSERT_KIND: &str = "builtin.flow.assert";
@@ -25,7 +25,6 @@ pub(crate) const BUILTIN_DATA_STRINGIFY_JSON_KIND: &str = "builtin.data.stringif
 pub(crate) const BUILTIN_DATA_MATH_KIND: &str = "builtin.data.math";
 pub(crate) const BUILTIN_IDENTITY_KIND: &str = "builtin.identity";
 pub(crate) const BUILTIN_EMIT_SUBFLOW_OUTPUT_KIND: &str = "builtin.emit_subflow_output";
-pub(crate) const BUILTIN_EXTERNAL_NODE_KIND: &str = "builtin.external_node";
 pub(crate) const BUILTIN_SCRIPT_KIND: &str = "builtin.script";
 pub(crate) const BUILTIN_HTTP_KIND: &str = "builtin.http";
 
@@ -46,7 +45,6 @@ pub fn build_builtin_registry(context: BuiltinRuntimeContext) -> BuiltinNodeRegi
     registry.register_handler(DataMathHandler);
     registry.register_handler(IdentityHandler);
     registry.register_handler(EmitSubflowOutputHandler);
-    registry.register_handler(ExternalNodeHandler::new(Arc::clone(&context)));
     registry.register_handler(ScriptHandler::new(Arc::clone(&context)));
     registry.register_handler(HttpHandler::new(Arc::clone(&context)));
 
@@ -61,7 +59,6 @@ mod tests {
     use crate::builtins::nodes::contract::BuiltinNodeRequest;
     use crate::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
     use crate::executor::NodeDefinition;
-    use crate::plugin::PluginManifest;
     use serde_json::json;
 
     use super::*;
@@ -71,7 +68,6 @@ mod tests {
             root_layout: crate::config::RootLayout::from_root(PathBuf::from(
                 "/tmp/chainbot-builtins-test",
             )),
-            manifests: BTreeMap::<String, PluginManifest>::new(),
             secret_mode: crate::builtins::nodes::context::SecretDecryptMode::Plaintext,
             worker_host: WorkerHost::new(WorkerHostLimits::default()),
         }
