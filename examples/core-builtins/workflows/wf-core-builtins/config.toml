@@ -1,0 +1,162 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-core-builtins"
+name = "wf-core-builtins"
+
+[runtime.defaults]
+payload_json = "{\"quote\":{\"symbol\":\"ETHUSDT\",\"price\":3000.125}}"
+symbol_path = "quote.symbol"
+symbol_candidates_json = "[null, \"ETHUSDT\", \"BTCUSDT\"]"
+expected_symbol = "ETHUSDT"
+quote_object = { symbol = "ETHUSDT", price = 3000.125, venue = "demo" }
+quote_fields = ["symbol", "price"]
+context_objects = [{ environment = "example" }, { symbol = "ETHUSDT", venue = "demo" }, { status = "ready" }]
+summary_template = "symbol={{symbol}} venue={{venue}} status={{status}}"
+summary_values = { symbol = "ETHUSDT", venue = "demo", status = "ready" }
+raw_price = 3000.125
+round_precision = 2
+price_threshold = 2500
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "parse-payload"
+kind = "builtin"
+plugin = "builtin.data.parse_json"
+operation = "parse"
+depends_on = []
+
+[[nodes.inputs]]
+target = "text"
+source = "workflow.payload_json"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "extract-symbol"
+kind = "builtin"
+plugin = "builtin.data.get"
+operation = "path"
+depends_on = ["parse-payload"]
+
+[[nodes.inputs]]
+target = "input"
+source = "run.result"
+
+[[nodes.inputs]]
+target = "path"
+source = "workflow.symbol_path"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "parse-fallbacks"
+kind = "builtin"
+plugin = "builtin.data.parse_json"
+operation = "parse"
+depends_on = ["extract-symbol"]
+
+[[nodes.inputs]]
+target = "text"
+source = "workflow.symbol_candidates_json"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "coalesce-symbol"
+kind = "builtin"
+plugin = "builtin.data.coalesce"
+operation = "first"
+depends_on = ["parse-fallbacks"]
+
+[[nodes.inputs]]
+target = "values"
+source = "run.result"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "assert-symbol"
+kind = "builtin"
+plugin = "builtin.flow.assert"
+operation = "equals"
+depends_on = ["coalesce-symbol"]
+
+[[nodes.inputs]]
+target = "value"
+source = "run.result"
+
+[[nodes.inputs]]
+target = "expected"
+source = "workflow.expected_symbol"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "pick-quote"
+kind = "builtin"
+plugin = "builtin.data.pick"
+operation = "fields"
+depends_on = ["assert-symbol"]
+
+[[nodes.inputs]]
+target = "input"
+source = "workflow.quote_object"
+
+[[nodes.inputs]]
+target = "fields"
+source = "workflow.quote_fields"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "merge-context"
+kind = "builtin"
+plugin = "builtin.data.merge"
+operation = "objects"
+depends_on = ["pick-quote"]
+
+[[nodes.inputs]]
+target = "objects"
+source = "workflow.context_objects"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "render-summary"
+kind = "builtin"
+plugin = "builtin.data.template"
+operation = "render"
+depends_on = ["merge-context"]
+
+[[nodes.inputs]]
+target = "template"
+source = "workflow.summary_template"
+
+[[nodes.inputs]]
+target = "values"
+source = "workflow.summary_values"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "round-price"
+kind = "builtin"
+plugin = "builtin.data.math"
+operation = "round"
+depends_on = ["render-summary"]
+
+[[nodes.inputs]]
+target = "value"
+source = "workflow.raw_price"
+
+[[nodes.inputs]]
+target = "precision"
+source = "workflow.round_precision"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "compare-price"
+kind = "builtin"
+plugin = "builtin.data.compare"
+operation = "greater_than"
+depends_on = ["round-price"]
+
+[[nodes.inputs]]
+target = "left"
+source = "run.result"
+
+[[nodes.inputs]]
+target = "right"
+source = "workflow.price_threshold"
