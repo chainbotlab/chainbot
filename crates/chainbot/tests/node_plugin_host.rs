@@ -14,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::errors::ContractError;
 use chainbot::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PLUGIN_KIND_EXTERNAL_NODE,
+    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PluginOperationDescriptor,
+    PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
 
@@ -154,10 +155,17 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
         plugin_id: plugin_id.to_owned(),
         kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
         entrypoint: "node.exec.v1".to_owned(),
-        capabilities: vec!["node:execute".to_owned(), "normalize".to_owned()],
+        capabilities: vec!["node:execute".to_owned()],
         executable: Some(executable.to_owned()),
-        input_schema: vec!["symbol".to_owned()],
-        output_schema: vec!["decision".to_owned()],
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        operations: vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: Some("Normalize quote payload".to_owned()),
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+        }],
+        event_schema: None,
         manifest_path: PathBuf::new(),
     }
 }

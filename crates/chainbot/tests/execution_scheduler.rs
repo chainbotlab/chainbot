@@ -1093,7 +1093,6 @@ fn production_registry_executes_third_wave_data_glue_builtins() {
 fn test_runtime_context() -> BuiltinRuntimeContext {
     BuiltinRuntimeContext {
         root_layout: RootLayout::from_root(PathBuf::from("/tmp/chainbot-builtins-test")),
-        manifests: BTreeMap::<String, PluginManifest>::new(),
         secret_mode: SecretDecryptMode::Plaintext,
         worker_host: WorkerHost::new(WorkerHostLimits::default()),
     }

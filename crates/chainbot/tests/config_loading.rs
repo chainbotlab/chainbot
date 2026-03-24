@@ -200,6 +200,23 @@ fn storage_retention_requires_at_least_one_window_when_enabled() {
 }
 
 #[test]
+fn plugin_manifest_loading_preserves_optional_richer_metadata() {
+    let root = unique_test_root("plugin-metadata-loading");
+    write_valid_fixture_with_plugin_package(&root);
+    fs::write(
+        root.join("plugins").join("quote-plugin").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/external_node.sh\"\n\n[[operations]]\nname = \"normalize\"\nsummary = \"Normalize quote payload\"\ninput_schema = [\"symbol\", \"token\"]\noutput_schema = [\"decision\"]\n",
+    )
+    .expect("plugin metadata fixture should be writable");
+
+    let bundle = RootDefinitionBundle::load(&RootLayout::from_root(root))
+        .expect("root with richer plugin metadata should load");
+    assert_eq!(bundle.plugins.len(), 1);
+    assert_eq!(bundle.plugins[0].operations.len(), 1);
+    assert_eq!(bundle.plugins[0].operations[0].name, "normalize");
+}
+
+#[test]
 fn invalid_toml_fixture_rejected() {
     let invalid_root = unique_test_root("toml-invalid-syntax");
     write_valid_fixture(&invalid_root);

@@ -45,11 +45,33 @@ fn help_lists_expected_commands() {
     assert!(stdout.contains("init"));
     assert!(stdout.contains("status"));
     assert!(stdout.contains("observe"));
+    assert!(stdout.contains("catalog"));
     assert!(stdout.contains("stop"));
     assert!(stdout.contains("trigger"));
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("list-runs"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_catalog_includes_discovery_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "catalog"])
+        .output()
+        .expect("chainbot help catalog should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Discover builtin capabilities and installed plugin contracts"));
+    assert!(stdout.contains("chainbot catalog list"));
+    assert!(stdout.contains("chainbot catalog show <reference>"));
     assert!(stderr.is_empty());
 }
 
@@ -526,6 +548,8 @@ fn status_prints_human_summary_for_basic_root() {
     assert!(stdout.contains("wf-alpha"));
     assert!(stdout.contains("tr-market"));
     assert!(!stdout.contains("Legacy Layout"));
+    assert!(stdout.contains("Plugins"));
+    assert!(stdout.contains("installed=1 builtin=1 external_node=0 external_trigger=0"));
     assert!(stderr.is_empty());
 }
 
@@ -1280,6 +1304,27 @@ fn stop_during_startup_cleans_up_pending_daemon_launch() {
     let status_payload = serde_json::from_slice::<serde_json::Value>(&status_output.stdout)
         .expect("status json should decode after startup-stop race");
     assert_eq!(status_payload["serve"]["state"], "idle");
+}
+
+#[test]
+fn status_json_includes_plugin_summary_without_breaking_existing_fields() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status --json should execute");
+
+    assert!(output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("status json should decode");
+    assert_eq!(payload["root"]["profile"], "basic");
+    assert_eq!(payload["plugins"]["installed_count"], 1);
+    assert_eq!(payload["plugins"]["builtin_count"], 1);
+    assert_eq!(payload["plugins"]["external_node_count"], 0);
+    assert_eq!(payload["plugins"]["external_trigger_count"], 0);
 }
 
 fn chainbot_bin() -> PathBuf {

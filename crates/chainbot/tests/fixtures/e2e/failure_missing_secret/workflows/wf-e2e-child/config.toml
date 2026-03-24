@@ -28,9 +28,9 @@ key = "token"
 [[nodes]]
 manifest_version = "2.0.0"
 id = "external-node"
-kind = "builtin"
-plugin = "builtin.external_node"
-operation = "node-e2e-plugin"
+kind = "plugin"
+plugin = "node-e2e-plugin"
+operation = "normalize"
 depends_on = ["script-node"]
 
 [[nodes.inputs]]

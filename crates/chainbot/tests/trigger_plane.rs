@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chainbot::builtins::triggers::build_builtin_trigger_emissions;
 use chainbot::config::RootLayout;
 use chainbot::errors::ContractError;
-use chainbot::plugin::PluginManifest;
+use chainbot::plugin::{PluginEventSchemaDescriptor, PluginManifest};
 use chainbot::state::StateLayout;
 use chainbot::trigger::{
     TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlane, TriggerPlaneError,
@@ -973,6 +973,11 @@ fn plugin_manifest(
         executable: Some(executable.to_string()),
         input_schema: Vec::new(),
         output_schema: Vec::new(),
+        operations: Vec::new(),
+        event_schema: (kind == "external_trigger").then(|| PluginEventSchemaDescriptor {
+            summary: Some("External trigger payload".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        }),
         manifest_path: PathBuf::new(),
     }
 }

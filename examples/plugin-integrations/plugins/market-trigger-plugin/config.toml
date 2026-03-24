@@ -4,3 +4,7 @@ kind = "external_trigger"
 entrypoint = "trigger.exec.v1"
 capabilities = ["trigger.listen.event"]
 executable = "bin/external_trigger.sh"
+
+[event_schema]
+summary = "Market tick payload"
+fields = ["symbol", "price", "venue"]
