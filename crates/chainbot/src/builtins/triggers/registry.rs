@@ -4,6 +4,7 @@ use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::BuiltinTriggerRegistry;
 use crate::builtins::triggers::emitters::{
     cron::CronTriggerHandler, manual::ManualTriggerHandler, market_tick::MarketTickTriggerHandler,
+    webhook::WebhookTriggerHandler, websocket::WebSocketTriggerHandler,
 };
 use crate::errors::ContractError;
 use crate::trigger::{TriggerDefinition, TriggerEmission, TriggerKind};
@@ -45,6 +46,8 @@ pub(crate) fn default_builtin_trigger_registry() -> BuiltinTriggerRegistry {
     registry.register_handler(CronTriggerHandler);
     registry.register_handler(ManualTriggerHandler);
     registry.register_handler(MarketTickTriggerHandler);
+    registry.register_handler(WebhookTriggerHandler);
+    registry.register_handler(WebSocketTriggerHandler);
     registry
 }
 
