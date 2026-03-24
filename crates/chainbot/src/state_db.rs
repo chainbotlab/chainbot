@@ -18,8 +18,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::config::{RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig};
 use crate::state::{
-    LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot, ServeLeaseState,
-    TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord, WorkflowRuntimeLogEntry,
+    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
+    ServeLeaseState, TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord,
+    WorkflowRuntimeLogEntry,
 };
 
 const SERVE_LEASE_KEY: &str = "serve";
@@ -1666,6 +1667,327 @@ impl RuntimeStateStore {
         }
     }
 
+    pub fn list_replayable_trigger_records(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<TriggerEventRecord>, RuntimeStateError> {
+        let limit = limit.max(1).min(i64::MAX as usize);
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT tr.schema_version, tr.run_id, tr.sequence, tr.trigger_id, tr.workflow_id, tr.event_id,
+                                tr.checkpoint, tr.source, tr.accepted_at_ms, tr.payload_json,
+                                tr.dedup_key, tr.dedup_expires_at_ms, tr.cooldown_key, tr.cooldown_expires_at_ms
+                         FROM trigger_event_records tr
+                         LEFT JOIN run_summaries rs ON rs.run_id = tr.run_id
+                         WHERE rs.run_id IS NULL
+                         ORDER BY tr.accepted_at_ms ASC, tr.trigger_id ASC, tr.sequence ASC
+                         LIMIT ?1",
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "prepare sqlite replayable trigger records query",
+                        source,
+                    })?;
+                let rows = statement
+                    .query_map(params![limit_i64], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, Option<i64>>(11)?,
+                            row.get::<_, Option<String>>(12)?,
+                            row.get::<_, Option<i64>>(13)?,
+                        ))
+                    })
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "query sqlite replayable trigger records",
+                        source,
+                    })?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let row = row.map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "decode sqlite replayable trigger record row",
+                        source,
+                    })?;
+                    records.push(decode_trigger_record_row(row)?);
+                }
+                Ok(records)
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                let rows = client
+                    .query(
+                        "SELECT tr.schema_version, tr.run_id, tr.sequence, tr.trigger_id, tr.workflow_id, tr.event_id,
+                                tr.checkpoint, tr.source, tr.accepted_at_ms, tr.payload_json,
+                                tr.dedup_key, tr.dedup_expires_at_ms, tr.cooldown_key, tr.cooldown_expires_at_ms
+                         FROM trigger_event_records tr
+                         LEFT JOIN run_summaries rs ON rs.run_id = tr.run_id
+                         WHERE rs.run_id IS NULL
+                         ORDER BY tr.accepted_at_ms ASC, tr.trigger_id ASC, tr.sequence ASC
+                         LIMIT $1",
+                        &[&limit_i64],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "query postgres replayable trigger records",
+                        source,
+                    })?;
+                let mut records = Vec::with_capacity(rows.len());
+                for row in rows {
+                    records.push(decode_trigger_record_row((
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                        row.get(5),
+                        row.get(6),
+                        row.get(7),
+                        row.get(8),
+                        row.get(9),
+                        row.get(10),
+                        row.get(11),
+                        row.get(12),
+                        row.get(13),
+                    ))?);
+                }
+                Ok(records)
+            }
+        }
+    }
+
+    pub fn append_ingress_inbox_record(
+        &mut self,
+        record: &IngressInboxRecord,
+    ) -> Result<bool, RuntimeStateError> {
+        let payload_json = serde_json::to_string(&record.payload).map_err(|source| {
+            RuntimeStateError::JsonEncode {
+                field: "ingress_inbox_records.payload_json",
+                source,
+            }
+        })?;
+        let headers_json = serde_json::to_string(&record.headers).map_err(|source| {
+            RuntimeStateError::JsonEncode {
+                field: "ingress_inbox_records.headers_json",
+                source,
+            }
+        })?;
+
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => connection
+                .execute(
+                    "INSERT INTO ingress_inbox_records (
+                         inbox_id, schema_version, trigger_id, workflow_id, transport_kind,
+                         ingress_event_id, source, route_path, http_method, received_at_ms,
+                         payload_json, headers_json, remote_addr, processed_at_ms, last_error
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                     ON CONFLICT(trigger_id, ingress_event_id) DO NOTHING",
+                    params![
+                        record.inbox_id,
+                        record.schema_version,
+                        record.trigger_id,
+                        record.workflow_id,
+                        record.transport_kind,
+                        record.ingress_event_id,
+                        record.source,
+                        record.route_path,
+                        record.http_method,
+                        record.received_at_ms,
+                        payload_json,
+                        headers_json,
+                        record.remote_addr,
+                        record.processed_at_ms,
+                        record.last_error,
+                    ],
+                )
+                .map(|changed| changed > 0)
+                .map_err(|source| RuntimeStateError::Sqlite {
+                    path: path.clone(),
+                    operation: "insert sqlite ingress inbox record",
+                    source,
+                }),
+            RuntimeStorageConnection::Postgres { client, .. } => client
+                .execute(
+                    "INSERT INTO ingress_inbox_records (
+                         inbox_id, schema_version, trigger_id, workflow_id, transport_kind,
+                         ingress_event_id, source, route_path, http_method, received_at_ms,
+                         payload_json, headers_json, remote_addr, processed_at_ms, last_error
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                     ON CONFLICT(trigger_id, ingress_event_id) DO NOTHING",
+                    &[
+                        &record.inbox_id,
+                        &record.schema_version,
+                        &record.trigger_id,
+                        &record.workflow_id,
+                        &record.transport_kind,
+                        &record.ingress_event_id,
+                        &record.source,
+                        &record.route_path,
+                        &record.http_method,
+                        &record.received_at_ms,
+                        &payload_json,
+                        &headers_json,
+                        &record.remote_addr,
+                        &record.processed_at_ms,
+                        &record.last_error,
+                    ],
+                )
+                .map(|changed| changed > 0)
+                .map_err(|source| RuntimeStateError::Postgres {
+                    operation: "insert postgres ingress inbox record",
+                    source,
+                }),
+        }
+    }
+
+    pub fn list_pending_ingress_inbox_records(
+        &mut self,
+        trigger_id: &str,
+        limit: i64,
+    ) -> Result<Vec<IngressInboxRecord>, RuntimeStateError> {
+        let limit = limit.max(1);
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT inbox_id, schema_version, trigger_id, workflow_id, transport_kind,
+                                ingress_event_id, source, route_path, http_method, received_at_ms,
+                                payload_json, headers_json, remote_addr, processed_at_ms, last_error
+                         FROM ingress_inbox_records
+                         WHERE trigger_id = ?1 AND processed_at_ms IS NULL
+                         ORDER BY received_at_ms ASC, inbox_id ASC
+                         LIMIT ?2",
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "prepare sqlite pending ingress inbox query",
+                        source,
+                    })?;
+                let rows = statement
+                    .query_map(params![trigger_id, limit], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, i64>(9)?,
+                            row.get::<_, String>(10)?,
+                            row.get::<_, String>(11)?,
+                            row.get::<_, Option<String>>(12)?,
+                            row.get::<_, Option<i64>>(13)?,
+                            row.get::<_, Option<String>>(14)?,
+                        ))
+                    })
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "query sqlite pending ingress inbox records",
+                        source,
+                    })?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let row = row.map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "decode sqlite ingress inbox row",
+                        source,
+                    })?;
+                    records.push(decode_ingress_inbox_record_row(row)?);
+                }
+                Ok(records)
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                let rows = client
+                    .query(
+                        "SELECT inbox_id, schema_version, trigger_id, workflow_id, transport_kind,
+                                ingress_event_id, source, route_path, http_method, received_at_ms,
+                                payload_json, headers_json, remote_addr, processed_at_ms, last_error
+                         FROM ingress_inbox_records
+                         WHERE trigger_id = $1 AND processed_at_ms IS NULL
+                         ORDER BY received_at_ms ASC, inbox_id ASC
+                         LIMIT $2",
+                        &[&trigger_id, &limit],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "query postgres pending ingress inbox records",
+                        source,
+                    })?;
+                let mut records = Vec::with_capacity(rows.len());
+                for row in rows {
+                    records.push(decode_ingress_inbox_record_row((
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                        row.get(5),
+                        row.get(6),
+                        row.get(7),
+                        row.get(8),
+                        row.get(9),
+                        row.get(10),
+                        row.get(11),
+                        row.get(12),
+                        row.get(13),
+                        row.get(14),
+                    ))?);
+                }
+                Ok(records)
+            }
+        }
+    }
+
+    pub fn mark_ingress_inbox_processed(
+        &mut self,
+        inbox_id: &str,
+        processed_at_ms: i64,
+    ) -> Result<(), RuntimeStateError> {
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                connection
+                    .execute(
+                        "UPDATE ingress_inbox_records
+                         SET processed_at_ms = ?2, last_error = NULL
+                         WHERE inbox_id = ?1",
+                        params![inbox_id, processed_at_ms],
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "mark sqlite ingress inbox record processed",
+                        source,
+                    })?;
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                client
+                    .execute(
+                        "UPDATE ingress_inbox_records
+                         SET processed_at_ms = $2, last_error = NULL
+                         WHERE inbox_id = $1",
+                        &[&inbox_id, &processed_at_ms],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "mark postgres ingress inbox record processed",
+                        source,
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn write_trigger_record(
         &mut self,
         record: &TriggerEventRecord,
@@ -2445,15 +2767,34 @@ impl RuntimeStateStore {
              );
 
              CREATE TABLE IF NOT EXISTS trigger_snapshots (
-                trigger_id TEXT PRIMARY KEY,
-                schema_version TEXT NOT NULL,
-                last_event_id TEXT NULL,
-                last_accepted_at_ms BIGINT NULL,
-                last_sequence BIGINT NOT NULL,
-                accepted_event_ids_json TEXT NOT NULL,
-                dedup_tokens_json TEXT NOT NULL,
-                cooldown_tokens_json TEXT NOT NULL
-             );
+                 trigger_id TEXT PRIMARY KEY,
+                 schema_version TEXT NOT NULL,
+                 last_event_id TEXT NULL,
+                 last_accepted_at_ms BIGINT NULL,
+                 last_sequence BIGINT NOT NULL,
+                 accepted_event_ids_json TEXT NOT NULL,
+                 dedup_tokens_json TEXT NOT NULL,
+                 cooldown_tokens_json TEXT NOT NULL
+              );
+
+             CREATE TABLE IF NOT EXISTS ingress_inbox_records (
+                 inbox_id TEXT PRIMARY KEY,
+                 schema_version TEXT NOT NULL,
+                 trigger_id TEXT NOT NULL,
+                 workflow_id TEXT NOT NULL,
+                 transport_kind TEXT NOT NULL,
+                 ingress_event_id TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 route_path TEXT NOT NULL,
+                 http_method TEXT NULL,
+                 received_at_ms BIGINT NOT NULL,
+                 payload_json TEXT NOT NULL,
+                 headers_json TEXT NOT NULL,
+                 remote_addr TEXT NULL,
+                 processed_at_ms BIGINT NULL,
+                 last_error TEXT NULL,
+                 UNIQUE (trigger_id, ingress_event_id)
+              );
 
              CREATE TABLE IF NOT EXISTS archived_run_summaries (
                 archived_at_ms BIGINT NOT NULL,
@@ -2510,6 +2851,12 @@ impl RuntimeStateStore {
              CREATE INDEX IF NOT EXISTS idx_trigger_event_records_trigger_sequence
              ON trigger_event_records (trigger_id, sequence DESC);
 
+             CREATE INDEX IF NOT EXISTS idx_trigger_event_records_run_id
+             ON trigger_event_records (run_id);
+
+             CREATE INDEX IF NOT EXISTS idx_ingress_inbox_records_trigger_received
+             ON ingress_inbox_records (trigger_id, processed_at_ms, received_at_ms ASC, inbox_id ASC);
+
              CREATE INDEX IF NOT EXISTS idx_daemon_sessions_owner
              ON daemon_sessions (owner_id, stopped_at_ms, lease_expires_at_ms DESC);
 
@@ -2535,7 +2882,7 @@ impl RuntimeStateStore {
                 connection
                     .execute(
                         "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
-                        params![3_i64, now_ms],
+                        params![4_i64, now_ms],
                     )
                     .map_err(|source| RuntimeStateError::Sqlite {
                         path: path.clone(),
@@ -2555,7 +2902,7 @@ impl RuntimeStateStore {
                         "INSERT INTO schema_migrations (version, applied_at_ms)
                          VALUES ($1, $2)
                          ON CONFLICT(version) DO NOTHING",
-                        &[&3_i64, &now_ms],
+                        &[&4_i64, &now_ms],
                     )
                     .map_err(|source| RuntimeStateError::Postgres {
                         operation: "record postgres schema migration",
@@ -2829,5 +3176,53 @@ fn decode_trigger_record_row(
         dedup_expires_at_ms,
         cooldown_key,
         cooldown_expires_at_ms,
+    })
+}
+
+fn decode_ingress_inbox_record_row(
+    row: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ),
+) -> Result<IngressInboxRecord, RuntimeStateError> {
+    let payload =
+        serde_json::from_str(&row.10).map_err(|source| RuntimeStateError::JsonDecode {
+            field: "ingress_inbox_records.payload_json",
+            source,
+        })?;
+    let headers =
+        serde_json::from_str(&row.11).map_err(|source| RuntimeStateError::JsonDecode {
+            field: "ingress_inbox_records.headers_json",
+            source,
+        })?;
+    Ok(IngressInboxRecord {
+        inbox_id: row.0,
+        schema_version: row.1,
+        trigger_id: row.2,
+        workflow_id: row.3,
+        transport_kind: row.4,
+        ingress_event_id: row.5,
+        source: row.6,
+        route_path: row.7,
+        http_method: row.8,
+        received_at_ms: row.9,
+        payload,
+        headers,
+        remote_addr: row.12,
+        processed_at_ms: row.13,
+        last_error: row.14,
     })
 }
