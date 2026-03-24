@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{assert_required_major, assert_supported_major, ContractError};
+use crate::ingress::build_desired_ingress_state;
 use crate::plugin::PluginManifest;
 use crate::script_protocol::{WorkerRequestEnvelope, WorkerResponseEnvelope};
 use crate::secrets::SecretReference;
@@ -624,6 +625,8 @@ fn validate_bundle_contracts(
             });
         }
     }
+
+    let _ = build_desired_ingress_state(triggers)?;
 
     Ok(())
 }
