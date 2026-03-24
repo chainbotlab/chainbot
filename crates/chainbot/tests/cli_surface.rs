@@ -421,6 +421,7 @@ fn validate_accepts_basic_root() {
 #[test]
 fn validate_accepts_curated_examples() {
     let single_workflow_root = workspace_root().join("examples").join("single-workflow");
+    let core_builtins_root = workspace_root().join("examples").join("core-builtins");
     let builtin_triggers_root = workspace_root().join("examples").join("builtin-triggers");
     let workflow_composition_root = workspace_root()
         .join("examples")
@@ -432,6 +433,7 @@ fn validate_accepts_curated_examples() {
 
     for root in [
         single_workflow_root,
+        core_builtins_root,
         builtin_triggers_root,
         workflow_composition_root,
         plugin_integrations_root,
