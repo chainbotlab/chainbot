@@ -117,9 +117,11 @@ impl ExternalNodePluginHost {
             });
         }
 
+        let operation = manifest.node_operation(&request.operation)?;
+
         validate_output_schema(
             &manifest.plugin_id,
-            &manifest.output_schema,
+            &operation.output_schema,
             &response.output,
         )?;
 
