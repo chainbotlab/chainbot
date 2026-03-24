@@ -28,6 +28,10 @@ use crate::config::{
 };
 use crate::errors::UserFacingError;
 use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
+use crate::ingress::{
+    build_desired_ingress_state, drain_ingress_emissions, DesiredIngressState, IngressRuntimeError,
+    TriggerIngressSupervisor,
+};
 use crate::plugin::{PluginKind, PluginManifest};
 use crate::state::{
     sanitize_path_component, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState,
@@ -48,6 +52,8 @@ const SERVE_IDLE_POLL_INTERVAL_MS: u64 = 250;
 const SERVE_ERROR_BACKOFF_MS: u64 = 1_000;
 const SERVE_START_ACK_TIMEOUT_MS: u64 = 5_000;
 const SERVE_STOP_TIMEOUT_MS: u64 = 5_000;
+const INGRESS_INBOX_BATCH_LIMIT: usize = 256;
+const REPLAYABLE_TRIGGER_BATCH_LIMIT: usize = 256;
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const CHAINBOT_TEST_DAEMON_START_DELAY_MS_ENV: &str = "CHAINBOT_TEST_DAEMON_START_DELAY_MS";
 const CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS_ENV: &str =
@@ -105,6 +111,57 @@ symbol = "BTCUSDT"
 [input_mapping]
 symbol = "payload.symbol"
 price = "payload.price"
+"#;
+const WEBHOOK_TRIGGER_CONFIG_EXAMPLE: &str = r#"# triggers/tr-webhook/config.toml
+manifest_version = "2.0.0"
+trigger_id = "tr-webhook"
+kind = "builtin"
+source = "webhook"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+bind = "127.0.0.1:8080"
+path = "/ingress/webhook"
+method = "POST"
+max_body_bytes = 65536
+content_type = "application/json"
+idempotency_header = "x-event-id"
+
+[params.auth]
+kind = "header_token"
+header_name = "x-chainbot-token"
+token = "dev-webhook-token"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+event_id = "payload.id"
+"#;
+const WEBSOCKET_TRIGGER_CONFIG_EXAMPLE: &str = r#"# triggers/tr-websocket/config.toml
+manifest_version = "2.0.0"
+trigger_id = "tr-websocket"
+kind = "builtin"
+source = "websocket"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+bind = "127.0.0.1:8081"
+path = "/ingress/ws"
+max_connections = 32
+max_message_bytes = 65536
+idle_timeout_ms = 30000
+
+[params.auth]
+kind = "header_token"
+header_name = "x-chainbot-token"
+token = "dev-websocket-token"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+event = "payload.event"
 "#;
 const PLUGIN_CONFIG_EXAMPLE: &str = r#"# plugins/quote-plugin/config.toml
 manifest_version = "2.0.0"
@@ -1624,6 +1681,8 @@ fn help_text(topic: HelpTopic) -> String {
                 ("Root config example", "toml", ROOT_CONFIG_EXAMPLE),
                 ("Workflow package example", "toml", WORKFLOW_CONFIG_EXAMPLE),
                 ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
+                ("Webhook trigger example", "toml", WEBHOOK_TRIGGER_CONFIG_EXAMPLE),
+                ("WebSocket trigger example", "toml", WEBSOCKET_TRIGGER_CONFIG_EXAMPLE),
                 ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
             ],
             &[
@@ -1734,6 +1793,8 @@ fn help_text(topic: HelpTopic) -> String {
             ],
             &[
                 ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
+                ("Webhook trigger example", "toml", WEBHOOK_TRIGGER_CONFIG_EXAMPLE),
+                ("WebSocket trigger example", "toml", WEBSOCKET_TRIGGER_CONFIG_EXAMPLE),
                 ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
             ],
             &[
@@ -2382,6 +2443,15 @@ fn map_trigger_error(error: TriggerPlaneError) -> UserFacingError {
     }
 }
 
+fn map_ingress_error(error: IngressRuntimeError) -> UserFacingError {
+    match error {
+        IngressRuntimeError::RuntimeState(source) => {
+            map_runtime_state_error("operate ingress runtime state", source)
+        }
+        other => UserFacingError::state_with_code("ingress_runtime_error", other.to_string()),
+    }
+}
+
 fn maybe_prepare_e2e_root(layout: &RootLayout) -> Result<(), UserFacingError> {
     if layout.root.exists() {
         return Ok(());
@@ -2505,6 +2575,8 @@ fn run_internal_serve_daemon_loop(
     owner_id: &str,
     pid: i64,
 ) -> Result<(), UserFacingError> {
+    let ingress_supervisor =
+        TriggerIngressSupervisor::start(storage_config.clone()).map_err(map_ingress_error)?;
     let mut lease_supervisor = ServeLeaseSupervisor::new(
         storage_config.clone(),
         owner_id.to_owned(),
@@ -2512,7 +2584,7 @@ fn run_internal_serve_daemon_loop(
         current_time_ms()?,
     );
 
-    loop {
+    let loop_result = (|| loop {
         let observed_at_ms = current_time_ms()?;
         let mut control_store = RuntimeStateStore::open(storage_config, observed_at_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
@@ -2528,6 +2600,7 @@ fn run_internal_serve_daemon_loop(
         let mut runtime = match request.load_runtime_context() {
             Ok(runtime) => runtime,
             Err(error) => {
+                let _ = ingress_supervisor.reconcile(DesiredIngressState::default());
                 let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
                     .map_err(|open_error| {
                     map_runtime_state_error("open runtime state store", open_error)
@@ -2541,6 +2614,11 @@ fn run_internal_serve_daemon_loop(
                 continue;
             }
         };
+        let desired_ingress = build_desired_ingress_state(&runtime.definitions.triggers)
+            .map_err(UserFacingError::from_contract)?;
+        ingress_supervisor
+            .reconcile(desired_ingress)
+            .map_err(map_ingress_error)?;
         let mut iteration_store = RuntimeStateStore::open(&runtime.storage_config, observed_at_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         iteration_store
@@ -2566,7 +2644,10 @@ fn run_internal_serve_daemon_loop(
                 thread::sleep(std::time::Duration::from_millis(SERVE_ERROR_BACKOFF_MS));
             }
         }
-    }
+    })();
+
+    let shutdown_result = ingress_supervisor.shutdown().map_err(map_ingress_error);
+    loop_result.and(shutdown_result)
 }
 
 fn serve_once_with_lease(
@@ -2575,6 +2656,8 @@ fn serve_once_with_lease(
     lease_supervisor: &mut ServeLeaseSupervisor,
 ) -> Result<CliOutput, UserFacingError> {
     lease_supervisor.maybe_renew(accepted_at_ms)?;
+    let replay_requests =
+        load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
     let trigger_manifests = runtime
         .definitions
         .plugins
@@ -2591,6 +2674,19 @@ fn serve_once_with_lease(
     let builtin_events =
         build_builtin_trigger_emissions(&runtime.definitions.triggers, accepted_at_ms)
             .map_err(UserFacingError::from_contract)?;
+    let drained_ingress = drain_ingress_emissions(
+        &mut runtime.state_store,
+        &runtime.definitions.triggers,
+        INGRESS_INBOX_BATCH_LIMIT,
+    )
+    .map_err(map_trigger_error)?;
+    let mut builtin_events = builtin_events;
+    for (trigger_id, mut ingress_events) in drained_ingress.emissions {
+        builtin_events
+            .entry(trigger_id)
+            .or_default()
+            .append(&mut ingress_events);
+    }
 
     let trigger_store = RuntimeStateStore::open(&runtime.storage_config, accepted_at_ms)
         .map_err(|error| map_runtime_state_error("open trigger runtime state store", error))?;
@@ -2621,11 +2717,21 @@ fn serve_once_with_lease(
     let run_requests = trigger_plane
         .collect_run_requests_with_progress(accepted_at_ms, &mut renew_progress)
         .map_err(map_trigger_error)?;
-    if run_requests.is_empty() {
-        return Ok(CliOutput::text(
-            "serve completed: no accepted trigger events",
-        ));
+    for inbox_id in drained_ingress.inbox_ids {
+        runtime
+            .state_store
+            .mark_ingress_inbox_processed(&inbox_id, accepted_at_ms)
+            .map_err(|error| map_runtime_state_error("mark ingress inbox processed", error))?;
     }
+    if run_requests.is_empty() {
+        if replay_requests.is_empty() {
+            return Ok(CliOutput::text(
+                "serve completed: no accepted trigger events",
+            ));
+        }
+    }
+
+    let run_requests = merge_trigger_requests(replay_requests, run_requests);
 
     let mut completed_runs = Vec::with_capacity(run_requests.len());
     let mut failures = Vec::new();
@@ -2846,6 +2952,54 @@ fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> Norma
     }
 
     request
+}
+
+fn load_replayable_trigger_requests(
+    runtime: &mut RuntimeContext,
+    limit: usize,
+) -> Result<Vec<TriggerRunRequest>, UserFacingError> {
+    runtime
+        .state_store
+        .list_replayable_trigger_records(limit)
+        .map_err(|error| map_runtime_state_error("list replayable trigger records", error))
+        .map(|records| {
+            records
+                .into_iter()
+                .map(replay_trigger_request_from_record)
+                .collect()
+        })
+}
+
+fn replay_trigger_request_from_record(record: TriggerEventRecord) -> TriggerRunRequest {
+    TriggerRunRequest {
+        run_id: record.run_id,
+        workflow_id: record.workflow_id,
+        trigger_id: record.trigger_id.clone(),
+        event_id: record.event_id,
+        source: record.source,
+        accepted_at_ms: record.accepted_at_ms,
+        payload: record.payload,
+        trigger_record_ref: format!(
+            "db://trigger_event_records/{}/{}",
+            record.trigger_id, record.sequence
+        ),
+    }
+}
+
+fn merge_trigger_requests(
+    replay_requests: Vec<TriggerRunRequest>,
+    new_requests: Vec<TriggerRunRequest>,
+) -> Vec<TriggerRunRequest> {
+    let mut merged = Vec::with_capacity(replay_requests.len().saturating_add(new_requests.len()));
+    let mut seen_run_ids = BTreeSet::new();
+
+    for request in replay_requests.into_iter().chain(new_requests) {
+        if seen_run_ids.insert(request.run_id.clone()) {
+            merged.push(request);
+        }
+    }
+
+    merged
 }
 
 fn write_run_status(
