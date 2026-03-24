@@ -18,8 +18,8 @@ use chainbot::config::{
     RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig,
 };
 use chainbot::state::{
-    LeaseAcquireResult, RunRecordSummary, RunStatus, TriggerCheckpointRecord, TriggerEventRecord,
-    TriggerSnapshotRecord,
+    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, TriggerCheckpointRecord,
+    TriggerEventRecord, TriggerSnapshotRecord,
 };
 use chainbot::state_db::RuntimeStateStore;
 use postgres::{Client, NoTls};
@@ -120,7 +120,7 @@ fn runtime_state_backends_share_core_semantics() {
 
         let record = TriggerEventRecord {
             schema_version: "1.0.0".to_owned(),
-            run_id: format!("{}-run-1", backend.slug),
+            run_id: format!("{}-trigger-run-1", backend.slug),
             sequence: 1,
             trigger_id: "tr-alpha".to_owned(),
             workflow_id: "wf-alpha".to_owned(),
@@ -156,6 +156,11 @@ fn runtime_state_backends_share_core_semantics() {
         assert!(!store
             .cooldown_is_ready(record.cooldown_key.as_deref().unwrap(), 1_710_900_005_000)
             .expect("cooldown readiness query should succeed"));
+        let replayable_records = store
+            .list_replayable_trigger_records(10)
+            .expect("replayable trigger records should list");
+        assert_eq!(replayable_records.len(), 1);
+        assert_eq!(replayable_records[0].run_id, record.run_id);
 
         let mut snapshot = TriggerSnapshotRecord::new("tr-alpha");
         snapshot.apply_record(&record);
@@ -199,6 +204,59 @@ fn runtime_state_backends_share_core_semantics() {
             "{} checkpoint should roundtrip",
             backend.name
         );
+        store
+            .write_run_summary(&RunRecordSummary {
+                schema_version: String::from("1.0.0"),
+                run_id: record.run_id.clone(),
+                workflow_id: record.workflow_id.clone(),
+                status: RunStatus::Failed,
+                started_at_ms: record.accepted_at_ms,
+                finished_at_ms: Some(record.accepted_at_ms.saturating_add(1_000)),
+            })
+            .expect("run summary for replay suppression should persist");
+        assert!(store
+            .list_replayable_trigger_records(10)
+            .expect("replayable trigger records should be empty when run summary exists")
+            .is_empty());
+
+        let inbox_record = IngressInboxRecord {
+            schema_version: String::from("1.0.0"),
+            inbox_id: format!("{}-inbox-1", backend.slug),
+            trigger_id: String::from("tr-alpha"),
+            workflow_id: String::from("wf-alpha"),
+            transport_kind: String::from("webhook"),
+            ingress_event_id: format!("{}-evt-1", backend.slug),
+            source: String::from("webhook"),
+            route_path: String::from("/hook"),
+            http_method: Some(String::from("POST")),
+            received_at_ms: 1_710_900_005_000,
+            payload: serde_json::json!({"ok": true}),
+            headers: std::collections::BTreeMap::from([(
+                String::from("x-test"),
+                String::from("1"),
+            )]),
+            remote_addr: Some(String::from("127.0.0.1:4000")),
+            processed_at_ms: None,
+            last_error: None,
+        };
+        assert!(store
+            .append_ingress_inbox_record(&inbox_record)
+            .expect("ingress inbox insert should succeed"));
+        assert!(!store
+            .append_ingress_inbox_record(&inbox_record)
+            .expect("duplicate ingress inbox insert should be ignored"));
+        let pending = store
+            .list_pending_ingress_inbox_records("tr-alpha", 10)
+            .expect("pending ingress inbox records should list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].ingress_event_id, inbox_record.ingress_event_id);
+        store
+            .mark_ingress_inbox_processed(&inbox_record.inbox_id, 1_710_900_006_000)
+            .expect("mark ingress inbox processed should succeed");
+        assert!(store
+            .list_pending_ingress_inbox_records("tr-alpha", 10)
+            .expect("processed ingress inbox rows should no longer be pending")
+            .is_empty());
 
         backend.reset();
     }
