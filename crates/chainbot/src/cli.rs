@@ -20,6 +20,10 @@ use crate::builtins::{
     build_builtin_registry, build_builtin_trigger_emissions, BuiltinRuntimeContext,
     SecretDecryptMode,
 };
+use crate::catalog::{
+    build_catalog_list, build_catalog_show, build_status_plugin_summary, render_catalog_list,
+    render_catalog_show, CatalogFilterKind, CatalogReference, StatusPluginSummaryView,
+};
 use crate::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
     LocalStorageDefinition, RawDebugArtifactsDefinition, RootConfigDefinition,
@@ -168,8 +172,14 @@ manifest_version = "2.0.0"
 plugin_id = "quote-plugin"
 kind = "external_node"
 entrypoint = "node.exec.v1"
-capabilities = ["normalize"]
+capabilities = ["node:execute"]
 executable = "bin/quote-plugin.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize quote payload"
+input_schema = ["symbol", "token"]
+output_schema = ["decision"]
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +189,7 @@ pub enum CliCommand {
     Init,
     Status,
     Observe,
+    Catalog,
     Stop,
     Trigger,
     Validate,
@@ -195,6 +206,7 @@ pub enum HelpTopic {
     Init,
     Status,
     Observe,
+    Catalog,
     Stop,
     Trigger,
     Validate,
@@ -208,6 +220,7 @@ pub struct CliRequest {
     pub command: CliCommand,
     pub json_output: bool,
     pub trigger_operation: Option<TriggerOperation>,
+    pub catalog_request: Option<CatalogRequest>,
     pub observe_request: Option<ObserveRequest>,
     pub daemon_owner_id: Option<String>,
 }
@@ -229,6 +242,12 @@ pub struct ObserveRequest {
     pub limit: usize,
     pub trigger_id: Option<String>,
     pub run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogRequest {
+    List { filter: Option<CatalogFilterKind> },
+    Show { reference: CatalogReference },
 }
 
 #[derive(Debug)]
@@ -321,6 +340,7 @@ struct StatusOutput {
     serve: StatusServeView,
     workflows: Vec<StatusWorkflowView>,
     triggers: Vec<StatusTriggerView>,
+    plugins: StatusPluginSummaryView,
     summary: StatusSummaryView,
 }
 
@@ -410,6 +430,7 @@ impl CliRequest {
                 command: CliCommand::Help(HelpTopic::General),
                 json_output: false,
                 trigger_operation: None,
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             }),
@@ -417,6 +438,7 @@ impl CliRequest {
                 command: CliCommand::Version,
                 json_output: false,
                 trigger_operation: None,
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             }),
@@ -425,6 +447,7 @@ impl CliRequest {
             "init" => Self::parse_command_args(CliCommand::Init, args),
             "status" => Self::parse_command_args(CliCommand::Status, args),
             "observe" => Self::parse_observe_args(args),
+            "catalog" => Self::parse_catalog_args(args),
             "stop" => Self::parse_command_args(CliCommand::Stop, args),
             "trigger" => Self::parse_trigger_args(args),
             "validate" => Self::parse_command_args(CliCommand::Validate, args),
@@ -446,6 +469,7 @@ impl CliRequest {
             CliCommand::Init => self.execute_init(),
             CliCommand::Status => self.execute_status(),
             CliCommand::Observe => self.execute_observe(),
+            CliCommand::Catalog => self.execute_catalog(),
             CliCommand::Stop => self.execute_stop(),
             CliCommand::Trigger => self.execute_trigger(),
             CliCommand::Validate => self.execute_validate(),
@@ -476,6 +500,7 @@ impl CliRequest {
             command: CliCommand::Help(topic),
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -496,6 +521,7 @@ impl CliRequest {
                         command: CliCommand::Help(help_topic_for(command)),
                         json_output: false,
                         trigger_operation: None,
+                        catalog_request: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -531,6 +557,7 @@ impl CliRequest {
             command,
             json_output,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -586,9 +613,144 @@ impl CliRequest {
             command: CliCommand::InternalServeDaemon,
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: Some(daemon_owner_id),
         })
+    }
+
+    fn parse_catalog_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let Some(action) = args.next() else {
+            return Err(UserFacingError::usage(
+                "`chainbot catalog` requires `list` or `show`. Run `chainbot help catalog`.",
+            ));
+        };
+        let action = action.to_string_lossy().into_owned();
+        if matches!(action.as_str(), "-h" | "--help") {
+            return Ok(Self {
+                command: CliCommand::Help(HelpTopic::Catalog),
+                json_output: false,
+                trigger_operation: None,
+                catalog_request: None,
+                observe_request: None,
+                daemon_owner_id: None,
+            });
+        }
+
+        match action.as_str() {
+            "list" => {
+                let mut json_output = false;
+                let mut filter = None;
+                let mut position = 1usize;
+                while let Some(arg) = args.next() {
+                    position += 1;
+                    let raw = arg.to_string_lossy().into_owned();
+                    match raw.as_str() {
+                        "--json" => json_output = true,
+                        "--kind" => {
+                            let Some(value) = args.next() else {
+                                return Err(UserFacingError::usage(
+                                    "`chainbot catalog list --kind` requires builtin_node, builtin_trigger, or plugin.",
+                                ));
+                            };
+                            position += 1;
+                            filter = Some(parse_catalog_filter_kind(
+                                &value.to_string_lossy(),
+                                position,
+                            )?);
+                        }
+                        _ => {
+                            if let Some((flag, value)) = raw.split_once('=') {
+                                match flag {
+                                    "--json" => {
+                                        json_output = parse_bool_flag_value(
+                                            "--json",
+                                            value,
+                                            position,
+                                            "chainbot catalog list",
+                                        )?;
+                                        continue;
+                                    }
+                                    "--kind" => {
+                                        filter = Some(parse_catalog_filter_kind(value, position)?);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            return Err(UserFacingError::usage(format!(
+                                "Unexpected argument #{position} after `chainbot catalog list`: `{raw}`. Run `chainbot help catalog` for valid forms."
+                            )));
+                        }
+                    }
+                }
+
+                Ok(Self {
+                    command: CliCommand::Catalog,
+                    json_output,
+                    trigger_operation: None,
+                    catalog_request: Some(CatalogRequest::List { filter }),
+                    observe_request: None,
+                    daemon_owner_id: None,
+                })
+            }
+            "show" => {
+                let mut json_output = false;
+                let mut reference = None;
+                let mut position = 1usize;
+                while let Some(arg) = args.next() {
+                    position += 1;
+                    let raw = arg.to_string_lossy().into_owned();
+                    match raw.as_str() {
+                        "--json" => json_output = true,
+                        _ => {
+                            if let Some((flag, value)) = raw.split_once('=') {
+                                if flag == "--json" {
+                                    json_output = parse_bool_flag_value(
+                                        "--json",
+                                        value,
+                                        position,
+                                        "chainbot catalog show",
+                                    )?;
+                                    continue;
+                                }
+                            }
+                            if reference.is_none() {
+                                reference = Some(CatalogReference::parse(&raw).map_err(|error| {
+                                    UserFacingError::usage(format!(
+                                        "Unsupported catalog reference at argument #{position} after `chainbot catalog show`: {error}. Run `chainbot catalog list` first."
+                                    ))
+                                })?);
+                                continue;
+                            }
+                            return Err(UserFacingError::usage(format!(
+                                "Unexpected argument #{position} after `chainbot catalog show`: `{raw}`. Run `chainbot help catalog` for valid forms."
+                            )));
+                        }
+                    }
+                }
+                let reference = reference.ok_or_else(|| {
+                    UserFacingError::usage(
+                        "`chainbot catalog show` requires a <kind>:<value> reference. Run `chainbot catalog list`."
+                    )
+                })?;
+
+                Ok(Self {
+                    command: CliCommand::Catalog,
+                    json_output,
+                    trigger_operation: None,
+                    catalog_request: Some(CatalogRequest::Show { reference }),
+                    observe_request: None,
+                    daemon_owner_id: None,
+                })
+            }
+            other => Err(UserFacingError::usage(format!(
+                "Unsupported catalog action at argument #1 after `chainbot catalog`: `{other}`. Use `list` or `show`."
+            ))),
+        }
     }
 
     fn parse_observe_args<I>(mut args: I) -> Result<Self, UserFacingError>
@@ -610,6 +772,7 @@ impl CliRequest {
                         command: CliCommand::Help(HelpTopic::Observe),
                         json_output: false,
                         trigger_operation: None,
+                        catalog_request: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -683,6 +846,7 @@ impl CliRequest {
             command: CliCommand::Observe,
             json_output,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: Some(ObserveRequest {
                 limit,
                 trigger_id,
@@ -707,6 +871,7 @@ impl CliRequest {
                 command: CliCommand::Help(HelpTopic::Trigger),
                 json_output: false,
                 trigger_operation: None,
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -746,6 +911,7 @@ impl CliRequest {
                 command: CliCommand::Trigger,
                 json_output,
                 trigger_operation: Some(TriggerOperation::List),
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -772,6 +938,7 @@ impl CliRequest {
                         command: CliCommand::Help(HelpTopic::Trigger),
                         json_output: false,
                         trigger_operation: None,
+                        catalog_request: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -804,6 +971,7 @@ impl CliRequest {
             } else {
                 TriggerOperation::Disable { trigger_id }
             }),
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -842,6 +1010,7 @@ impl CliRequest {
             definitions.root_config.profile,
             &definitions.workflows,
             &definitions.triggers,
+            &definitions.plugins,
             &run_summaries,
             &trigger_snapshots,
             daemon_status,
@@ -902,6 +1071,54 @@ impl CliRequest {
         }
 
         Ok(CliOutput::text(render_observe_output(&payload)))
+    }
+
+    fn execute_catalog(&self) -> Result<CliOutput, UserFacingError> {
+        let catalog_request = self.catalog_request.as_ref().ok_or_else(|| {
+            UserFacingError::usage("Missing catalog request. Run `chainbot help catalog`.")
+        })?;
+        match catalog_request {
+            CatalogRequest::List { filter } => {
+                let plugins = match filter {
+                    Some(CatalogFilterKind::BuiltinNode | CatalogFilterKind::BuiltinTrigger) => {
+                        Vec::new()
+                    }
+                    Some(CatalogFilterKind::Plugin) | None => load_catalog_plugins_if_available()?,
+                };
+                let payload = build_catalog_list(*filter, &plugins);
+                if self.json_output {
+                    let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                        UserFacingError::state(format!(
+                            "Failed to serialize catalog list payload: {source}"
+                        ))
+                    })?;
+                    return Ok(CliOutput::text(stdout));
+                }
+                Ok(CliOutput::text(render_catalog_list(&payload, *filter)))
+            }
+            CatalogRequest::Show { reference } => {
+                let plugins = match reference {
+                    CatalogReference::BuiltinNode(_) | CatalogReference::BuiltinTrigger(_) => {
+                        Vec::new()
+                    }
+                    CatalogReference::Plugin(_) => load_catalog_plugins_strict()?,
+                };
+                let payload = build_catalog_show(reference, &plugins).map_err(|error| {
+                    UserFacingError::usage(format!(
+                        "{error}. Run `chainbot catalog list` to inspect available references."
+                    ))
+                })?;
+                if self.json_output {
+                    let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                        UserFacingError::state(format!(
+                            "Failed to serialize catalog detail payload: {source}"
+                        ))
+                    })?;
+                    return Ok(CliOutput::text(stdout));
+                }
+                Ok(CliOutput::text(render_catalog_show(&payload)))
+            }
+        }
     }
 
     fn execute_validate(&self) -> Result<CliOutput, UserFacingError> {
@@ -1292,6 +1509,7 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
         "init" => Ok(HelpTopic::Init),
         "status" => Ok(HelpTopic::Status),
         "observe" => Ok(HelpTopic::Observe),
+        "catalog" => Ok(HelpTopic::Catalog),
         "stop" => Ok(HelpTopic::Stop),
         "trigger" => Ok(HelpTopic::Trigger),
         "validate" => Ok(HelpTopic::Validate),
@@ -1311,6 +1529,7 @@ fn help_topic_for(command: CliCommand) -> HelpTopic {
         CliCommand::Init => HelpTopic::Init,
         CliCommand::Status => HelpTopic::Status,
         CliCommand::Observe => HelpTopic::Observe,
+        CliCommand::Catalog => HelpTopic::Catalog,
         CliCommand::Stop => HelpTopic::Stop,
         CliCommand::Trigger => HelpTopic::Trigger,
         CliCommand::Validate => HelpTopic::Validate,
@@ -1328,6 +1547,7 @@ fn command_name(command: CliCommand) -> &'static str {
         CliCommand::Init => "init",
         CliCommand::Status => "status",
         CliCommand::Observe => "observe",
+        CliCommand::Catalog => "catalog",
         CliCommand::Stop => "stop",
         CliCommand::Trigger => "trigger",
         CliCommand::Validate => "validate",
@@ -1407,6 +1627,8 @@ fn general_help_text() -> String {
             "chainbot init",
             "chainbot status [--json]",
             "chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]",
+            "chainbot catalog list [--json] [--kind <builtin_node|builtin_trigger|plugin>]",
+            "chainbot catalog show <reference> [--json]",
             "chainbot stop",
             "chainbot trigger list [--json]",
             "chainbot trigger <enable|disable> <trigger-id>",
@@ -1433,6 +1655,7 @@ fn general_help_text() -> String {
             "init       Bootstrap a minimal ChainBot root.",
             "status     Inspect runtime state without executing workflows.",
             "observe    Inspect persisted trigger events, workflow logs, and runs.",
+            "catalog    Discover builtin capabilities and installed plugin contracts.",
             "stop       Request graceful daemon shutdown.",
             "trigger    Inspect or persist trigger package state.",
             "validate   Validate config and package contracts.",
@@ -1448,6 +1671,8 @@ fn general_help_text() -> String {
             "start with `chainbot help <command>` before generating automation around a command",
             GENERAL_HELP_EXAMPLE_HINT,
             "prefer `chainbot status --json` and `chainbot trigger list --json` for machine-readable snapshots",
+            "use `chainbot catalog list --json` when an agent needs a capability inventory",
+            "use `chainbot catalog show <reference> --json` for one capability contract",
             "use `chainbot observe --json` when an agent needs recent persisted events or logs",
         ],
     );
@@ -1586,7 +1811,42 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot observe --json --limit 5",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot observe --trigger-id tr-market",
             ],
-            &["status", "list-runs", "serve"],
+            &["status", "list-runs", "serve", "catalog"],
+        ),
+        HelpTopic::Catalog => render_help_card(
+            "catalog",
+            "Discover builtin capabilities and installed plugin contracts",
+            &[
+                "chainbot catalog list [--json] [--kind <builtin_node|builtin_trigger|plugin>]",
+                "chainbot catalog show <reference> [--json]",
+            ],
+            &[
+                "you need builtin node or trigger inventory without opening source code",
+                "you want installed plugin callable or event structure details",
+                "an agent needs stable machine-readable capability discovery before generating config",
+            ],
+            &["builtin descriptors", "installed plugin manifests when a root is available"],
+            &[],
+            &[],
+            &[
+                "prints grouped human-readable capability lists by default",
+                "prints stable JSON read models when `--json` is enabled",
+            ],
+            &[
+                "builtin descriptors are always available",
+                "installed plugins are loaded from the resolved root when one exists",
+            ],
+            &[],
+            &[
+                "malformed references are rejected with the expected `<kind>:<value>` format",
+                "unknown references direct you back to `chainbot catalog list`",
+            ],
+            &[
+                "chainbot catalog list",
+                "chainbot catalog list --json --kind plugin",
+                "chainbot catalog show plugin:quote-node-plugin",
+            ],
+            &["help", "status", "validate"],
         ),
         HelpTopic::Stop => render_help_card(
             "stop",
@@ -1650,7 +1910,7 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot trigger enable tr-market",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market",
             ],
-            &["init", "status", "validate", "serve"],
+            &["init", "status", "validate", "serve", "catalog"],
         ),
         HelpTopic::Validate => render_help_card(
             "validate",
@@ -1693,7 +1953,7 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot validate",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate",
             ],
-            &["status", "run", "serve"],
+            &["status", "run", "serve", "catalog"],
         ),
         HelpTopic::ListRuns => render_help_card(
             "list-runs",
@@ -1819,6 +2079,7 @@ fn build_status_output(
     profile: Option<String>,
     workflows: &[WorkflowDefinition],
     triggers: &[TriggerDefinition],
+    plugins: &[PluginManifest],
     run_summaries: &[RunRecordSummary],
     trigger_snapshots: &[TriggerSnapshotRecord],
     daemon_status: RuntimeDaemonStatus,
@@ -1885,6 +2146,7 @@ fn build_status_output(
         },
         workflows: workflow_views,
         triggers: trigger_views,
+        plugins: build_status_plugin_summary(plugins),
         summary: StatusSummaryView {
             workflow_count: workflows.len(),
             trigger_count: triggers.len(),
@@ -1980,6 +2242,19 @@ fn render_status_output(status: &StatusOutput) -> String {
     }
 
     lines.push(String::new());
+    lines.push(String::from("Plugins"));
+    lines.push(format!(
+        "  installed={} builtin={} external_node={} external_trigger={}",
+        status.plugins.installed_count,
+        status.plugins.builtin_count,
+        status.plugins.external_node_count,
+        status.plugins.external_trigger_count
+    ));
+    lines.push(String::from(
+        "  use `chainbot catalog list` for capability details",
+    ));
+
+    lines.push(String::new());
     lines.push(String::from("Summary"));
     lines.push(format!(
         "  workflows={} triggers={} runs={} running={}",
@@ -1990,6 +2265,37 @@ fn render_status_output(status: &StatusOutput) -> String {
     ));
 
     lines.join("\n")
+}
+
+fn parse_catalog_filter_kind(
+    value: &str,
+    position: usize,
+) -> Result<CatalogFilterKind, UserFacingError> {
+    CatalogFilterKind::parse(value).ok_or_else(|| {
+        UserFacingError::usage(format!(
+            "Unsupported --kind value at argument #{position} after `chainbot catalog list`: `{value}`. Use builtin_node, builtin_trigger, or plugin."
+        ))
+    })
+}
+
+fn load_catalog_plugins_strict() -> Result<Vec<PluginManifest>, UserFacingError> {
+    let root_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+    let bundle =
+        RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+    Ok(bundle.plugins)
+}
+
+fn load_catalog_plugins_if_available() -> Result<Vec<PluginManifest>, UserFacingError> {
+    let root_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+    match RootDefinitionBundle::load(&root_layout) {
+        Ok(bundle) => Ok(bundle.plugins),
+        Err(crate::errors::ContractError::MissingDirectory { kind: "root", .. })
+        | Err(crate::errors::ContractError::MissingFile {
+            kind: "root config",
+            ..
+        }) => Ok(Vec::new()),
+        Err(error) => Err(UserFacingError::from_contract(error)),
+    }
 }
 
 fn render_observe_output(output: &ObserveOutput) -> String {
@@ -2889,21 +3195,18 @@ fn execute_single_run(
 fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, UserFacingError> {
     let registry = build_builtin_registry(BuiltinRuntimeContext {
         root_layout: runtime.root_layout.clone(),
-        manifests: runtime
-            .definitions
-            .plugins
-            .iter()
-            .cloned()
-            .map(|manifest| (manifest.plugin_id.clone(), manifest))
-            .collect(),
         secret_mode: runtime.secret_mode,
         worker_host: runtime.worker_host.clone(),
     });
 
-    ExecutionPlane::new(
+    ExecutionPlane::with_plugin_runtime(
         runtime.definitions.workflows.clone(),
         runtime.definitions.root_config.runtime_defaults.clone(),
         registry,
+        runtime.definitions.plugins.clone(),
+        runtime.root_layout.plugins_dir.clone(),
+        runtime.root_layout.secrets_dir.clone(),
+        runtime.secret_mode,
     )
     .map_err(UserFacingError::from_contract)
 }
@@ -3068,6 +3371,7 @@ mod tests {
             command: CliCommand::Serve,
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -3137,6 +3441,7 @@ mod tests {
             command: CliCommand::Serve,
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         };
