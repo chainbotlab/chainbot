@@ -157,6 +157,7 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
         entrypoint: "node.exec.v1".to_owned(),
         capabilities: vec!["node:execute".to_owned()],
         executable: Some(executable.to_owned()),
+        trigger_runtime: None,
         input_schema: Vec::new(),
         output_schema: Vec::new(),
         operations: vec![PluginOperationDescriptor {

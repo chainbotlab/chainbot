@@ -16,7 +16,9 @@ use std::time::Duration;
 use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
 use chainbot::state::RunRecordSummary;
 use chainbot::state::RunStatus;
+use chainbot::state::StagedTriggerEventRecord;
 use chainbot::state_db::RuntimeStateStore;
+use rusqlite::Connection;
 
 const SECRET_DECRYPT_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPT_MODE_PLAINTEXT: &str = "plaintext";
@@ -218,6 +220,289 @@ fn duplicate_trigger_after_restart() {
     assert_eq!(second_runs.len(), first_runs.len());
 }
 
+#[test]
+fn disable_trigger_prevents_future_acceptance_after_restart() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-disable-prevents-replay");
+
+    let first_serve = run_chainbot(["serve"], &root, true);
+    assert!(
+        first_serve.status.success(),
+        "first serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first_serve.stdout),
+        String::from_utf8_lossy(&first_serve.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 1);
+    let first_stop = run_chainbot(["stop"], &root, true);
+    assert!(first_stop.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let first_runs = read_run_summaries(&root);
+    let first_trigger_records = count_trigger_records_for_trigger_id(&root, "external-trigger-e2e");
+    assert!(first_trigger_records >= 1);
+
+    let disable_output = run_chainbot(["trigger", "disable", "external-trigger-e2e"], &root, false);
+    assert!(
+        disable_output.status.success(),
+        "trigger disable failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&disable_output.stdout),
+        String::from_utf8_lossy(&disable_output.stderr)
+    );
+
+    let second_serve = run_chainbot(["serve"], &root, true);
+    assert!(
+        second_serve.status.success(),
+        "second serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&second_serve.stdout),
+        String::from_utf8_lossy(&second_serve.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    thread::sleep(Duration::from_millis(300));
+    let second_stop = run_chainbot(["stop"], &root, true);
+    assert!(second_stop.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let second_runs = read_run_summaries(&root);
+    let second_trigger_records =
+        count_trigger_records_for_trigger_id(&root, "external-trigger-e2e");
+    assert_eq!(second_runs.len(), first_runs.len());
+    assert_eq!(second_trigger_records, first_trigger_records);
+}
+
+#[test]
+fn lease_loss_teardown_rejects_future_acceptance_after_teardown() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-lease-loss-replay-safe");
+
+    let first_serve = run_chainbot(["serve"], &root, true);
+    assert!(
+        first_serve.status.success(),
+        "first serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first_serve.stdout),
+        String::from_utf8_lossy(&first_serve.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 1);
+
+    let baseline_runs = read_run_summaries(&root);
+    let baseline_trigger_records =
+        count_trigger_records_for_trigger_id(&root, "external-trigger-e2e");
+    assert!(baseline_trigger_records >= 1);
+
+    force_replace_serve_lease_owner(&root, "lease-stolen-owner", 9_999_999_999_999_i64);
+    wait_for_serve_state_any(&root, &["idle", "stale"]);
+
+    let cleanup_stop = run_chainbot(["stop"], &root, true);
+    assert!(cleanup_stop.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    thread::sleep(Duration::from_millis(300));
+    let after_teardown_runs = read_run_summaries(&root);
+    let after_teardown_trigger_records =
+        count_trigger_records_for_trigger_id(&root, "external-trigger-e2e");
+    assert_eq!(after_teardown_runs.len(), baseline_runs.len());
+    assert_eq!(after_teardown_trigger_records, baseline_trigger_records);
+}
+
+#[test]
+fn manifest_plugin_switch_restarts_session_and_accepts_new_event_once() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-manifest-switch-restart");
+
+    let first_serve = run_chainbot(["serve"], &root, true);
+    assert!(
+        first_serve.status.success(),
+        "first serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first_serve.stdout),
+        String::from_utf8_lossy(&first_serve.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 1);
+
+    install_v2_trigger_plugin_and_switch_trigger_manifest(&root);
+    wait_for_run_count(&root, 2);
+
+    let stop_output = run_chainbot(["stop"], &root, true);
+    assert!(stop_output.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let mut store = open_runtime_store(&root, 1_710_700_000_000);
+    let trigger_records = store
+        .list_recent_trigger_records(200, Some("external-trigger-e2e"))
+        .expect("trigger records should be queryable after plugin switch restart");
+
+    let v1_count = trigger_records
+        .iter()
+        .filter(|record| record.event_id == "external-trigger-e2e:event-external")
+        .count();
+    let v2_count = trigger_records
+        .iter()
+        .filter(|record| record.event_id == "external-trigger-e2e:event-external-v2")
+        .count();
+
+    assert_eq!(v1_count, 1);
+    assert_eq!(v2_count, 1);
+}
+
+#[test]
+fn multi_trigger_process_sessions_accept_once_each_and_remain_stable_after_restart() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-process-matrix-multi-trigger");
+    install_secondary_external_trigger_package(&root);
+
+    let first_serve = run_chainbot(["serve"], &root, true);
+    assert!(
+        first_serve.status.success(),
+        "first serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first_serve.stdout),
+        String::from_utf8_lossy(&first_serve.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 2);
+    let first_stop = run_chainbot(["stop"], &root, true);
+    assert!(first_stop.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let first_runs = read_run_summaries(&root);
+    assert_eq!(first_runs.len(), 2);
+    let first_primary_count = count_trigger_records_for_trigger_id(&root, "external-trigger-e2e");
+    let first_secondary_count =
+        count_trigger_records_for_trigger_id(&root, "external-trigger-e2e-secondary");
+    assert_eq!(first_primary_count, 1);
+    assert_eq!(first_secondary_count, 1);
+
+    let second_serve = run_chainbot(["serve"], &root, true);
+    assert!(
+        second_serve.status.success(),
+        "second serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&second_serve.stdout),
+        String::from_utf8_lossy(&second_serve.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    let second_stop = run_chainbot(["stop"], &root, true);
+    assert!(second_stop.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let second_runs = read_run_summaries(&root);
+    assert_eq!(second_runs.len(), first_runs.len());
+    assert_eq!(
+        count_trigger_records_for_trigger_id(&root, "external-trigger-e2e"),
+        first_primary_count
+    );
+    assert_eq!(
+        count_trigger_records_for_trigger_id(&root, "external-trigger-e2e-secondary"),
+        first_secondary_count
+    );
+}
+
+#[test]
+fn serve_turn_bridges_pending_staged_external_rows() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-serve-staged-bridge");
+    let mut store = open_runtime_store(&root, 1_710_600_000_000);
+    store
+        .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from("staging-e2e-bridge-1"),
+            trigger_id: String::from("external-trigger-e2e"),
+            workflow_id: String::from("wf-e2e"),
+            event_id: String::from("external-trigger-e2e:event-staged"),
+            source: String::from("external-trigger-plugin"),
+            occurred_at_ms: 1_710_600_000_000,
+            staged_at_ms: 1_710_600_000_001,
+            checkpoint: Some(String::from("cp-staged-e2e")),
+            payload: serde_json::json!({"symbol": "ETHUSDT"}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        })
+        .expect("staged external row should persist before serve turn");
+    drop(store);
+
+    let serve_output = run_chainbot(["serve"], &root, true);
+    assert!(
+        serve_output.status.success(),
+        "serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&serve_output.stdout),
+        String::from_utf8_lossy(&serve_output.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 2);
+    let stop_output = run_chainbot(["stop"], &root, true);
+    assert!(stop_output.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let mut verify_store = open_runtime_store(&root, 1_710_600_000_200);
+    let pending = verify_store
+        .list_pending_staged_trigger_event_records("external-trigger-e2e", 10)
+        .expect("pending staged rows should be queryable after serve bridge");
+    assert!(pending.is_empty());
+
+    let trigger_events = verify_store
+        .list_recent_trigger_records(20, Some("external-trigger-e2e"))
+        .expect("trigger records should be queryable after staged bridge");
+    assert!(
+        trigger_events
+            .iter()
+            .any(|record| record.event_id == "external-trigger-e2e:event-staged"),
+        "staged external event should be normalized into accepted trigger records"
+    );
+}
+
+#[test]
+fn serve_turn_accepts_wasm_persistent_external_trigger_via_daemon_callback_path() {
+    let _guard = fixture_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let root = prepare_fixture_root("success", "e2e-serve-wasm-persistent-callback");
+    install_wasm_trigger_runtime_for_primary_external_plugin(&root);
+
+    let serve_output = run_chainbot(["serve"], &root, true);
+    assert!(
+        serve_output.status.success(),
+        "serve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&serve_output.stdout),
+        String::from_utf8_lossy(&serve_output.stderr)
+    );
+    wait_for_serve_state(&root, "active");
+    wait_for_run_count(&root, 1);
+    let stop_output = run_chainbot(["stop"], &root, true);
+    assert!(stop_output.status.success());
+    wait_for_serve_state(&root, "idle");
+
+    let mut verify_store = open_runtime_store(&root, 1_710_600_100_200);
+    let trigger_events = verify_store
+        .list_recent_trigger_records(20, Some("external-trigger-e2e"))
+        .expect("trigger records should be queryable after wasm callback bridge");
+    assert!(
+        trigger_events.iter().any(|record| {
+            record.event_id == "external-trigger-e2e:guest-callback-event"
+                && record.payload["symbol"] == serde_json::json!("SOLUSDT")
+        }),
+        "wasm callback event should be normalized into accepted trigger records"
+    );
+}
+
 fn render_status(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Pending => "pending",
@@ -355,6 +640,26 @@ fn wait_for_serve_state(root: &Path, expected_state: &str) {
     panic!("timed out waiting for serve.state={expected_state}");
 }
 
+fn wait_for_serve_state_any(root: &Path, expected_states: &[&str]) {
+    for _ in 0..250 {
+        let status_output = run_chainbot(["status", "--json"], root, false);
+        if status_output.status.success() {
+            let payload: serde_json::Value = serde_json::from_slice(&status_output.stdout)
+                .expect("status json output should decode during wait");
+            let serve_state = payload["serve"]["state"].as_str().unwrap_or_default();
+            if expected_states.contains(&serve_state) {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!(
+        "timed out waiting for serve.state in [{}]",
+        expected_states.join(", ")
+    );
+}
+
 fn count_json_files(path: &Path) -> usize {
     if !path.exists() {
         return 0;
@@ -381,6 +686,124 @@ fn count_trigger_records(root: &Path) -> usize {
         .list_recent_trigger_records(100, None)
         .expect("runtime store should list trigger records")
         .len()
+}
+
+fn count_trigger_records_for_trigger_id(root: &Path, trigger_id: &str) -> usize {
+    let mut store = open_runtime_store(root, 1_710_500_000_000);
+    store
+        .list_recent_trigger_records(200, Some(trigger_id))
+        .expect("runtime store should list trigger records for trigger id")
+        .len()
+}
+
+fn force_replace_serve_lease_owner(root: &Path, owner_id: &str, expires_at_ms: i64) {
+    let sqlite_path = root.join("state").join("runtime.sqlite3");
+    let connection = Connection::open(sqlite_path)
+        .expect("runtime sqlite database should be readable for lease loss simulation");
+    let updated = connection
+        .execute(
+            "UPDATE serve_leases SET owner_id = ?1, expires_at_ms = ?2 WHERE lease_key = ?3",
+            rusqlite::params![owner_id, expires_at_ms, "serve"],
+        )
+        .expect("serve lease owner replacement should execute");
+    assert_eq!(updated, 1, "serve lease row should exist for replacement");
+}
+
+fn install_v2_trigger_plugin_and_switch_trigger_manifest(root: &Path) {
+    let plugin_dir = root.join("plugins").join("trigger-e2e-plugin-v2");
+    fs::create_dir_all(&plugin_dir)
+        .expect("v2 trigger plugin package directory should be creatable");
+    fs::write(
+        plugin_dir.join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"trigger-e2e-plugin-v2\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"../bin/external_trigger_v2.sh\"\n\n[trigger_runtime]\nlifecycle = \"process_short_lived\"\npush_callback = \"inline_response\"\ndurable_ack = \"caller_scope\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\n\n[event_schema]\nsummary = \"External trigger payload\"\nfields = [\"symbol\", \"price\"]\n",
+    )
+    .expect("v2 trigger plugin config should be writable");
+
+    let v2_script = root
+        .join("plugins")
+        .join("bin")
+        .join("external_trigger_v2.sh");
+    fs::write(
+        &v2_script,
+        "#!/bin/sh\nIFS= read -r start_line\nsymbol=\"BTCUSDT\"\ncase \"$start_line\" in\n  *'\"symbol\":\"ETHUSDT\"'*) symbol=\"ETHUSDT\" ;;\nesac\nprintf '%s\\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\nprintf '%s\\n' '{\"type\":\"event\",\"checkpoint\":\"cp-e2e-v2\",\"event_key\":\"event-external-v2\",\"occurred_at_ms\":1711200001000,\"payload\":{\"source\":\"external-v2\",\"symbol\":\"'\"$symbol\"'\"}}'\n",
+    )
+    .expect("v2 trigger plugin script should be writable");
+    make_executable(&v2_script);
+
+    let trigger_config_path = root
+        .join("triggers")
+        .join("external-trigger-e2e")
+        .join("config.toml");
+    let trigger_config = fs::read_to_string(&trigger_config_path)
+        .expect("trigger config should be readable for plugin switch");
+    let updated_trigger_config = trigger_config
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("plugin = ") {
+                String::from("plugin = \"trigger-e2e-plugin-v2\"")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&trigger_config_path, format!("{updated_trigger_config}\n"))
+        .expect("trigger config should be updated to v2 plugin id");
+}
+
+fn install_secondary_external_trigger_package(root: &Path) {
+    let trigger_dir = root.join("triggers").join("external-trigger-e2e-secondary");
+    fs::create_dir_all(&trigger_dir)
+        .expect("secondary trigger package directory should be creatable");
+    fs::write(
+        trigger_dir.join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"external-trigger-e2e-secondary\"\nkind = \"external_plugin\"\nplugin = \"trigger-e2e-plugin\"\nsource = \"external-trigger-plugin-secondary\"\nworkflow_id = \"wf-e2e\"\nenabled = true\n\n[params]\nsymbol = \"BTCUSDT\"\n\n[input_mapping]\nsymbol = \"payload.symbol\"\n",
+    )
+    .expect("secondary trigger config should be writable");
+}
+
+fn install_wasm_trigger_runtime_for_primary_external_plugin(root: &Path) {
+    let plugin_config_path = root
+        .join("plugins")
+        .join("trigger-e2e-plugin")
+        .join("config.toml");
+    fs::write(
+        plugin_config_path,
+        "manifest_version = \"2.0.0\"\nplugin_id = \"trigger-e2e-plugin\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\n\n[trigger_runtime]\nlifecycle = \"wasm_daemon_persistent_session\"\npush_callback = \"host_callback\"\ndurable_ack = \"after_store_persist\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\nmodule = \"../bin/external_trigger.wat\"\n\n[event_schema]\nsummary = \"External trigger payload\"\nfields = [\"symbol\", \"price\"]\n",
+    )
+    .expect("wasm trigger plugin config should be writable");
+
+    let guest_envelope = serde_json::json!({
+        "event_key": "guest-callback-event",
+        "occurred_at_ms": 1_710_600_100_111_i64,
+        "checkpoint": "cp-guest-callback",
+        "payload": {
+            "symbol": "SOLUSDT",
+            "price": 204.75,
+            "producer": "guest"
+        }
+    });
+    let guest_envelope_json =
+        serde_json::to_string(&guest_envelope).expect("guest callback envelope should serialize");
+    fs::write(
+        root.join("plugins")
+            .join("bin")
+            .join("external_trigger.wat"),
+        render_guest_callback_session_module_wat(&guest_envelope_json),
+    )
+    .expect("guest-envelope wasm module should be writable for fixture fidelity");
+}
+
+fn render_guest_callback_session_module_wat(guest_envelope_json: &str) -> String {
+    let escaped_bytes = guest_envelope_json
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("\\{:02x}", byte))
+        .collect::<String>();
+    format!(
+        "(module\n  (import \"trigger-host\" \"push-trigger-event\" (func $push-trigger-event (param i32 i32) (result i32)))\n  (memory (export \"memory\") 1)\n  (data (i32.const 0) \"{escaped_bytes}\")\n  (func (export \"run-session\")\n    i32.const 0\n    i32.const {}\n    call $push-trigger-event\n    drop\n  )\n)\n",
+        guest_envelope_json.as_bytes().len()
+    )
 }
 
 fn read_e2e_secret_value(root: &Path) -> String {
