@@ -19,8 +19,8 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use crate::config::{RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig};
 use crate::state::{
     IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
-    ServeLeaseState, TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord,
-    WorkflowRuntimeLogEntry,
+    ServeLeaseState, StagedTriggerEventRecord, TriggerCheckpointRecord, TriggerEventRecord,
+    TriggerSnapshotRecord, WorkflowRuntimeLogEntry,
 };
 
 const SERVE_LEASE_KEY: &str = "serve";
@@ -1988,6 +1988,332 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    pub fn append_staged_trigger_event_record(
+        &mut self,
+        record: &StagedTriggerEventRecord,
+    ) -> Result<bool, RuntimeStateError> {
+        let payload_json = serde_json::to_string(&record.payload).map_err(|source| {
+            RuntimeStateError::JsonEncode {
+                field: "staged_trigger_event_records.payload_json",
+                source,
+            }
+        })?;
+
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => connection
+                .execute(
+                    "INSERT INTO staged_trigger_event_records (
+                         staging_id, schema_version, trigger_id, workflow_id, event_id, source,
+                         occurred_at_ms, staged_at_ms, checkpoint, payload_json,
+                         dedup_key, dedup_window_ms, cooldown_key, cooldown_ms,
+                         accepted_at_ms, last_error
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                     ON CONFLICT(trigger_id, event_id) DO NOTHING",
+                    params![
+                        record.staging_id,
+                        record.schema_version,
+                        record.trigger_id,
+                        record.workflow_id,
+                        record.event_id,
+                        record.source,
+                        record.occurred_at_ms,
+                        record.staged_at_ms,
+                        record.checkpoint,
+                        payload_json,
+                        record.dedup_key,
+                        record.dedup_window_ms,
+                        record.cooldown_key,
+                        record.cooldown_ms,
+                        record.accepted_at_ms,
+                        record.last_error,
+                    ],
+                )
+                .map(|changed| changed > 0)
+                .map_err(|source| RuntimeStateError::Sqlite {
+                    path: path.clone(),
+                    operation: "insert sqlite staged trigger event record",
+                    source,
+                }),
+            RuntimeStorageConnection::Postgres { client, .. } => client
+                .execute(
+                    "INSERT INTO staged_trigger_event_records (
+                         staging_id, schema_version, trigger_id, workflow_id, event_id, source,
+                         occurred_at_ms, staged_at_ms, checkpoint, payload_json,
+                         dedup_key, dedup_window_ms, cooldown_key, cooldown_ms,
+                         accepted_at_ms, last_error
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                     ON CONFLICT(trigger_id, event_id) DO NOTHING",
+                    &[
+                        &record.staging_id,
+                        &record.schema_version,
+                        &record.trigger_id,
+                        &record.workflow_id,
+                        &record.event_id,
+                        &record.source,
+                        &record.occurred_at_ms,
+                        &record.staged_at_ms,
+                        &record.checkpoint,
+                        &payload_json,
+                        &record.dedup_key,
+                        &record.dedup_window_ms,
+                        &record.cooldown_key,
+                        &record.cooldown_ms,
+                        &record.accepted_at_ms,
+                        &record.last_error,
+                    ],
+                )
+                .map(|changed| changed > 0)
+                .map_err(|source| RuntimeStateError::Postgres {
+                    operation: "insert postgres staged trigger event record",
+                    source,
+                }),
+        }
+    }
+
+    pub fn list_pending_staged_trigger_event_records(
+        &mut self,
+        trigger_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StagedTriggerEventRecord>, RuntimeStateError> {
+        let limit = limit.max(1);
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT staging_id, schema_version, trigger_id, workflow_id, event_id, source,
+                                occurred_at_ms, staged_at_ms, checkpoint, payload_json,
+                                dedup_key, dedup_window_ms, cooldown_key, cooldown_ms,
+                                accepted_at_ms, last_error
+                         FROM staged_trigger_event_records
+                         WHERE trigger_id = ?1 AND accepted_at_ms IS NULL
+                         ORDER BY staged_at_ms ASC, staging_id ASC
+                         LIMIT ?2",
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "prepare sqlite pending staged trigger event records query",
+                        source,
+                    })?;
+                let rows = statement
+                    .query_map(params![trigger_id, limit], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, Option<i64>>(11)?,
+                            row.get::<_, Option<String>>(12)?,
+                            row.get::<_, Option<i64>>(13)?,
+                            row.get::<_, Option<i64>>(14)?,
+                            row.get::<_, Option<String>>(15)?,
+                        ))
+                    })
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "query sqlite pending staged trigger event records",
+                        source,
+                    })?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let row = row.map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "decode sqlite staged trigger event row",
+                        source,
+                    })?;
+                    records.push(decode_staged_trigger_event_record_row(row)?);
+                }
+                Ok(records)
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                let rows = client
+                    .query(
+                        "SELECT staging_id, schema_version, trigger_id, workflow_id, event_id, source,
+                                occurred_at_ms, staged_at_ms, checkpoint, payload_json,
+                                dedup_key, dedup_window_ms, cooldown_key, cooldown_ms,
+                                accepted_at_ms, last_error
+                         FROM staged_trigger_event_records
+                         WHERE trigger_id = $1 AND accepted_at_ms IS NULL
+                         ORDER BY staged_at_ms ASC, staging_id ASC
+                         LIMIT $2",
+                        &[&trigger_id, &limit],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "query postgres pending staged trigger event records",
+                        source,
+                    })?;
+                let mut records = Vec::with_capacity(rows.len());
+                for row in rows {
+                    records.push(decode_staged_trigger_event_record_row((
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                        row.get(5),
+                        row.get(6),
+                        row.get(7),
+                        row.get(8),
+                        row.get(9),
+                        row.get(10),
+                        row.get(11),
+                        row.get(12),
+                        row.get(13),
+                        row.get(14),
+                        row.get(15),
+                    ))?);
+                }
+                Ok(records)
+            }
+        }
+    }
+
+    pub fn mark_staged_trigger_event_accepted(
+        &mut self,
+        staging_id: &str,
+        accepted_at_ms: i64,
+    ) -> Result<(), RuntimeStateError> {
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                connection
+                    .execute(
+                        "UPDATE staged_trigger_event_records
+                         SET accepted_at_ms = ?2, last_error = NULL
+                         WHERE staging_id = ?1",
+                        params![staging_id, accepted_at_ms],
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "mark sqlite staged trigger event accepted",
+                        source,
+                    })?;
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                client
+                    .execute(
+                        "UPDATE staged_trigger_event_records
+                         SET accepted_at_ms = $2, last_error = NULL
+                         WHERE staging_id = $1",
+                        &[&staging_id, &accepted_at_ms],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "mark postgres staged trigger event accepted",
+                        source,
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn reconcile_pending_staged_trigger_event_records(
+        &mut self,
+        limit: i64,
+    ) -> Result<Vec<StagedTriggerEventRecord>, RuntimeStateError> {
+        let limit = limit.max(1);
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT staging_id, schema_version, trigger_id, workflow_id, event_id, source,
+                                occurred_at_ms, staged_at_ms, checkpoint, payload_json,
+                                dedup_key, dedup_window_ms, cooldown_key, cooldown_ms,
+                                accepted_at_ms, last_error
+                         FROM staged_trigger_event_records
+                         WHERE accepted_at_ms IS NULL
+                         ORDER BY staged_at_ms ASC, trigger_id ASC, staging_id ASC
+                         LIMIT ?1",
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "prepare sqlite reconcile staged trigger event records query",
+                        source,
+                    })?;
+                let rows = statement
+                    .query_map(params![limit], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, Option<i64>>(11)?,
+                            row.get::<_, Option<String>>(12)?,
+                            row.get::<_, Option<i64>>(13)?,
+                            row.get::<_, Option<i64>>(14)?,
+                            row.get::<_, Option<String>>(15)?,
+                        ))
+                    })
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "query sqlite reconcile staged trigger event records",
+                        source,
+                    })?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let row = row.map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "decode sqlite reconcile staged trigger event row",
+                        source,
+                    })?;
+                    records.push(decode_staged_trigger_event_record_row(row)?);
+                }
+                Ok(records)
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                let rows = client
+                    .query(
+                        "SELECT staging_id, schema_version, trigger_id, workflow_id, event_id, source,
+                                occurred_at_ms, staged_at_ms, checkpoint, payload_json,
+                                dedup_key, dedup_window_ms, cooldown_key, cooldown_ms,
+                                accepted_at_ms, last_error
+                         FROM staged_trigger_event_records
+                         WHERE accepted_at_ms IS NULL
+                         ORDER BY staged_at_ms ASC, trigger_id ASC, staging_id ASC
+                         LIMIT $1",
+                        &[&limit],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "query postgres reconcile staged trigger event records",
+                        source,
+                    })?;
+                let mut records = Vec::with_capacity(rows.len());
+                for row in rows {
+                    records.push(decode_staged_trigger_event_record_row((
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                        row.get(5),
+                        row.get(6),
+                        row.get(7),
+                        row.get(8),
+                        row.get(9),
+                        row.get(10),
+                        row.get(11),
+                        row.get(12),
+                        row.get(13),
+                        row.get(14),
+                        row.get(15),
+                    ))?);
+                }
+                Ok(records)
+            }
+        }
+    }
+
     pub fn write_trigger_record(
         &mut self,
         record: &TriggerEventRecord,
@@ -2794,6 +3120,26 @@ impl RuntimeStateStore {
                  processed_at_ms BIGINT NULL,
                  last_error TEXT NULL,
                  UNIQUE (trigger_id, ingress_event_id)
+               );
+
+             CREATE TABLE IF NOT EXISTS staged_trigger_event_records (
+                 staging_id TEXT PRIMARY KEY,
+                 schema_version TEXT NOT NULL,
+                 trigger_id TEXT NOT NULL,
+                 workflow_id TEXT NOT NULL,
+                 event_id TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 occurred_at_ms BIGINT NOT NULL,
+                 staged_at_ms BIGINT NOT NULL,
+                 checkpoint TEXT NULL,
+                 payload_json TEXT NOT NULL,
+                 dedup_key TEXT NULL,
+                 dedup_window_ms BIGINT NULL,
+                 cooldown_key TEXT NULL,
+                 cooldown_ms BIGINT NULL,
+                 accepted_at_ms BIGINT NULL,
+                 last_error TEXT NULL,
+                 UNIQUE (trigger_id, event_id)
               );
 
              CREATE TABLE IF NOT EXISTS archived_run_summaries (
@@ -2857,6 +3203,12 @@ impl RuntimeStateStore {
              CREATE INDEX IF NOT EXISTS idx_ingress_inbox_records_trigger_received
              ON ingress_inbox_records (trigger_id, processed_at_ms, received_at_ms ASC, inbox_id ASC);
 
+             CREATE INDEX IF NOT EXISTS idx_staged_trigger_event_records_pending
+             ON staged_trigger_event_records (trigger_id, accepted_at_ms, staged_at_ms ASC, staging_id ASC);
+
+             CREATE INDEX IF NOT EXISTS idx_staged_trigger_event_records_reconcile
+             ON staged_trigger_event_records (accepted_at_ms, staged_at_ms ASC, trigger_id ASC, staging_id ASC);
+
              CREATE INDEX IF NOT EXISTS idx_daemon_sessions_owner
              ON daemon_sessions (owner_id, stopped_at_ms, lease_expires_at_ms DESC);
 
@@ -2882,7 +3234,7 @@ impl RuntimeStateStore {
                 connection
                     .execute(
                         "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
-                        params![4_i64, now_ms],
+                        params![5_i64, now_ms],
                     )
                     .map_err(|source| RuntimeStateError::Sqlite {
                         path: path.clone(),
@@ -2902,7 +3254,7 @@ impl RuntimeStateStore {
                         "INSERT INTO schema_migrations (version, applied_at_ms)
                          VALUES ($1, $2)
                          ON CONFLICT(version) DO NOTHING",
-                        &[&4_i64, &now_ms],
+                        &[&5_i64, &now_ms],
                     )
                     .map_err(|source| RuntimeStateError::Postgres {
                         operation: "record postgres schema migration",
@@ -3224,5 +3576,51 @@ fn decode_ingress_inbox_record_row(
         remote_addr: row.12,
         processed_at_ms: row.13,
         last_error: row.14,
+    })
+}
+
+type StagedTriggerEventRecordRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+fn decode_staged_trigger_event_record_row(
+    row: StagedTriggerEventRecordRow,
+) -> Result<StagedTriggerEventRecord, RuntimeStateError> {
+    let payload = serde_json::from_str(&row.9).map_err(|source| RuntimeStateError::JsonDecode {
+        field: "staged_trigger_event_records.payload_json",
+        source,
+    })?;
+    Ok(StagedTriggerEventRecord {
+        staging_id: row.0,
+        schema_version: row.1,
+        trigger_id: row.2,
+        workflow_id: row.3,
+        event_id: row.4,
+        source: row.5,
+        occurred_at_ms: row.6,
+        staged_at_ms: row.7,
+        checkpoint: row.8,
+        payload,
+        dedup_key: row.10,
+        dedup_window_ms: row.11,
+        cooldown_key: row.12,
+        cooldown_ms: row.13,
+        accepted_at_ms: row.14,
+        last_error: row.15,
     })
 }

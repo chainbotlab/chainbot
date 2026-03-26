@@ -10,7 +10,7 @@ This folder contains curated ChainBot roots you can copy, inspect, or adapt.
 | `core-builtins/` | you want to learn the builtin flow/data node toolbox | JSON parsing, data shaping, fallback selection, comparison, and assertion without plugins | `CHAINBOT_CONFIG_DIR=examples/core-builtins target/debug/chainbot validate` |
 | `builtin-triggers/` | you want simple trigger cases in one place | builtin `manual`, `market_tick`, and `cron` packages sharing one workflow | `CHAINBOT_CONFIG_DIR=examples/builtin-triggers target/debug/chainbot validate` |
 | `workflow-composition/` | you want to learn subflow boundaries | parent/child workflows, `nodes.call`, subflow input and output flow | `CHAINBOT_CONFIG_DIR=examples/workflow-composition target/debug/chainbot validate` |
-| `plugin-integrations/` | you want external plugin setup | external trigger plugin, external node plugin, package-local `bin/` executables | `CHAINBOT_CONFIG_DIR=examples/plugin-integrations target/debug/chainbot validate` |
+| `plugin-integrations/` | you want external plugin setup | process + wasm external trigger plugins, external node plugin, package-local `bin/` executables | `CHAINBOT_CONFIG_DIR=examples/plugin-integrations target/debug/chainbot validate` |
 | `custom-paths/` | you need non-default root-relative directories | `[paths]` overrides for workflows, triggers, plugins, secrets, and state | `CHAINBOT_CONFIG_DIR=examples/custom-paths target/debug/chainbot validate` |
 
 ## Example Roots
@@ -65,10 +65,12 @@ Use this when you want to understand root-level plugin registration and external
 
 Highlights:
 
-- external trigger package with `[params]` and `[input_mapping]`
+- external trigger plugin packages showing two distinct lifecycle models:
+  - `process_short_lived`: poll-based, supervisor-orchestrated short-lived process adapters
+  - `wasm_daemon_persistent_session`: long-lived daemon sessions with persistent Wasmtime ownership
 - external node plugin package
-- external trigger plugin package
 - plugin-local `bin/` executables
+- use `chainbot catalog show plugin:<name>` to see lifecycle details for each trigger plugin
 
 ### `custom-paths/`
 

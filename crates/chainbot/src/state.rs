@@ -125,6 +125,35 @@ pub struct IngressInboxRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedTriggerEventRecord {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
+    pub staging_id: String,
+    pub trigger_id: String,
+    pub workflow_id: String,
+    pub event_id: String,
+    pub source: String,
+    pub occurred_at_ms: i64,
+    pub staged_at_ms: i64,
+    #[serde(default)]
+    pub checkpoint: Option<String>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub dedup_key: Option<String>,
+    #[serde(default)]
+    pub dedup_window_ms: Option<i64>,
+    #[serde(default)]
+    pub cooldown_key: Option<String>,
+    #[serde(default)]
+    pub cooldown_ms: Option<i64>,
+    #[serde(default)]
+    pub accepted_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerCheckpointRecord {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,

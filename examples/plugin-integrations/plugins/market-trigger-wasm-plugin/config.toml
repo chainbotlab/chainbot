@@ -1,16 +1,16 @@
 manifest_version = "2.0.0"
-plugin_id = "market-trigger-plugin"
+plugin_id = "market-trigger-wasm-plugin"
 kind = "external_trigger"
 entrypoint = "trigger.exec.v1"
 capabilities = ["trigger.listen.event"]
-executable = "bin/external_trigger.sh"
 
 [trigger_runtime]
-lifecycle = "process_short_lived"
-push_callback = "inline_response"
-durable_ack = "caller_scope"
+lifecycle = "wasm_daemon_persistent_session"
+push_callback = "host_callback"
+durable_ack = "after_store_persist"
 host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+module = "bin/external_trigger.wasm"
 
 [event_schema]
-summary = "Market tick payload"
+summary = "Market tick payload (wasm persistent session)"
 fields = ["symbol", "price", "venue"]

@@ -4,3 +4,13 @@ kind = "external_trigger"
 entrypoint = "trigger.exec.v1"
 capabilities = ["trigger.listen.event"]
 executable = "../bin/external_trigger.sh"
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "External trigger payload"
+fields = ["symbol", "price"]

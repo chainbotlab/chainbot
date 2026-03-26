@@ -11,8 +11,10 @@ mod contract;
 mod host;
 
 pub use contract::{
-    ExternalNodePluginRequest, ExternalNodePluginResponse, PluginEventSchemaDescriptor, PluginKind,
-    PluginManifest, PluginOperationDescriptor, CURRENT_API_MAJOR, NODE_PLUGIN_CONTRACT_MAX_MAJOR,
+    ExternalNodePluginRequest, ExternalNodePluginResponse, ExternalTriggerRuntimeContract,
+    PluginEventSchemaDescriptor, PluginKind, PluginManifest, PluginOperationDescriptor,
+    TriggerDurableAckSemantics, TriggerHostErrorCategory, TriggerPushCallbackSemantics,
+    TriggerRuntimeLifecycle, CURRENT_API_MAJOR, NODE_PLUGIN_CONTRACT_MAX_MAJOR,
     NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY, PLUGIN_KIND_BUILTIN,
     PLUGIN_KIND_EXTERNAL_NODE, PLUGIN_KIND_EXTERNAL_TRIGGER,
 };
