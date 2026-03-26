@@ -1,0 +1,32 @@
+---
+import "@/styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+  lang?: string;
+}
+
+const {
+  title = "ChainBot CLI — command line orchestration for operator workflows",
+  description = "ChainBot is an open-source CLI for orchestrating triggers, workflows, and plugins without hiding runtime logic in fragile shell scripts.",
+  lang = "en",
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang={lang}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <meta content={description} name="description" />
+    <meta content="#f4f3ec" name="theme-color" />
+    <link href="/chainbot-logo.png" rel="icon" type="image/png" />
+    <title>{title}</title>
+  </head>
+  <body class="bg-background text-foreground">
+    <div class="min-h-dvh bg-[linear-gradient(180deg,rgba(244,243,236,0.98)_0%,rgba(244,243,236,0.94)_100%)]">
+      <slot />
+    </div>
+  </body>
+</html>

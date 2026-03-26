@@ -1,0 +1,14 @@
+{
+  "name": "chainbot-user-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "mint dev",
+    "build": "mint validate",
+    "start": "mint start",
+    "test": "node scripts/validate-docs.mjs"
+  },
+  "devDependencies": {
+    "mintlify": "^4.2.454"
+  }
+}

@@ -1,0 +1,143 @@
+---
+title: Workspace Layout
+description: The canonical ChainBot root layout, manifest contracts, and package structure.
+---
+
+## Root Layout
+
+When you run `chainbot init`, it creates this canonical layout:
+
+```text
+<root>/
+|- chainbot.toml
+|- workflows/
+|  `- <workflow_id>/
+|     |- config.toml
+|     |- scripts/
+|     `- assets/
+|- triggers/
+|  `- <trigger_id>/
+|     |- config.toml
+|     |- scripts/
+|     `- assets/
+|- plugins/
+|  `- <plugin_id>/
+|     |- config.toml
+|     |- bin/
+|     `- assets/
+|- secrets/
+`- state/
+```
+
+The root directory defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to use a different path.
+
+## Loading Order
+
+Manifests are loaded in this fixed order:
+
+1. `chainbot.toml` (root config)
+2. `workflows/<workflow_id>/config.toml`
+3. `triggers/<trigger_id>/config.toml`
+4. `plugins/<plugin_id>/config.toml`
+
+## Root Config: `chainbot.toml`
+
+The root config defines paths, runtime defaults, secret references, and storage mode.
+
+```toml
+manifest_version = "2.0.0"
+chainbot_version = "2.2.0"
+profile = "basic"
+
+[paths]
+workflows_dir = "workflows"
+triggers_dir = "triggers"
+plugins_dir = "plugins"
+secrets_dir = "secrets"
+state_dir = "state"
+
+[runtime_defaults]
+timezone = "UTC"
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "state/runtime.sqlite3"
+```
+
+All path overrides must stay within `<root>` and use root-relative paths.
+
+## Workflow Packages
+
+Canonical entrypoint: `workflows/<workflow_id>/config.toml`
+
+The directory name must match `workflow.id` exactly. Workflows define a DAG of nodes, runtime defaults, and optional subflow calls.
+
+```toml
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-alpha"
+name = "alpha"
+description = "Normalize a quote payload"
+
+[runtime.defaults]
+symbol = "BTCUSDT"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "normalize"
+kind = "plugin"
+plugin = "quote-plugin"
+operation = "normalize"
+depends_on = []
+```
+
+## Trigger Packages
+
+Canonical entrypoint: `triggers/<trigger_id>/config.toml`
+
+The directory name must match `trigger_id` exactly. Triggers bind an event source to a workflow and do not contain DAG or node definitions.
+
+Builtin trigger example:
+
+```toml
+manifest_version = "2.0.0"
+trigger_id = "tr-market"
+kind = "builtin"
+source = "market_tick"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+symbol = "BTCUSDT"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+```
+
+Builtin sources include `manual`, `market_tick`, and `cron`.
+
+## Plugin Packages
+
+Canonical entrypoint: `plugins/<plugin_id>/config.toml`
+
+The directory name must match `plugin_id` exactly. Plugins declare an entrypoint, capabilities, and an executable path.
+
+```toml
+manifest_version = "2.0.0"
+plugin_id = "quote-plugin"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["normalize"]
+executable = "bin/quote-plugin.sh"
+```
+
+## Package Constraints
+
+- All relative paths within a package resolve from the package root.
+- Workflow IDs, trigger IDs, and plugin IDs must be globally unique within a workspace.
+- Triggers must reference an existing `workflow_id`.
+- A workflow can run without any triggers via `chainbot run`.
+- The legacy `plugins/manifests/` shared layout is not created by `chainbot init` and is not part of the stable bootstrap contract.

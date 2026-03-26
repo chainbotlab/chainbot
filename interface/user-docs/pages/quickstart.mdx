@@ -1,0 +1,120 @@
+---
+title: Quickstart
+description: Install ChainBot, initialize a workspace, and run your first workflow in minutes.
+---
+
+## Install
+
+```bash
+cargo install --path crates/chainbot
+```
+
+## Initialize a Workspace
+
+```bash
+chainbot init
+```
+
+This creates the minimal canonical layout in `~/.chainbot`:
+
+```text
+<root>/
+|- chainbot.toml
+|- workflows/
+|- triggers/
+|- plugins/
+|- secrets/
+`- state/
+```
+
+Set `CHAINBOT_CONFIG_DIR` to initialize somewhere else:
+
+```bash
+CHAINBOT_CONFIG_DIR=/path/to/project chainbot init
+```
+
+## Check Workspace Status
+
+```bash
+chainbot status
+chainbot status --json
+```
+
+The `status` command is non-executing. It shows root, daemon health, workflow summaries, and trigger state without triggering runs.
+
+## Run a Workflow
+
+```bash
+chainbot run
+```
+
+When the workspace has exactly one workflow package, `run` executes it directly. When multiple workflows exist, `run` infers the top-level workflow if exactly one is reachable without being referenced as a subflow.
+
+For structured output, use:
+
+```bash
+chainbot run --json
+```
+
+## Validate Configuration
+
+Before running, validate the workspace layout and all manifest contracts:
+
+```bash
+chainbot validate
+```
+
+## Run the Daemon
+
+To start long-running trigger evaluation:
+
+```bash
+chainbot serve
+```
+
+The daemon reloads config on each loop boundary and persists health to the coordination database.
+
+## Observe Runtime History
+
+```bash
+chainbot observe
+chainbot observe --json --limit 10
+chainbot observe --trigger-id <trigger-id>
+```
+
+The `observe` command provides read-only access to persisted run summaries, workflow logs, and trigger events. It does not modify active or archived history.
+
+## List Run History
+
+```bash
+chainbot list-runs
+```
+
+Outputs JSON with persisted run summaries.
+
+## Manage Triggers
+
+```bash
+chainbot trigger list
+chainbot trigger enable <trigger-id>
+chainbot trigger disable <trigger-id>
+```
+
+Trigger mutations take effect on the next `status`, `validate`, `serve`, or run.
+
+## Stop the Daemon
+
+```bash
+chainbot stop
+```
+
+Requests graceful shutdown. Returns a stable result even if the daemon is already inactive.
+
+## Help
+
+```bash
+chainbot help
+chainbot help <command>
+```
+
+`help <command>` returns structured information including usage, reads/writes, contract examples, failure navigation, and related commands.

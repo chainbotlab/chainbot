@@ -1,0 +1,16 @@
+{
+  "theme": "mint",
+  "name": "ChainBot",
+  "colors": {
+    "primary": "#0891b2"
+  },
+  "navigation": {
+    "pages": [
+      "pages/index",
+      "pages/quickstart",
+      "pages/workspace-layout",
+      "pages/cli-overview",
+      "pages/storage-guide"
+    ]
+  }
+}

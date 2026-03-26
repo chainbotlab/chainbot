@@ -2,6 +2,11 @@
 
 ChainBot is a Rust-based CLI application for managing automation workflows, triggers, and plugins.
 
+This repository now also includes app-local interface surfaces under `interface/`:
+
+- `interface/land-page/` — Astro marketing site for the product narrative
+- `interface/user-docs/` — Mintlify user-facing documentation site
+
 ## What is ChainBot?
 
 ChainBot is a workspace-based automation framework that lets you define and run triggered workflows. It provides a plugin architecture for extensibility and supports persistent trigger states.
@@ -51,6 +56,21 @@ When you run `chainbot init`, it creates this minimal canonical layout:
 Installed plugin packages live under `plugins/<plugin_id>/config.toml` when present. The older shared `plugins/manifests/` layout is not created by `chainbot init` and is not part of the current stable bootstrap contract.
 
 The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to override.
+
+## Repository Surfaces
+
+```text
+.
+|- Cargo.toml
+|- crates/
+|- interface/
+|  |- land-page/
+|  `- user-docs/
+|- docs/
+`- examples/
+```
+
+The repository root remains a pure Cargo workspace. Frontend tooling is isolated inside each app under `interface/` and does not introduce a root JavaScript workspace.
 
 ## CLI Commands
 
@@ -161,3 +181,5 @@ Current version: **2.2.0**
 - [CLI Design](docs/design/CHAINBOT_CLI_DESIGN.md) — CLI command reference
 - [Workspace Design](docs/design/CHAINBOT_WORKSPACE_DESIGN.md) — Root layout specification
 - [Trigger & Workflow Design](docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md) — Workflow definition format
+- [Landing Page Source](interface/land-page/src/pages/index.astro) — Product-introduction interface
+- [User Docs Config](interface/user-docs/docs.json) — Mintlify navigation and branding surface

@@ -6,4 +6,4 @@
 - Constraints: Avoid duplicating design or implementation internals here.
 
 ## Members
-- No active user-facing docs yet.
+- `../../interface/user-docs/`: Active Mintlify user-facing docs for ChainBot setup, workspace layout, CLI overview, and runtime-state guidance.

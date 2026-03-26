@@ -2,12 +2,13 @@
 
 ## Goal
 
-Initialize the repository as a Rust workspace rooted at `crates/` while keeping repository guidance lightweight and durable for agents.
+Initialize the repository as a Rust workspace rooted at `crates/` while allowing standalone interface surfaces under `interface/` without turning the root into a JavaScript workspace.
 
 ## Invariants
 
 - The repository root is a pure Cargo workspace.
 - Runnable or reusable Rust code lives under `crates/`.
+- Frontend and documentation apps live under `interface/` with app-local tooling.
 - Repository guidance is indexed from root `AGENTS.md` and refined by local `AGENTS.md` files.
 - Agents use `fractal-context` and `fractal-repo` by reference only.
 - Agents must not run formatting commands because formatting invalidates cache.
@@ -18,6 +19,9 @@ Initialize the repository as a Rust workspace rooted at `crates/` while keeping 
 .
 |- .opencode/
 |- examples/
+|- interface/
+|  |- land-page/
+|  `- user-docs/
 |- crates/
 |  `- chainbot/
 |     `- src/
@@ -34,6 +38,7 @@ Initialize the repository as a Rust workspace rooted at `crates/` while keeping 
 ## Rationale
 
 - `crates/` gives the repository a stable expansion point for future Rust members.
+- `interface/` keeps frontend and docs tooling isolated from the Cargo workspace root.
 - A pure workspace root prevents application concerns from leaking into repository governance files.
 - Fractal manifests keep local rules close to the files they govern.
 
@@ -41,4 +46,5 @@ Initialize the repository as a Rust workspace rooted at `crates/` while keeping 
 
 - Add or remove a workspace member.
 - Introduce a new top-level repository area.
+- Change the boundary between Rust workspace members and app-local interface tooling.
 - Change the rules around agent execution or repository validation.

@@ -4,7 +4,7 @@ This guide covers the development setup and architecture for contributors.
 
 ## Project Structure
 
-ChainBot uses a Rust workspace layout. The repository root is a pure Cargo workspace; all application code lives under `crates/`.
+ChainBot uses a Rust workspace layout. The repository root is a pure Cargo workspace; all Rust application code lives under `crates/`, while standalone frontend surfaces live under `interface/` with app-local tooling.
 
 ```text
 .
@@ -14,6 +14,9 @@ ChainBot uses a Rust workspace layout. The repository root is a pure Cargo works
 |   `- chainbot/        # Main application crate
 |       |- src/         # Source code
 |       `- tests/       # Integration tests
+|- interface/          # App-local frontend surfaces
+|   |- land-page/      # Astro landing page
+|   `- user-docs/      # Mintlify documentation site
 |- docs/               # Project documentation
 |- postmortem/         # Debugging notes and learnings
 `- .sisyphus/          # Planning and evidence
@@ -38,6 +41,27 @@ cargo check --workspace
 # Run all tests
 cargo test --workspace
 ```
+
+### Interface Apps
+
+Each frontend app keeps its own Node tooling inside `interface/`.
+
+```bash
+# Landing page
+cd interface/land-page
+npm install
+npm test
+npm run check
+npm run build
+
+# User docs
+cd interface/user-docs
+npm install
+npm test
+npm run build
+```
+
+If `mint validate` fails inside `interface/user-docs`, verify the local Mintlify CLI behavior in your environment before treating it as a content regression.
 
 ### Important Rules
 
@@ -91,8 +115,9 @@ Implementation decisions are documented in `docs/implementation/`:
 2. Update design docs if adding new architectural decisions
 3. Implement in the appropriate crate
 4. Add integration tests in `crates/chainbot/tests/`
-5. Create an implementation record documenting the change
-6. Update `AGENTS.md` if adding new critical paths
+5. If the change affects `interface/`, keep Node tooling app-local and avoid creating a root JS workspace
+6. Create an implementation record documenting the change
+7. Update `AGENTS.md` if adding new critical paths
 
 ## Documentation Standards
 

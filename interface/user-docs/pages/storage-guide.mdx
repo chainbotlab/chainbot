@@ -1,0 +1,77 @@
+---
+title: Storage Guide
+description: Current public guidance for ChainBot runtime state locations, persistence boundaries, and observability commands.
+---
+
+## Current Public Contract
+
+The repository's current public guidance describes a canonical workspace with a dedicated `state/` directory for runtime data:
+
+```text
+<root>/
+|- chainbot.toml
+|- workflows/
+|- triggers/
+|- plugins/
+|- secrets/
+`- state/
+```
+
+The default workspace root is `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to point ChainBot at a different complete root.
+
+## What the `state/` Directory Means
+
+The stable contract in the public README is intentionally narrow:
+
+- `state/` is the runtime state area for a ChainBot root.
+- It sits alongside workflows, triggers, plugins, and secrets.
+- It is part of the canonical layout created by `chainbot init`.
+
+This repository snapshot does **not** currently publish a separate user-facing operator guide for storage modes under `docs/user/`. Until that document exists, treat the README and design docs as the authoritative public source.
+
+## Operational Guidance Available Today
+
+The commands below let you inspect or manage runtime behavior without inventing an additional storage abstraction:
+
+```bash
+chainbot status
+chainbot status --json
+
+chainbot observe
+chainbot list-runs
+
+chainbot serve
+chainbot stop
+```
+
+- `status` gives a non-executing workspace snapshot.
+- `observe` inspects persisted trigger events, workflow logs, and runs.
+- `list-runs` returns workflow run history.
+- `serve` starts the long-running daemon control plane.
+- `stop` requests graceful shutdown.
+
+## Configuration Boundary
+
+The public root configuration examples show runtime defaults and path configuration in `chainbot.toml`:
+
+```toml
+manifest_version = "2.0.0"
+chainbot_version = "2.2.0"
+profile = "basic"
+
+[paths]
+workflows_dir = "workflows"
+triggers_dir = "triggers"
+plugins_dir = "plugins"
+secrets_dir = "secrets"
+state_dir = "state"
+
+[runtime_defaults]
+timezone = "UTC"
+```
+
+All path overrides remain root-relative and stay within the ChainBot workspace.
+
+## Next Step
+
+If you need deeper operator guidance for storage topology, retention, or backend-specific behavior, use this Mintlify site as the user-facing home and promote the missing contract into a dedicated repository document before extending this page.
