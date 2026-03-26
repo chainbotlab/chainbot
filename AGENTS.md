@@ -4,14 +4,15 @@
 
 ## Project Metadata
 - Current Phase: Implementation
-- Last Updated: 2026-03-22
-- Workspace Layout: `crates/`
-- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md`, `docs/user/CHAINBOT_STORAGE_OPERATOR_GUIDE.md`, `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`, `CONTRIBUTING.md`
+- Last Updated: 2026-03-26
+- Workspace Layout: `crates/` + `interface/`
+- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `interface/AGENTS.md`, `interface/land-page/`, `interface/user-docs/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_INTERFACE_SURFACES_IMPLEMENTATION.md`, `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`, `CONTRIBUTING.md`
 
 ## Documentation Topology
 ```text
 .agents/
 examples/
+interface/
 
 docs/
 |- design/
@@ -45,7 +46,9 @@ crates/
 | `docs/implementation/CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md` | implementation | active | Records the narrower run-summary reads, trigger snapshot read-model, and incremental trigger-state recovery inputs. |
 | `docs/implementation/CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md` | implementation | active | Records the storage-mode extension and DB-primary runtime cut for CLI and trigger execution paths. |
 | `docs/implementation/CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md` | implementation | active | Records the observe command, runtime history retention/archive contract, and hot-path guardrail coverage. |
-| `docs/user/CHAINBOT_STORAGE_OPERATOR_GUIDE.md` | user | active | Explains operator-facing `local` and `postgres` storage modes, runtime boundaries, and the current no-legacy-import stance. |
+| `interface/land-page/src/pages/index.astro` | interface | active | Presents the ChainBot marketing narrative, workspace model, and docs CTA in a standalone Astro site. |
+| `interface/user-docs/docs.json` | interface | active | Defines the Mintlify user documentation navigation, branding, and page surface. |
+| `docs/implementation/CHAINBOT_INTERFACE_SURFACES_IMPLEMENTATION.md` | implementation | active | Records the new interface surfaces, app-local tooling boundary, and validation notes. |
 | `docs/research/CHAINBOT_V212_CLI_PROPOSAL.md` | research | active | Proposes the v2.1.2 CLI usability surface with environment-based root resolution. |
 | `docs/research/CHAINBOT_CONFIG_STATE_LAYOUT_PROPOSAL.md` | research | active | Proposes the one-step package and runtime-state layout that aligns plugin discovery, version semantics, and durable state boundaries. |
 | `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md` | research | active | Proposes the phased retirement of legacy plugin and runtime-state layout support after canonical adoption is observable and safe. |
@@ -53,6 +56,7 @@ crates/
 ## Fractal Architecture
 - `.agents/`: Project-local agent assets and external skill catalog links.
 - `examples/`: Copyable root-level configuration cases aligned with the stable ChainBot root contract.
+- `interface/`: App-local frontend surfaces for product presentation and user-facing docs.
 - `crates/`: Rust workspace members and crate-local manifests.
 - `docs/`: Long-lived repository knowledge split by design, implementation, interfaces, research, user-facing behavior, and archive state.
 - `postmortem/`: Durable debugging and incident learnings.
@@ -69,7 +73,7 @@ local_adapters: []
 ## Agent Operating Contract
 - Required pre-read checks: root `AGENTS.md`, then nearest local `AGENTS.md`, then referenced docs in `docs/`.
 - Required skills: use `fractal-context` and `fractal-repo` for code/doc structure changes; do not copy skill contents into this file.
-- Workspace rule: treat the repository root as a pure Cargo workspace; application code lives under `crates/`.
+- Workspace rule: treat the repository root as a pure Cargo workspace; Rust application code lives under `crates/`, while app-local frontend tooling stays contained under `interface/`.
 - Formatting rule: do not run `fmt`, `cargo fmt`, or `rustfmt`; formatting invalidates cache and is intentionally skipped in this repository.
 - Doc update triggers: new module, moved file, changed responsibility, changed contract, or new long-lived operational knowledge.
 
