@@ -1,0 +1,114 @@
+---
+title: CLI Overview
+description: Complete reference for the ChainBot CLI command surface, output modes, and root resolution.
+---
+
+## Command Surface
+
+| Command | Description |
+|---------|-------------|
+| `chainbot help [command]` | Show help directory or command-specific help |
+| `chainbot version` | Show the running ChainBot version |
+| `chainbot init` | Initialize a new workspace with the canonical layout |
+| `chainbot status [--json]` | Show non-executing workspace status snapshot |
+| `chainbot validate` | Validate root, workflow, trigger, and plugin contracts |
+| `chainbot run` | Execute the inferred top-level workflow |
+| `chainbot serve` | Start the background daemon |
+| `chainbot stop` | Request graceful daemon shutdown |
+| `chainbot trigger list` | List configured triggers |
+| `chainbot trigger enable <trigger-id>` | Enable a trigger |
+| `chainbot trigger disable <trigger-id>` | Disable a trigger |
+| `chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]` | Inspect persisted run summaries, workflow logs, and trigger events |
+| `chainbot list-runs` | List persisted run summaries (JSON output) |
+
+## Root Resolution
+
+CLI resolves the ChainBot root in this order:
+
+1. `CHAINBOT_CONFIG_DIR` environment variable if set and non-empty
+2. `~/.chainbot` as the default fallback
+
+`CHAINBOT_CONFIG_DIR` must point to a complete ChainBot root, not a single config file.
+
+## Output Modes
+
+| Command | Default output | `--json` available |
+|---------|---------------|-------------------|
+| `help` | Human-readable | No |
+| `version` | Human-readable | No |
+| `init` | Human-readable | No |
+| `status` | Human-readable | Yes |
+| `validate` | Human-readable | No |
+| `run` | Human-readable | Yes |
+| `serve` | Human-readable | No |
+| `stop` | Human-readable | No |
+| `trigger` | Human-readable | No |
+| `observe` | Human-readable | Yes |
+| `list-runs` | JSON | No (always JSON) |
+
+## `status` Contract
+
+`status` is a non-executing snapshot. It does not trigger workflow execution, trigger collection, runtime recovery, or incomplete-run state changes.
+
+Default text output includes: `Root`, `Workflows`, `Triggers`, and `Summary`.
+
+`status --json` returns:
+
+```json
+{
+  "root": { "path": "/path/to/root", "profile": "basic" },
+  "serve": { "state": "idle" | "active" | "stale", "owner": null, "expires_at_ms": null },
+  "workflows": [{ "workflow_id": "...", "last_run_status": null, ... }],
+  "triggers": [{ "trigger_id": "...", "enabled": true | false, "workflow_id": "...", ... }],
+  "summary": { "workflow_count": 0, "trigger_count": 0, "run_count": 0, "running_run_count": 0 }
+}
+```
+
+`serve.state` values:
+- `idle`: no valid lease row, or coordination database does not exist
+- `active`: lease row exists, is not expired, and owner is alive
+- `stale`: lease row exists but should not block a new `serve`
+
+## `validate` Contract
+
+`validate` checks:
+- Root layout and `chainbot.toml` contract
+- All workflow package manifests
+- All trigger package manifests
+- All plugin package manifests
+
+It does not start execution.
+
+## `run` Contract
+
+- Executes the uniquely inferred top-level workflow.
+- Returns a usage error if multiple workflows exist and a unique top-level workflow cannot be determined.
+- Does not require a trigger to be present.
+
+## `trigger` Mutations
+
+`chainbot trigger enable` and `chainbot trigger disable` write directly to the trigger package's `config.toml` `enabled` field.
+
+Changes take effect on the next `status`, `validate`, `serve`, or run.
+
+## `observe` Contract
+
+Provides read-only aggregation of:
+- `run_summaries`
+- `workflow_runtime_logs`
+- `trigger_event_records`
+
+Options:
+- `--limit <n>`: window of most recent records
+- `--trigger-id <id>`: filter to a specific trigger
+- `--run-id <id>`: filter to a specific run
+
+Output includes current archived history counts. It does not trigger runtime recovery or replay trigger events.
+
+## Error Navigation
+
+CLI errors always provide the next action:
+- Unsupported command: suggest the nearest known command and guide to `chainbot help`
+- Missing root: guide to set `CHAINBOT_CONFIG_DIR` or verify `~/.chainbot` points to a valid root
+- Missing `chainbot.toml`: check that the root path is correct and the file exists
+- Invalid config: return a validation error with file path, line/column, and source snippet

@@ -1,0 +1,33 @@
+---
+title: Introduction
+description: ChainBot is a workspace-based automation framework for triggered workflows, plugins, and persistent runtime state.
+---
+
+ChainBot is a Rust-based CLI application for managing automation workflows, triggers, and plugins.
+
+## What ChainBot Does
+
+ChainBot lets you define workflows as directed acyclic graphs of nodes, attach triggers that fire those workflows on events, and run a long-lived daemon that coordinates execution with durable state.
+
+## Core Concepts
+
+| Concept | Role |
+|---------|------|
+| **Workflow** | An independent DAG of nodes that executes as a unit |
+| **Trigger** | Converts external events into workflow run requests |
+| **Plugin** | Extends ChainBot with external executables or builtin capabilities |
+| **Workspace** | A root directory containing `chainbot.toml` and all packages |
+| **Runtime State** | Persisted run summaries, trigger records, and coordination data |
+
+## Key Design Points
+
+- Workflows run without requiring a trigger. You can invoke a workflow directly via `chainbot run`.
+- Triggers only matter when the daemon is running via `chainbot serve`.
+- All manifest contracts use `manifest_version = "2.0.0"`.
+- The workspace root defaults to `~/.chainbot`. Set `CHAINBOT_CONFIG_DIR` to override.
+- The canonical root config file is `chainbot.toml` (not `config/root.toml`).
+- Plugin packages live under `plugins/<plugin_id>/config.toml`. The legacy `plugins/manifests/` layout is not part of the stable bootstrap contract.
+
+## Version
+
+Current version: **2.2.0**

@@ -1,0 +1,32 @@
+---
+interface Props {
+  compact?: boolean;
+  homeHref?: string;
+  name?: string;
+  eyebrow?: string;
+}
+
+const {
+  compact = false,
+  homeHref = "https://chainbot.dev",
+  name = "ChainBot CLI",
+  eyebrow = "Developer Tooling",
+} = Astro.props;
+---
+
+<a class="inline-flex items-center gap-3 text-foreground" href={homeHref}>
+  <img
+    alt="ChainBot logo"
+    class:list={[
+      "shrink-0 rounded-[1rem] bg-surface/90 object-contain ring-1 ring-border/60",
+      compact ? "size-10" : "size-12",
+    ]}
+    height={compact ? 40 : 48}
+    src="/chainbot-logo.png"
+    width={compact ? 40 : 48}
+  />
+  <span class="flex min-w-0 flex-col leading-none">
+    <span class:list={["font-display tracking-tight text-foreground", compact ? "text-xl" : "text-2xl"]}>{name}</span>
+    <span class="mt-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">{eyebrow}</span>
+  </span>
+</a>
