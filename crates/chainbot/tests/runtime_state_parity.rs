@@ -17,9 +17,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chainbot::config::{
     RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig,
 };
+use chainbot::external_trigger_supervisor::{
+    ExternalTriggerSessionRuntime, ExternalTriggerSessionSpec, ExternalTriggerSupervisor,
+};
 use chainbot::state::{
-    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, TriggerCheckpointRecord,
-    TriggerEventRecord, TriggerSnapshotRecord,
+    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, StagedTriggerEventRecord,
+    TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord,
 };
 use chainbot::state_db::RuntimeStateStore;
 use postgres::{Client, NoTls};
@@ -257,6 +260,97 @@ fn runtime_state_backends_share_core_semantics() {
             .list_pending_ingress_inbox_records("tr-alpha", 10)
             .expect("processed ingress inbox rows should no longer be pending")
             .is_empty());
+
+        let staged_record = StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: format!("{}-staged-1", backend.slug),
+            trigger_id: String::from("tr-alpha"),
+            workflow_id: String::from("wf-alpha"),
+            event_id: format!("{}-staged-event-1", backend.slug),
+            source: String::from("external.plugin"),
+            occurred_at_ms: 1_710_900_007_000,
+            staged_at_ms: 1_710_900_007_100,
+            checkpoint: Some(String::from("staged-cp-1")),
+            payload: serde_json::json!({"raw": "payload-1"}),
+            dedup_key: Some(format!("{}-staged-dedup", backend.slug)),
+            dedup_window_ms: Some(15_000),
+            cooldown_key: Some(format!("{}-staged-cooldown", backend.slug)),
+            cooldown_ms: Some(8_000),
+            accepted_at_ms: None,
+            last_error: None,
+        };
+        assert!(store
+            .append_staged_trigger_event_record(&staged_record)
+            .expect("staged trigger event insert should succeed"));
+        assert!(!store
+            .append_staged_trigger_event_record(&staged_record)
+            .expect("duplicate staged trigger event insert should be ignored"));
+
+        let conflicting_staged_record = StagedTriggerEventRecord {
+            staging_id: format!("{}-staged-2", backend.slug),
+            payload: serde_json::json!({"raw": "payload-conflict"}),
+            ..staged_record.clone()
+        };
+        assert!(!store
+            .append_staged_trigger_event_record(&conflicting_staged_record)
+            .expect("conflicting staged trigger event should deterministically keep first row"));
+
+        let pending_staged = store
+            .list_pending_staged_trigger_event_records("tr-alpha", 10)
+            .expect("pending staged trigger events should list");
+        assert_eq!(pending_staged.len(), 1);
+        assert_eq!(pending_staged[0].staging_id, staged_record.staging_id);
+
+        drop(store);
+        let mut reopened = RuntimeStateStore::open(&backend.config, 1_710_900_007_500)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} store should reopen for staged record reconciliation: {error}",
+                    backend.name
+                )
+            });
+        let reconcile_rows = reopened
+            .reconcile_pending_staged_trigger_event_records(10)
+            .expect("reconcile pending staged trigger events should succeed after restart");
+        assert_eq!(reconcile_rows.len(), 1);
+        assert_eq!(reconcile_rows[0].staging_id, staged_record.staging_id);
+
+        reopened
+            .mark_staged_trigger_event_accepted(&staged_record.staging_id, 1_710_900_007_900)
+            .expect("mark staged trigger event accepted should persist");
+        assert!(reopened
+            .list_pending_staged_trigger_event_records("tr-alpha", 10)
+            .expect("accepted staged trigger event should no longer be pending")
+            .is_empty());
+        assert!(reopened
+            .reconcile_pending_staged_trigger_event_records(10)
+            .expect("accepted staged trigger event should be absent from restart reconcile")
+            .is_empty());
+
+        assert!(reopened
+            .list_recent_trigger_records(5, Some("tr-alpha"))
+            .expect("accepted trigger records should remain unchanged after staged acceptance")
+            .iter()
+            .all(|item| item.event_id != staged_record.event_id));
+
+        reopened
+            .write_trigger_record(&TriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                run_id: format!("{}-staged-accepted-run", backend.slug),
+                sequence: 99,
+                trigger_id: staged_record.trigger_id.clone(),
+                workflow_id: staged_record.workflow_id.clone(),
+                event_id: staged_record.event_id.clone(),
+                checkpoint: staged_record.checkpoint.clone(),
+                source: staged_record.source.clone(),
+                accepted_at_ms: 1_710_900_008_100,
+                payload: staged_record.payload.clone(),
+                dedup_key: None,
+                dedup_expires_at_ms: None,
+                cooldown_key: None,
+                cooldown_expires_at_ms: None,
+            })
+            .expect("accepted-event persistence path should remain authoritative");
 
         backend.reset();
     }
@@ -612,6 +706,138 @@ fn runtime_state_backends_allow_only_one_serve_lease_winner_under_contention() {
     }
 }
 
+#[test]
+fn runtime_state_backends_reconcile_multi_trigger_staged_rows_in_durable_order_after_restart() {
+    let _guard = backend_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    for backend in available_backends() {
+        backend.ensure_initialized();
+        backend.reset();
+
+        let mut store =
+            RuntimeStateStore::open(&backend.config, 1_710_931_000_000).unwrap_or_else(|error| {
+                panic!(
+                    "{} store should open for staged-order matrix: {error}",
+                    backend.name
+                )
+            });
+
+        for (staging_id, trigger_id, event_id, staged_at_ms) in [
+            ("staged-a-1", "tr-alpha", "evt-a-1", 1_710_931_000_001),
+            ("staged-b-1", "tr-beta", "evt-b-1", 1_710_931_000_002),
+            ("staged-a-2", "tr-alpha", "evt-a-2", 1_710_931_000_003),
+        ] {
+            assert!(store
+                .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+                    schema_version: String::from("1.0.0"),
+                    staging_id: String::from(staging_id),
+                    trigger_id: String::from(trigger_id),
+                    workflow_id: String::from("wf-alpha"),
+                    event_id: String::from(event_id),
+                    source: String::from("external.plugin"),
+                    occurred_at_ms: 1_710_931_000_000,
+                    staged_at_ms,
+                    checkpoint: Some(String::from("cp-matrix")),
+                    payload: serde_json::json!({"staging": staging_id}),
+                    dedup_key: None,
+                    dedup_window_ms: None,
+                    cooldown_key: None,
+                    cooldown_ms: None,
+                    accepted_at_ms: None,
+                    last_error: None,
+                })
+                .expect("staged trigger event should persist for restart-order parity"));
+        }
+
+        drop(store);
+
+        let mut reopened = RuntimeStateStore::open(&backend.config, 1_710_931_000_010)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} store should reopen for staged-order parity: {error}",
+                    backend.name
+                )
+            });
+        let reconciled = reopened
+            .reconcile_pending_staged_trigger_event_records(10)
+            .expect("reconcile staged rows should succeed after restart");
+        let reconciled_ids = reconciled
+            .iter()
+            .map(|record| record.staging_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reconciled_ids,
+            vec!["staged-a-1", "staged-b-1", "staged-a-2"],
+            "{} should preserve deterministic staged order after restart",
+            backend.name
+        );
+
+        reopened
+            .mark_staged_trigger_event_accepted("staged-a-1", 1_710_931_000_020)
+            .expect("first staged row should mark accepted");
+        reopened
+            .mark_staged_trigger_event_accepted("staged-b-1", 1_710_931_000_021)
+            .expect("second staged row should mark accepted");
+
+        let alpha_pending = reopened
+            .list_pending_staged_trigger_event_records("tr-alpha", 10)
+            .expect("pending staged rows for alpha should list");
+        assert_eq!(alpha_pending.len(), 1);
+        assert_eq!(alpha_pending[0].staging_id, "staged-a-2");
+        assert!(reopened
+            .list_pending_staged_trigger_event_records("tr-beta", 10)
+            .expect("pending staged rows for beta should list")
+            .is_empty());
+
+        backend.reset();
+    }
+}
+
+#[test]
+fn external_trigger_supervisor_exposes_one_lifecycle_surface_for_process_and_wasm() {
+    let mut supervisor = ExternalTriggerSupervisor::new("parity-owner");
+    assert!(supervisor.start_session(
+        ExternalTriggerSessionSpec {
+            trigger_id: String::from("tr-process"),
+            plugin_id: String::from("plugin-process"),
+            runtime: ExternalTriggerSessionRuntime::Process,
+            wasm_component: None,
+        },
+        1_710_940_000_000,
+    ));
+    assert!(supervisor.start_session(
+        ExternalTriggerSessionSpec {
+            trigger_id: String::from("tr-wasm"),
+            plugin_id: String::from("plugin-wasm"),
+            runtime: ExternalTriggerSessionRuntime::Wasm,
+            wasm_component: Some(String::from("trigger_wasm_component")),
+        },
+        1_710_940_000_000,
+    ));
+
+    supervisor.record_session_turns(1_710_940_000_100);
+
+    let process_session = supervisor
+        .sessions()
+        .get("tr-process")
+        .expect("process session should stay in shared supervisor registry");
+    assert_eq!(
+        process_session.runtime,
+        ExternalTriggerSessionRuntime::Process
+    );
+    assert!(process_session.wasm_session.is_none());
+
+    let wasm_session = supervisor
+        .sessions()
+        .get("tr-wasm")
+        .and_then(|session| session.wasm_session.as_ref())
+        .expect("wasm session should stay in shared supervisor registry");
+    assert_eq!(wasm_session.store_turn_count(), 1);
+    assert_eq!(wasm_session.guest_state().turn_count, 1);
+}
+
 struct BackendFixture {
     name: &'static str,
     slug: &'static str,
@@ -705,6 +931,7 @@ fn reset_postgres_tables(database_url: &str) {
                 archived_trigger_event_records, \
                 archived_run_summaries, \
                 run_summaries, \
+                staged_trigger_event_records, \
                 serve_leases \
              RESTART IDENTITY",
         )
