@@ -1,6 +1,6 @@
 [package]
 name = "chainbot"
-version = "2.3.2"
+version = "2.3.3"
 edition = "2024"
 
 [dependencies]
@@ -16,6 +16,7 @@ time = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "time"] }
 toml = "1.0.7"
 tower = { version = "0.5", features = ["util"] }
+wasmtime = "38.0.3"
 
 [dev-dependencies]
 tokio-tungstenite = "0.28"
