@@ -7,6 +7,7 @@
 
 ## Members
 - `contract_versions.rs`: Verifies accepted current versions and rejects unsupported future majors.
+- `catalog_surface.rs`: Verifies the catalog list/show CLI surface, JSON payload stability, and plugin metadata fallback behavior.
 - `cli_surface.rs`: Verifies help output, validate/list-runs success paths, and bounded user-facing failures for unimplemented commands.
 - `config_loading.rs`: Verifies v2.1 root layout resolution plus package-manifest loader behavior for valid fixtures, missing paths, and invalid TOML.
 - `runtime_state_parity.rs`: Verifies DB-primary runtime-state semantics stay aligned between SQLite local mode and PostgreSQL mode for leases, run summaries, trigger snapshots/checkpoints, and trigger history visibility.

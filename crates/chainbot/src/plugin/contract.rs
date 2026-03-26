@@ -23,11 +23,79 @@ pub const PLUGIN_KIND_EXTERNAL_NODE: &str = "external_node";
 pub const PLUGIN_KIND_EXTERNAL_TRIGGER: &str = "external_trigger";
 pub const NODE_PLUGIN_EXECUTE_CAPABILITY: &str = "node:execute";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const REQUIRED_TRIGGER_HOST_ERROR_CATEGORIES: &[TriggerHostErrorCategory] = &[
+    TriggerHostErrorCategory::Transport,
+    TriggerHostErrorCategory::ProtocolContract,
+    TriggerHostErrorCategory::PluginFatal,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginOperationDescriptor {
+    pub name: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub input_schema: Vec<String>,
+    #[serde(default)]
+    pub output_schema: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginEventSchemaDescriptor {
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PluginKind {
     Builtin,
     ExternalNode,
     ExternalTrigger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerRuntimeLifecycle {
+    ProcessShortLived,
+    WasmDaemonPersistentSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerPushCallbackSemantics {
+    InlineResponse,
+    HostCallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerDurableAckSemantics {
+    CallerScope,
+    AfterStorePersist,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerHostErrorCategory {
+    Transport,
+    ProtocolContract,
+    PluginFatal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalTriggerRuntimeContract {
+    #[serde(default)]
+    pub lifecycle: Option<TriggerRuntimeLifecycle>,
+    #[serde(default)]
+    pub push_callback: Option<TriggerPushCallbackSemantics>,
+    #[serde(default)]
+    pub durable_ack: Option<TriggerDurableAckSemantics>,
+    #[serde(default)]
+    pub host_error_categories: Vec<TriggerHostErrorCategory>,
+    #[serde(default)]
+    pub module: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +112,12 @@ pub struct PluginManifest {
     pub input_schema: Vec<String>,
     #[serde(default)]
     pub output_schema: Vec<String>,
+    #[serde(default)]
+    pub trigger_runtime: Option<ExternalTriggerRuntimeContract>,
+    #[serde(default)]
+    pub operations: Vec<PluginOperationDescriptor>,
+    #[serde(default)]
+    pub event_schema: Option<PluginEventSchemaDescriptor>,
     #[serde(skip)]
     pub manifest_path: PathBuf,
 }
@@ -62,23 +136,32 @@ impl PluginManifest {
         validate_unique_non_empty_list(&self.capabilities, "plugin.capabilities", &self.plugin_id)?;
 
         match self.kind()? {
-            PluginKind::Builtin => {}
+            PluginKind::Builtin => {
+                ensure_list_empty(&self.input_schema, "plugin.input_schema", &self.plugin_id)?;
+                ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
+                ensure_trigger_runtime_absent(&self.plugin_id, self.trigger_runtime.as_ref())?;
+                ensure_operations_absent(&self.plugin_id, &self.operations)?;
+                ensure_event_schema_absent(&self.plugin_id, self.event_schema.as_ref())?;
+            }
             PluginKind::ExternalNode => {
                 validate_non_empty(
                     self.executable.as_deref().unwrap_or_default(),
                     "plugin.executable",
                     &self.plugin_id,
                 )?;
-                validate_unique_non_empty_list(
-                    &self.input_schema,
-                    "plugin.input_schema",
-                    &self.plugin_id,
-                )?;
-                validate_unique_non_empty_list(
-                    &self.output_schema,
-                    "plugin.output_schema",
-                    &self.plugin_id,
-                )?;
+                ensure_list_empty(&self.input_schema, "plugin.input_schema", &self.plugin_id)?;
+                ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
+                ensure_trigger_runtime_absent(&self.plugin_id, self.trigger_runtime.as_ref())?;
+                ensure_event_schema_absent(&self.plugin_id, self.event_schema.as_ref())?;
+                validate_operations(&self.plugin_id, &self.operations)?;
+                if self.operations.is_empty() {
+                    return Err(ContractError::NodePluginInvalidField {
+                        plugin_id: self.plugin_id.clone(),
+                        field: "plugin.operations",
+                        detail: "external_node plugins must declare at least one operation"
+                            .to_owned(),
+                    });
+                }
 
                 if !self
                     .capabilities
@@ -92,11 +175,22 @@ impl PluginManifest {
                 }
             }
             PluginKind::ExternalTrigger => {
-                validate_non_empty(
-                    self.executable.as_deref().unwrap_or_default(),
-                    "plugin.executable",
+                ensure_list_empty(&self.input_schema, "plugin.input_schema", &self.plugin_id)?;
+                ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
+                ensure_operations_absent(&self.plugin_id, &self.operations)?;
+                validate_external_trigger_runtime_contract(
                     &self.plugin_id,
+                    self.executable.as_deref(),
+                    self.trigger_runtime.as_ref(),
                 )?;
+                validate_event_schema(&self.plugin_id, self.event_schema.as_ref())?;
+                if self.event_schema.is_none() {
+                    return Err(ContractError::NodePluginInvalidField {
+                        plugin_id: self.plugin_id.clone(),
+                        field: "plugin.event_schema",
+                        detail: "external_trigger plugins must declare event_schema".to_owned(),
+                    });
+                }
             }
         }
 
@@ -119,6 +213,43 @@ impl PluginManifest {
         let manifest: Self = serde_json::from_str(input)?;
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    pub fn node_operation(
+        &self,
+        operation_name: &str,
+    ) -> Result<&PluginOperationDescriptor, ContractError> {
+        if self.kind()? != PluginKind::ExternalNode {
+            return Err(ContractError::NodePluginInvalidKind {
+                plugin_id: self.plugin_id.clone(),
+                kind: self.kind.clone(),
+            });
+        }
+        let operation = self
+            .operations
+            .iter()
+            .find(|operation| operation.name == operation_name)
+            .ok_or_else(|| ContractError::NodePluginProtocolContractViolation {
+                plugin_id: self.plugin_id.clone(),
+                detail: format!("unknown operation `{operation_name}`"),
+            })?;
+        Ok(operation)
+    }
+
+    pub fn trigger_event_schema(&self) -> Result<&PluginEventSchemaDescriptor, ContractError> {
+        if self.kind()? != PluginKind::ExternalTrigger {
+            return Err(ContractError::NodePluginInvalidKind {
+                plugin_id: self.plugin_id.clone(),
+                kind: self.kind.clone(),
+            });
+        }
+        self.event_schema
+            .as_ref()
+            .ok_or_else(|| ContractError::NodePluginInvalidField {
+                plugin_id: self.plugin_id.clone(),
+                field: "plugin.event_schema",
+                detail: "external_trigger plugins must declare event_schema".to_owned(),
+            })
     }
 }
 
@@ -183,7 +314,8 @@ impl ExternalNodePluginRequest {
             }
         }
 
-        validate_input_schema(&manifest.plugin_id, &manifest.input_schema, &self.input)
+        let operation = manifest.node_operation(&self.operation)?;
+        validate_input_schema(&manifest.plugin_id, &operation.input_schema, &self.input)
     }
 }
 
@@ -265,6 +397,511 @@ fn validate_unique_non_empty_list(
         }
     }
     Ok(())
+}
+
+fn ensure_list_empty(
+    values: &[String],
+    field: &'static str,
+    plugin_id: &str,
+) -> Result<(), ContractError> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    Err(ContractError::NodePluginInvalidField {
+        plugin_id: plugin_id.to_owned(),
+        field,
+        detail: "field is not allowed for this plugin kind".to_owned(),
+    })
+}
+
+fn ensure_trigger_runtime_absent(
+    plugin_id: &str,
+    trigger_runtime: Option<&ExternalTriggerRuntimeContract>,
+) -> Result<(), ContractError> {
+    if trigger_runtime.is_none() {
+        return Ok(());
+    }
+    Err(ContractError::NodePluginInvalidField {
+        plugin_id: plugin_id.to_owned(),
+        field: "plugin.trigger_runtime",
+        detail: "field is not allowed for this plugin kind".to_owned(),
+    })
+}
+
+fn validate_external_trigger_runtime_contract(
+    plugin_id: &str,
+    executable: Option<&str>,
+    trigger_runtime: Option<&ExternalTriggerRuntimeContract>,
+) -> Result<(), ContractError> {
+    let Some(trigger_runtime) = trigger_runtime else {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field: "plugin.trigger_runtime.lifecycle",
+            detail: "field is required".to_owned(),
+        });
+    };
+
+    let lifecycle =
+        trigger_runtime
+            .lifecycle
+            .ok_or_else(|| ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.trigger_runtime.lifecycle",
+                detail: "field is required".to_owned(),
+            })?;
+    let push_callback =
+        trigger_runtime
+            .push_callback
+            .ok_or_else(|| ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.trigger_runtime.push_callback",
+                detail: "field is required".to_owned(),
+            })?;
+    let durable_ack =
+        trigger_runtime
+            .durable_ack
+            .ok_or_else(|| ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.trigger_runtime.durable_ack",
+                detail: "field is required".to_owned(),
+            })?;
+
+    validate_trigger_host_error_categories(plugin_id, &trigger_runtime.host_error_categories)?;
+
+    match lifecycle {
+        TriggerRuntimeLifecycle::ProcessShortLived => {
+            validate_non_empty(
+                executable.unwrap_or_default(),
+                "plugin.executable",
+                plugin_id,
+            )?;
+            if trigger_runtime.module.is_some() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.module",
+                    detail: "process_short_lived lifecycle does not allow trigger_runtime.module"
+                        .to_owned(),
+                });
+            }
+            if push_callback != TriggerPushCallbackSemantics::InlineResponse {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.push_callback",
+                    detail: "process_short_lived lifecycle requires push_callback=inline_response"
+                        .to_owned(),
+                });
+            }
+            if durable_ack != TriggerDurableAckSemantics::CallerScope {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.durable_ack",
+                    detail: "process_short_lived lifecycle requires durable_ack=caller_scope"
+                        .to_owned(),
+                });
+            }
+        }
+        TriggerRuntimeLifecycle::WasmDaemonPersistentSession => {
+            if let Some(executable) = executable.filter(|value| !value.trim().is_empty()) {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.executable",
+                    detail: format!(
+                        "wasm_daemon_persistent_session lifecycle does not allow plugin.executable: {executable}"
+                    ),
+                });
+            }
+            validate_non_empty(
+                trigger_runtime.module.as_deref().unwrap_or_default(),
+                "plugin.trigger_runtime.module",
+                plugin_id,
+            )?;
+            if push_callback != TriggerPushCallbackSemantics::HostCallback {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.push_callback",
+                    detail: "wasm_daemon_persistent_session lifecycle requires push_callback=host_callback"
+                        .to_owned(),
+                });
+            }
+            if durable_ack != TriggerDurableAckSemantics::AfterStorePersist {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.durable_ack",
+                    detail: "wasm_daemon_persistent_session lifecycle requires durable_ack=after_store_persist"
+                        .to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_trigger_host_error_categories(
+    plugin_id: &str,
+    categories: &[TriggerHostErrorCategory],
+) -> Result<(), ContractError> {
+    if categories.is_empty() {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field: "plugin.trigger_runtime.host_error_categories",
+            detail: "field must declare at least one host error category".to_owned(),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for category in categories {
+        if !seen.insert(*category) {
+            return Err(ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.trigger_runtime.host_error_categories",
+                detail: format!("duplicated value: {}", category.as_str()),
+            });
+        }
+    }
+
+    for required in REQUIRED_TRIGGER_HOST_ERROR_CATEGORIES {
+        if !seen.contains(required) {
+            return Err(ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.trigger_runtime.host_error_categories",
+                detail: format!(
+                    "required host error category is missing: {}",
+                    required.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+impl TriggerHostErrorCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::ProtocolContract => "protocol_contract",
+            Self::PluginFatal => "plugin_fatal",
+        }
+    }
+}
+
+fn ensure_operations_absent(
+    plugin_id: &str,
+    operations: &[PluginOperationDescriptor],
+) -> Result<(), ContractError> {
+    if operations.is_empty() {
+        return Ok(());
+    }
+    Err(ContractError::NodePluginInvalidField {
+        plugin_id: plugin_id.to_owned(),
+        field: "plugin.operations",
+        detail: "field is not allowed for this plugin kind".to_owned(),
+    })
+}
+
+fn ensure_event_schema_absent(
+    plugin_id: &str,
+    event_schema: Option<&PluginEventSchemaDescriptor>,
+) -> Result<(), ContractError> {
+    if event_schema.is_none() {
+        return Ok(());
+    }
+    Err(ContractError::NodePluginInvalidField {
+        plugin_id: plugin_id.to_owned(),
+        field: "plugin.event_schema",
+        detail: "field is not allowed for this plugin kind".to_owned(),
+    })
+}
+
+fn validate_operations(
+    plugin_id: &str,
+    operations: &[PluginOperationDescriptor],
+) -> Result<(), ContractError> {
+    let mut seen = BTreeSet::new();
+    for operation in operations {
+        validate_non_empty(&operation.name, "plugin.operations.name", plugin_id)?;
+        if let Some(summary) = operation.summary.as_deref() {
+            validate_non_empty(summary, "plugin.operations.summary", plugin_id)?;
+        }
+        validate_unique_non_empty_list(
+            &operation.input_schema,
+            "plugin.operations.input_schema",
+            plugin_id,
+        )?;
+        validate_unique_non_empty_list(
+            &operation.output_schema,
+            "plugin.operations.output_schema",
+            plugin_id,
+        )?;
+        if !seen.insert(operation.name.clone()) {
+            return Err(ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.operations.name",
+                detail: format!("duplicated value: {}", operation.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_event_schema(
+    plugin_id: &str,
+    event_schema: Option<&PluginEventSchemaDescriptor>,
+) -> Result<(), ContractError> {
+    let Some(event_schema) = event_schema else {
+        return Ok(());
+    };
+    if let Some(summary) = event_schema.summary.as_deref() {
+        validate_non_empty(summary, "plugin.event_schema.summary", plugin_id)?;
+    }
+    validate_unique_non_empty_list(
+        &event_schema.fields,
+        "plugin.event_schema.fields",
+        plugin_id,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_manifest() -> PluginManifest {
+        PluginManifest {
+            api_version: "2.0.0".to_owned(),
+            plugin_id: "quote-node-plugin".to_owned(),
+            kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
+            entrypoint: "node.exec.v1".to_owned(),
+            capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+            executable: Some("bin/external_node.sh".to_owned()),
+            input_schema: Vec::new(),
+            output_schema: Vec::new(),
+            trigger_runtime: None,
+            operations: Vec::new(),
+            event_schema: None,
+            manifest_path: PathBuf::new(),
+        }
+    }
+
+    fn process_short_lived_contract() -> ExternalTriggerRuntimeContract {
+        ExternalTriggerRuntimeContract {
+            lifecycle: Some(TriggerRuntimeLifecycle::ProcessShortLived),
+            push_callback: Some(TriggerPushCallbackSemantics::InlineResponse),
+            durable_ack: Some(TriggerDurableAckSemantics::CallerScope),
+            host_error_categories: vec![
+                TriggerHostErrorCategory::Transport,
+                TriggerHostErrorCategory::ProtocolContract,
+                TriggerHostErrorCategory::PluginFatal,
+            ],
+            module: None,
+        }
+    }
+
+    fn wasm_persistent_contract() -> ExternalTriggerRuntimeContract {
+        ExternalTriggerRuntimeContract {
+            lifecycle: Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession),
+            push_callback: Some(TriggerPushCallbackSemantics::HostCallback),
+            durable_ack: Some(TriggerDurableAckSemantics::AfterStorePersist),
+            host_error_categories: vec![
+                TriggerHostErrorCategory::Transport,
+                TriggerHostErrorCategory::ProtocolContract,
+                TriggerHostErrorCategory::PluginFatal,
+            ],
+            module: Some("bin/external_trigger.wasm".to_owned()),
+        }
+    }
+
+    #[test]
+    fn plugin_manifest_accepts_kind_scoped_metadata() {
+        let mut external_node = base_manifest();
+        external_node.operations = vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: Some("Normalize quote payload".to_owned()),
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+        }];
+        external_node
+            .validate()
+            .expect("operations metadata should validate");
+
+        let mut external_trigger = base_manifest();
+        external_trigger.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        external_trigger.capabilities = vec!["trigger.listen.event".to_owned()];
+        external_trigger.trigger_runtime = Some(process_short_lived_contract());
+        external_trigger.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("Market tick payload".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        });
+        external_trigger
+            .validate()
+            .expect("event schema metadata should validate");
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_missing_trigger_runtime_contract_for_external_trigger() {
+        let mut manifest = base_manifest();
+        manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        manifest.capabilities = vec!["trigger.listen.event".to_owned()];
+        manifest.trigger_runtime = None;
+        manifest.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        });
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.trigger_runtime.lifecycle",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_duplicate_operation_names() {
+        let mut manifest = base_manifest();
+        manifest.operations = vec![
+            PluginOperationDescriptor {
+                name: "normalize".to_owned(),
+                summary: None,
+                input_schema: Vec::new(),
+                output_schema: Vec::new(),
+            },
+            PluginOperationDescriptor {
+                name: "normalize".to_owned(),
+                summary: None,
+                input_schema: Vec::new(),
+                output_schema: Vec::new(),
+            },
+        ];
+        assert!(matches!(
+            manifest.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.operations.name",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_wrong_metadata_for_kind() {
+        let mut external_node = base_manifest();
+        external_node.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("wrong".to_owned()),
+            fields: vec!["symbol".to_owned()],
+        });
+        assert!(matches!(
+            external_node.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.event_schema",
+                ..
+            })
+        ));
+
+        let mut external_trigger = base_manifest();
+        external_trigger.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        external_trigger.capabilities = vec!["trigger.listen.event".to_owned()];
+        external_trigger.operations = vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: None,
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+        }];
+        external_trigger.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned()],
+        });
+        assert!(matches!(
+            external_trigger.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.operations",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_manifest_accepts_process_short_lived_trigger_runtime_contract() {
+        let mut manifest = base_manifest();
+        manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        manifest.capabilities = vec!["trigger.listen.event".to_owned()];
+        manifest.trigger_runtime = Some(process_short_lived_contract());
+        manifest.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        });
+
+        manifest
+            .validate()
+            .expect("process short-lived trigger runtime contract should validate");
+    }
+
+    #[test]
+    fn plugin_manifest_accepts_wasm_persistent_trigger_runtime_contract() {
+        let mut manifest = base_manifest();
+        manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        manifest.capabilities = vec!["trigger.listen.event".to_owned()];
+        manifest.executable = None;
+        manifest.trigger_runtime = Some(wasm_persistent_contract());
+        manifest.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        });
+
+        manifest
+            .validate()
+            .expect("wasm persistent trigger runtime contract should validate");
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_mixed_trigger_runtime_declaration() {
+        let mut manifest = base_manifest();
+        manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        manifest.capabilities = vec!["trigger.listen.event".to_owned()];
+        manifest.executable = Some("bin/external_trigger.sh".to_owned());
+        manifest.trigger_runtime = Some(wasm_persistent_contract());
+        manifest.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        });
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.executable",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_missing_trigger_runtime_lifecycle() {
+        let mut manifest = base_manifest();
+        manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        manifest.capabilities = vec!["trigger.listen.event".to_owned()];
+        manifest.trigger_runtime = Some(ExternalTriggerRuntimeContract {
+            lifecycle: None,
+            push_callback: Some(TriggerPushCallbackSemantics::InlineResponse),
+            durable_ack: Some(TriggerDurableAckSemantics::CallerScope),
+            host_error_categories: vec![
+                TriggerHostErrorCategory::Transport,
+                TriggerHostErrorCategory::ProtocolContract,
+                TriggerHostErrorCategory::PluginFatal,
+            ],
+            module: None,
+        });
+        manifest.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        });
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.trigger_runtime.lifecycle",
+                ..
+            })
+        ));
+    }
 }
 
 fn validate_input_schema(

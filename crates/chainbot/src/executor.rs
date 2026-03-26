@@ -9,14 +9,21 @@
 
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::builtins::nodes::input_resolver::resolve_node_inputs;
+use crate::builtins::nodes::SecretDecryptMode;
 pub use crate::builtins::nodes::contract::{
     BuiltinNodeRegistry, BuiltinNodeRequest, BuiltinNodeResult,
 };
 use crate::builtins::nodes::dispatch::builtin_dispatch_kind;
 use crate::errors::{assert_required_major, ContractError};
+use crate::plugin::{
+    ExternalNodePluginHost, ExternalNodePluginRequest, PluginKind, PluginManifest,
+    NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
+};
 use crate::workflow::{
     DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, SubflowContract, VariableBinding,
     WhenCondition, WorkflowDefinition,
@@ -89,6 +96,10 @@ pub struct ExecutionPlane {
     workflows: BTreeMap<String, WorkflowDefinition>,
     config_defaults: BTreeMap<String, serde_json::Value>,
     builtin_registry: BuiltinNodeRegistry,
+    plugin_manifests: BTreeMap<String, PluginManifest>,
+    plugins_root: PathBuf,
+    secrets_dir: PathBuf,
+    secret_mode: SecretDecryptMode,
     max_subflow_depth: usize,
 }
 
@@ -167,6 +178,31 @@ impl ExecutionPlane {
             workflows,
             config_defaults,
             builtin_registry,
+            Vec::new(),
+            PathBuf::new(),
+            PathBuf::new(),
+            SecretDecryptMode::Plaintext,
+            DEFAULT_MAX_SUBFLOW_DEPTH,
+        )
+    }
+
+    pub fn with_plugin_runtime(
+        workflows: Vec<WorkflowDefinition>,
+        config_defaults: BTreeMap<String, serde_json::Value>,
+        builtin_registry: BuiltinNodeRegistry,
+        plugin_manifests: Vec<PluginManifest>,
+        plugins_root: PathBuf,
+        secrets_dir: PathBuf,
+        secret_mode: SecretDecryptMode,
+    ) -> Result<Self, ContractError> {
+        Self::with_max_subflow_depth(
+            workflows,
+            config_defaults,
+            builtin_registry,
+            plugin_manifests,
+            plugins_root,
+            secrets_dir,
+            secret_mode,
             DEFAULT_MAX_SUBFLOW_DEPTH,
         )
     }
@@ -175,6 +211,10 @@ impl ExecutionPlane {
         workflows: Vec<WorkflowDefinition>,
         config_defaults: BTreeMap<String, serde_json::Value>,
         builtin_registry: BuiltinNodeRegistry,
+        plugin_manifests: Vec<PluginManifest>,
+        plugins_root: PathBuf,
+        secrets_dir: PathBuf,
+        secret_mode: SecretDecryptMode,
         max_subflow_depth: usize,
     ) -> Result<Self, ContractError> {
         let mut workflow_map = BTreeMap::new();
@@ -189,10 +229,20 @@ impl ExecutionPlane {
             workflow_map.insert(workflow_id, workflow);
         }
 
+        let mut plugin_manifest_map = BTreeMap::new();
+        for manifest in plugin_manifests {
+            manifest.validate()?;
+            plugin_manifest_map.insert(manifest.plugin_id.clone(), manifest);
+        }
+
         Ok(Self {
             workflows: workflow_map,
             config_defaults,
             builtin_registry,
+            plugin_manifests: plugin_manifest_map,
+            plugins_root,
+            secrets_dir,
+            secret_mode,
             max_subflow_depth,
         })
     }
@@ -424,6 +474,10 @@ impl ExecutionPlane {
             );
         }
 
+        if node.kind == "plugin" {
+            return self.execute_plugin_node(request, workflow, node, inputs);
+        }
+
         let Some(kind) = builtin_dispatch_kind(node) else {
             return Err(ContractError::UnsupportedNodeKindForScheduler {
                 workflow_id: workflow.workflow_id.clone(),
@@ -442,6 +496,52 @@ impl ExecutionPlane {
             runtime_namespaces: runtime_namespaces.clone(),
         };
         self.builtin_registry.dispatch(kind, &dispatch_request)
+    }
+
+    fn execute_plugin_node(
+        &self,
+        _request: &NormalizedRunRequest,
+        workflow: &WorkflowDefinition,
+        node: &NodeDefinition,
+        inputs: BTreeMap<String, serde_json::Value>,
+    ) -> Result<BuiltinNodeResult, ContractError> {
+        let manifest = self.plugin_manifests.get(&node.plugin_id).ok_or_else(|| {
+            ContractError::CliUsage {
+                message: format!(
+                    "workflow {} node {} references unknown plugin {}",
+                    workflow.workflow_id, node.node_id, node.plugin_id
+                ),
+            }
+        })?;
+
+        if manifest.kind()? != PluginKind::ExternalNode {
+            return Err(ContractError::CliUsage {
+                message: format!(
+                    "workflow {} node {} expected external node plugin kind for {}",
+                    workflow.workflow_id, node.node_id, node.plugin_id
+                ),
+            });
+        }
+
+        let resolved = resolve_node_inputs(&self.secrets_dir, self.secret_mode, &inputs)?;
+        let host = ExternalNodePluginHost::new(self.plugins_root.clone());
+        let response = host.execute(
+            manifest,
+            &ExternalNodePluginRequest {
+                contract_version: NODE_PLUGIN_CONTRACT_VERSION.to_owned(),
+                plugin_id: node.plugin_id.clone(),
+                node_id: node.node_id.clone(),
+                operation: node.operation.clone(),
+                requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+                input: resolved.values,
+            },
+        )?;
+
+        Ok(BuiltinNodeResult {
+            outputs: response.output.clone(),
+            run_scoped: response.output,
+            ..BuiltinNodeResult::default()
+        })
     }
 
     fn execute_subflow_node(

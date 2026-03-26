@@ -25,10 +25,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::triggers::validate_builtin_trigger_definition;
 use crate::errors::{assert_required_major, assert_supported_major, ContractError};
-use crate::plugin::{configure_plugin_host_environment, PluginKind, PluginManifest};
+use crate::plugin::{
+    configure_plugin_host_environment, PluginKind, PluginManifest, TriggerRuntimeLifecycle,
+};
 use crate::state::{
-    sanitize_path_component, StateLayout, TriggerCheckpointRecord, TriggerEventRecord,
-    TriggerSnapshotRecord,
+    sanitize_path_component, StagedTriggerEventRecord, StateLayout, TriggerCheckpointRecord,
+    TriggerEventRecord, TriggerSnapshotRecord,
 };
 use crate::state_db::{RuntimeStateError, RuntimeStateStore};
 
@@ -36,6 +38,7 @@ pub const CURRENT_API_MAJOR: u64 = 2;
 pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.listen.event";
 pub const TRIGGER_KIND_BUILTIN: &str = "builtin";
 pub const TRIGGER_KIND_EXTERNAL_PLUGIN: &str = "external_plugin";
+const STAGED_TRIGGER_EVENT_BATCH_LIMIT: i64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerKind {
@@ -183,6 +186,7 @@ pub struct TriggerPlane {
     state_store: RuntimeStateStore,
     accepted_sequence: u64,
     accepted_event_keys: BTreeSet<String>,
+    collect_external_process_emissions: bool,
 }
 
 #[derive(Debug)]
@@ -194,7 +198,13 @@ pub enum TriggerPlaneError {
 #[derive(Debug, Clone)]
 struct ExternalTriggerPlugin {
     plugin_id: String,
-    executable_path: PathBuf,
+    runtime: ExternalTriggerPluginRuntime,
+}
+
+#[derive(Debug, Clone)]
+enum ExternalTriggerPluginRuntime {
+    Process { executable_path: PathBuf },
+    WasmPersistentSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,11 +372,46 @@ impl TriggerPlane {
     }
 
     pub fn open_with_store(
+        state_store: RuntimeStateStore,
+        definitions: Vec<TriggerDefinition>,
+        plugin_manifests: Vec<PluginManifest>,
+        policy: TriggerPluginHostPolicy,
+        builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
+    ) -> Result<Self, TriggerPlaneError> {
+        Self::open_with_store_mode(
+            state_store,
+            definitions,
+            plugin_manifests,
+            policy,
+            builtin_events,
+            true,
+        )
+    }
+
+    pub fn open_with_store_acceptance_only(
+        state_store: RuntimeStateStore,
+        definitions: Vec<TriggerDefinition>,
+        plugin_manifests: Vec<PluginManifest>,
+        policy: TriggerPluginHostPolicy,
+        builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
+    ) -> Result<Self, TriggerPlaneError> {
+        Self::open_with_store_mode(
+            state_store,
+            definitions,
+            plugin_manifests,
+            policy,
+            builtin_events,
+            false,
+        )
+    }
+
+    fn open_with_store_mode(
         mut state_store: RuntimeStateStore,
         definitions: Vec<TriggerDefinition>,
         plugin_manifests: Vec<PluginManifest>,
         policy: TriggerPluginHostPolicy,
         builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
+        collect_external_process_emissions: bool,
     ) -> Result<Self, TriggerPlaneError> {
         let mut validated_definitions = Vec::with_capacity(definitions.len());
         let mut definition_ids = BTreeSet::new();
@@ -428,6 +473,7 @@ impl TriggerPlane {
             state_store,
             accepted_sequence,
             accepted_event_keys,
+            collect_external_process_emissions,
         })
     }
 
@@ -455,30 +501,55 @@ impl TriggerPlane {
                 continue;
             }
 
+            let staged_records = self.state_store.list_pending_staged_trigger_event_records(
+                &definition.trigger_id,
+                STAGED_TRIGGER_EVENT_BATCH_LIMIT,
+            )?;
+
             let emissions = match definition.kind()? {
                 TriggerKind::Builtin => self
                     .builtin_events
                     .remove(&definition.trigger_id)
                     .unwrap_or_default(),
                 TriggerKind::ExternalPlugin => {
-                    let plugin_id = definition.plugin.as_deref().ok_or_else(|| {
-                        ContractError::InvalidTriggerDefinitionField {
-                            trigger_id: definition.trigger_id.clone(),
-                            field: "trigger.plugin",
-                            detail: "value cannot be empty".to_owned(),
-                        }
-                    })?;
-                    let plugin = self
-                        .external_plugins
-                        .get(plugin_id)
-                        .ok_or_else(|| ContractError::UnknownTriggerPlugin {
-                            trigger_id: definition.trigger_id.clone(),
-                            plugin_id: plugin_id.to_owned(),
-                        })?
-                        .clone();
-                    plugin.stream_emissions(&mut self.state_store, &definition, on_progress)?
+                    if !self.collect_external_process_emissions {
+                        Vec::new()
+                    } else {
+                        let plugin_id = definition.plugin.as_deref().ok_or_else(|| {
+                            ContractError::InvalidTriggerDefinitionField {
+                                trigger_id: definition.trigger_id.clone(),
+                                field: "trigger.plugin",
+                                detail: "value cannot be empty".to_owned(),
+                            }
+                        })?;
+                        let plugin = self
+                            .external_plugins
+                            .get(plugin_id)
+                            .ok_or_else(|| ContractError::UnknownTriggerPlugin {
+                                trigger_id: definition.trigger_id.clone(),
+                                plugin_id: plugin_id.to_owned(),
+                            })?
+                            .clone();
+                        plugin.stream_emissions(&mut self.state_store, &definition, on_progress)?
+                    }
                 }
             };
+
+            for staged_record in staged_records {
+                on_progress()?;
+                let request = self.normalize_emission(
+                    &definition,
+                    trigger_emission_from_staged_record(&staged_record),
+                    accepted_at_ms,
+                )?;
+                self.state_store.mark_staged_trigger_event_accepted(
+                    &staged_record.staging_id,
+                    accepted_at_ms,
+                )?;
+                if let Some(request) = request {
+                    run_requests.push(request);
+                }
+            }
 
             for emission in emissions {
                 let request = self.normalize_emission(&definition, emission, accepted_at_ms)?;
@@ -689,21 +760,37 @@ fn validate_trigger_plugin_manifest(
         }
     }
 
-    let executable =
-        manifest
-            .executable
-            .as_deref()
-            .ok_or_else(|| ContractError::NodePluginInvalidField {
-                plugin_id: manifest.plugin_id.clone(),
-                field: "plugin.executable",
-                detail: "value cannot be empty".to_owned(),
-            })?;
+    let lifecycle = manifest
+        .trigger_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.lifecycle)
+        .ok_or_else(|| ContractError::NodePluginInvalidField {
+            plugin_id: manifest.plugin_id.clone(),
+            field: "plugin.trigger_runtime.lifecycle",
+            detail: "field is required".to_owned(),
+        })?;
 
-    let executable_path = resolve_executable_path(manifest, executable, &policy.plugin_root_dir)?;
+    let runtime = match lifecycle {
+        TriggerRuntimeLifecycle::WasmDaemonPersistentSession => {
+            ExternalTriggerPluginRuntime::WasmPersistentSession
+        }
+        TriggerRuntimeLifecycle::ProcessShortLived => {
+            let executable = manifest.executable.as_deref().ok_or_else(|| {
+                ContractError::NodePluginInvalidField {
+                    plugin_id: manifest.plugin_id.clone(),
+                    field: "plugin.executable",
+                    detail: "value cannot be empty".to_owned(),
+                }
+            })?;
+            let executable_path =
+                resolve_executable_path(manifest, executable, &policy.plugin_root_dir)?;
+            ExternalTriggerPluginRuntime::Process { executable_path }
+        }
+    };
 
     Ok(ExternalTriggerPlugin {
         plugin_id: manifest.plugin_id.clone(),
-        executable_path,
+        runtime,
     })
 }
 
@@ -829,7 +916,14 @@ impl ExternalTriggerPlugin {
     where
         F: FnMut() -> Result<(), TriggerPlaneError>,
     {
-        validate_existing_executable(&self.plugin_id, &self.executable_path)?;
+        let executable_path = match &self.runtime {
+            ExternalTriggerPluginRuntime::Process { executable_path } => executable_path,
+            ExternalTriggerPluginRuntime::WasmPersistentSession => {
+                return Ok(Vec::new());
+            }
+        };
+
+        validate_existing_executable(&self.plugin_id, executable_path)?;
 
         let input = TriggerHostMessage::Start(TriggerStartCommand {
             protocol_version: String::from("2.0.0"),
@@ -854,7 +948,7 @@ impl ExternalTriggerPlugin {
             }
         })?;
 
-        let mut command = Command::new(&self.executable_path);
+        let mut command = Command::new(executable_path);
         command
             .arg("--trigger-id")
             .arg(&definition.trigger_id)
@@ -868,7 +962,7 @@ impl ExternalTriggerPlugin {
                 .spawn()
                 .map_err(|source| ContractError::TriggerPluginSpawnFailed {
                     plugin_id: self.plugin_id.clone(),
-                    path: self.executable_path.clone(),
+                    path: executable_path.to_path_buf(),
                     source,
                 })?;
 
@@ -1127,6 +1221,38 @@ impl ExternalTriggerPlugin {
     }
 }
 
+pub(crate) fn collect_external_process_trigger_emissions<F>(
+    state_store: &mut RuntimeStateStore,
+    definition: &TriggerDefinition,
+    manifest: &PluginManifest,
+    policy: &TriggerPluginHostPolicy,
+    on_progress: &mut F,
+) -> Result<Vec<TriggerEmission>, TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let plugin_id = definition.plugin.as_deref().ok_or_else(|| {
+        ContractError::InvalidTriggerDefinitionField {
+            trigger_id: definition.trigger_id.clone(),
+            field: "trigger.plugin",
+            detail: "value cannot be empty".to_owned(),
+        }
+    })?;
+    if manifest.plugin_id != plugin_id {
+        return Err(TriggerPlaneError::Contract(
+            ContractError::UnknownTriggerPlugin {
+                trigger_id: definition.trigger_id.clone(),
+                plugin_id: plugin_id.to_owned(),
+            },
+        ));
+    }
+
+    let plugin = validate_trigger_plugin_manifest(manifest, policy)?;
+    plugin
+        .stream_emissions(state_store, definition, on_progress)
+        .map_err(TriggerPlaneError::from)
+}
+
 fn input_heartbeat_interval_ms(input: &TriggerHostMessage) -> i64 {
     match input {
         TriggerHostMessage::Start(command) => command.heartbeat_interval_ms.max(1),
@@ -1191,6 +1317,20 @@ fn request_plugin_stop(
 
 fn accepted_event_key(trigger_id: &str, event_id: &str) -> String {
     format!("{trigger_id}:::{event_id}")
+}
+
+fn trigger_emission_from_staged_record(record: &StagedTriggerEventRecord) -> TriggerEmission {
+    TriggerEmission {
+        event_id: record.event_id.clone(),
+        occurred_at_ms: record.occurred_at_ms,
+        checkpoint: record.checkpoint.clone(),
+        source: Some(record.source.clone()),
+        payload: record.payload.clone(),
+        dedup_key: record.dedup_key.clone(),
+        dedup_window_ms: record.dedup_window_ms,
+        cooldown_key: record.cooldown_key.clone(),
+        cooldown_ms: record.cooldown_ms,
+    }
 }
 
 fn entrypoint_escapes_root(base_dir: &Path, root_dir: &Path, entrypoint_path: &Path) -> bool {

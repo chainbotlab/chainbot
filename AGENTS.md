@@ -4,9 +4,9 @@
 
 ## Project Metadata
 - Current Phase: Implementation
-- Last Updated: 2026-03-22
+- Last Updated: 2026-03-24
 - Workspace Layout: `crates/`
-- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md`, `docs/user/CHAINBOT_STORAGE_OPERATOR_GUIDE.md`, `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`, `CONTRIBUTING.md`
+- Critical Paths: `Cargo.toml`, `crates/chainbot/`, `docs/design/CHAINBOT_WORKSPACE_DESIGN.md`, `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`, `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`, `docs/design/CHAINBOT_CLI_DESIGN.md`, `docs/implementation/WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V2_MVP_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V212_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_V213_CLI_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CORE_BUILTIN_NODES_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md`, `docs/implementation/CHAINBOT_INGRESS_TRIGGER_IMPLEMENTATION.md`, `docs/user/CHAINBOT_STORAGE_OPERATOR_GUIDE.md`, `docs/research/CHAINBOT_CLI_CATALOG_DISCOVERY_PROPOSAL.md`, `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`, `CONTRIBUTING.md`
 
 ## Documentation Topology
 ```text
@@ -40,13 +40,16 @@ crates/
 | `docs/implementation/CHAINBOT_HELP_DIAGNOSTICS_IMPLEMENTATION.md` | implementation | active | Records the richer help cards, canonical config examples, and precise TOML/argv diagnostics. |
 | `examples/README.md` | user-facing examples | active | Indexes curated single-workflow, builtin-triggers, workflow-composition, plugin-integrations, and custom-paths example roots. |
 | `docs/implementation/CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md` | implementation | active | Records the unified builtin namespace refactor, trait-backed registries, and final public API layout. |
+| `docs/implementation/CHAINBOT_CORE_BUILTIN_NODES_IMPLEMENTATION.md` | implementation | active | Records the first-wave core builtin flow/data nodes, their stable registry surface, and validation coverage. |
 | `docs/implementation/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md` | implementation | active | Records the params-backed trigger extension model, builtin cron subtype, and validation coverage. |
 | `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md` | implementation | active | Records the v3 canonical-only plugin/state layout cut, removed legacy compatibility, and validation coverage for the redesign. |
 | `docs/implementation/CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md` | implementation | active | Records the narrower run-summary reads, trigger snapshot read-model, and incremental trigger-state recovery inputs. |
 | `docs/implementation/CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md` | implementation | active | Records the storage-mode extension and DB-primary runtime cut for CLI and trigger execution paths. |
 | `docs/implementation/CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md` | implementation | active | Records the observe command, runtime history retention/archive contract, and hot-path guardrail coverage. |
+| `docs/implementation/CHAINBOT_INGRESS_TRIGGER_IMPLEMENTATION.md` | implementation | active | Records the webhook/websocket ingress runtime, durable inbox staging seam, and serve-lifecycle listener wiring. |
 | `docs/user/CHAINBOT_STORAGE_OPERATOR_GUIDE.md` | user | active | Explains operator-facing `local` and `postgres` storage modes, runtime boundaries, and the current no-legacy-import stance. |
 | `docs/research/CHAINBOT_V212_CLI_PROPOSAL.md` | research | active | Proposes the v2.1.2 CLI usability surface with environment-based root resolution. |
+| `docs/research/CHAINBOT_CLI_CATALOG_DISCOVERY_PROPOSAL.md` | research | active | Expands the reviewed baseline into an implementation-oriented spec for `catalog list/show`, plugin metadata enrichment, status plugin summaries, and test rollout order. |
 | `docs/research/CHAINBOT_CONFIG_STATE_LAYOUT_PROPOSAL.md` | research | active | Proposes the one-step package and runtime-state layout that aligns plugin discovery, version semantics, and durable state boundaries. |
 | `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md` | research | active | Proposes the phased retirement of legacy plugin and runtime-state layout support after canonical adoption is observable and safe. |
 

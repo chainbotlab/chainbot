@@ -99,6 +99,61 @@ pub struct TriggerEventRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngressInboxRecord {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
+    pub inbox_id: String,
+    pub trigger_id: String,
+    pub workflow_id: String,
+    pub transport_kind: String,
+    pub ingress_event_id: String,
+    pub source: String,
+    pub route_path: String,
+    #[serde(default)]
+    pub http_method: Option<String>,
+    pub received_at_ms: i64,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub remote_addr: Option<String>,
+    #[serde(default)]
+    pub processed_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedTriggerEventRecord {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
+    pub staging_id: String,
+    pub trigger_id: String,
+    pub workflow_id: String,
+    pub event_id: String,
+    pub source: String,
+    pub occurred_at_ms: i64,
+    pub staged_at_ms: i64,
+    #[serde(default)]
+    pub checkpoint: Option<String>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub dedup_key: Option<String>,
+    #[serde(default)]
+    pub dedup_window_ms: Option<i64>,
+    #[serde(default)]
+    pub cooldown_key: Option<String>,
+    #[serde(default)]
+    pub cooldown_ms: Option<i64>,
+    #[serde(default)]
+    pub accepted_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerCheckpointRecord {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,

@@ -10,9 +10,9 @@ token = "demo-token"
 [[nodes]]
 manifest_version = "2.0.0"
 id = "external-node"
-kind = "builtin"
-plugin = "builtin.external_node"
-operation = "quote-node-plugin"
+kind = "plugin"
+plugin = "quote-node-plugin"
+operation = "normalize"
 depends_on = []
 
 [[nodes.inputs]]

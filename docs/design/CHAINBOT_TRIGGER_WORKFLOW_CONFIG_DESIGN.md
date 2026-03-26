@@ -248,6 +248,79 @@ symbol = "payload.symbol"
 price = "payload.price"
 ```
 
+webhook trigger 示例：
+
+```toml
+manifest_version = "2.0.0"
+trigger_id = "tr-webhook"
+kind = "builtin"
+source = "webhook"
+workflow_id = "rebalance"
+enabled = true
+
+[params]
+bind = "127.0.0.1:8080"
+path = "/ingress/webhook"
+method = "POST"
+max_body_bytes = 65536
+content_type = "application/json"
+idempotency_header = "x-event-id"
+
+[params.auth]
+kind = "header_token"
+header_name = "x-chainbot-token"
+token = "dev-webhook-token"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+received_event_id = "payload.id"
+```
+
+websocket trigger 示例：
+
+```toml
+manifest_version = "2.0.0"
+trigger_id = "tr-websocket"
+kind = "builtin"
+source = "websocket"
+workflow_id = "rebalance"
+enabled = true
+
+[params]
+bind = "127.0.0.1:8081"
+path = "/ingress/ws"
+max_connections = 32
+max_message_bytes = 65536
+idle_timeout_ms = 30000
+
+[params.auth]
+kind = "header_token"
+header_name = "x-chainbot-token"
+token = "dev-websocket-token"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+event = "payload.event"
+```
+
+listener-backed builtin trigger 参数约束：
+
+- `webhook.params.bind` 定义 listener bind address
+- `webhook.params.path` 定义 HTTP route path
+- `webhook.params.method` 定义接受的 HTTP method
+- `webhook.params.auth` 当前支持可选 `header_token`
+- `webhook.params.max_body_bytes` 必须大于 `0`
+- `webhook.params.content_type` 在设置时要求请求 `content-type` 匹配给定前缀
+- `webhook.params.idempotency_header` 在设置时优先作为 ingress event identity 来源
+- `websocket.params.bind` 定义 websocket bind address
+- `websocket.params.path` 定义 websocket route path
+- `websocket.params.auth` 当前支持可选 `header_token`
+- `websocket.params.max_connections` 必须大于 `0`
+- `websocket.params.max_message_bytes` 必须大于 `0`
+- `websocket.params.idle_timeout_ms` 在设置时必须大于 `0`
+
 兼容性说明：
 
 - canonical builtin 形式是 `kind = "builtin"` + `source = <subtype>`

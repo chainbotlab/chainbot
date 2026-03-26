@@ -13,10 +13,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::builtins::triggers::build_builtin_trigger_emissions;
-use chainbot::config::RootLayout;
+use chainbot::config::{RootLayout, RuntimeStorageBackend, RuntimeStorageConfig};
 use chainbot::errors::ContractError;
-use chainbot::plugin::PluginManifest;
-use chainbot::state::StateLayout;
+use chainbot::plugin::{
+    ExternalTriggerRuntimeContract, PluginEventSchemaDescriptor, PluginManifest,
+    TriggerDurableAckSemantics, TriggerHostErrorCategory, TriggerPushCallbackSemantics,
+    TriggerRuntimeLifecycle,
+};
+use chainbot::state::{StagedTriggerEventRecord, StateLayout, TriggerEventRecord};
+use chainbot::state_db::RuntimeStateStore;
 use chainbot::trigger::{
     TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlane, TriggerPlaneError,
     TriggerPluginHostPolicy, TriggerStartCommand, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
@@ -224,6 +229,53 @@ fn trigger_plugin_manifest_validation() {
             supported_major: 2,
         })
     ));
+
+    let wasm_manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "plugin-ok".to_owned(),
+        kind: "external_trigger".to_owned(),
+        entrypoint: "plugins.plugin-ok".to_owned(),
+        capabilities: vec![REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()],
+        executable: None,
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        trigger_runtime: Some(ExternalTriggerRuntimeContract {
+            lifecycle: Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession),
+            push_callback: Some(TriggerPushCallbackSemantics::HostCallback),
+            durable_ack: Some(TriggerDurableAckSemantics::AfterStorePersist),
+            host_error_categories: vec![
+                TriggerHostErrorCategory::Transport,
+                TriggerHostErrorCategory::ProtocolContract,
+                TriggerHostErrorCategory::PluginFatal,
+            ],
+            module: Some("bin/external_trigger.wasm".to_owned()),
+        }),
+        operations: Vec::new(),
+        event_schema: Some(PluginEventSchemaDescriptor {
+            summary: Some("External trigger payload".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        }),
+        manifest_path: plugin_root.join("plugin-ok").join("config.toml"),
+    };
+    TriggerPlane::open_legacy_state_layout_for_tests(
+        unique_layout("trigger-plugin-wasm-manifest").0,
+        vec![trigger_definition(
+            "trigger-external-wasm",
+            "external_plugin",
+            "plugin-ok",
+        )],
+        vec![wasm_manifest],
+        policy(
+            &plugin_root,
+            &["plugin-ok"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+        1_710_100_000_010,
+    )
+    .expect(
+        "wasm external trigger manifest without executable should pass runtime host validation",
+    );
 }
 
 #[test]
@@ -934,6 +986,523 @@ fn external_trigger_plugin_rejects_event_before_ready() {
     ));
 }
 
+#[test]
+fn staged_external_rows_bridge_through_trigger_plane_acceptance_path() {
+    let (state_layout, plugin_root) = unique_layout("staged-external-bridge-trigger-plane");
+    let executable = plugin_root.join("plugin-ready-only.sh");
+    write_protocol_script(
+        &executable,
+        "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
+    );
+
+    let definitions = vec![trigger_definition(
+        "external-trigger",
+        "external_plugin",
+        "plugin-ready-only",
+    )];
+    let manifests = vec![plugin_manifest(
+        "plugin-ready-only",
+        "2.0.0",
+        "external_trigger",
+        "plugin-ready-only.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let mut state_store = open_runtime_store(&state_layout, 1_710_100_090_000);
+    state_store
+        .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from("staging-bridge-1"),
+            trigger_id: String::from("external-trigger"),
+            workflow_id: String::from("wf-external"),
+            event_id: String::from("external-trigger:event-staged"),
+            source: String::from("plugin-ready-only"),
+            occurred_at_ms: 1_710_100_090_000,
+            staged_at_ms: 1_710_100_090_001,
+            checkpoint: Some(String::from("cp-staged")),
+            payload: serde_json::json!({"side": "buy"}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        })
+        .expect("staged external row should persist before trigger-plane collection");
+    drop(state_store);
+
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
+        state_layout.clone(),
+        definitions,
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-ready-only"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+        1_710_100_090_010,
+    )
+    .expect("trigger plane should open for staged external bridge scenario");
+
+    let requests = plane
+        .collect_run_requests(1_710_100_090_020)
+        .expect("staged external row should normalize through trigger acceptance path");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].event_id, "external-trigger:event-staged");
+
+    let mut verify_store = open_runtime_store(&state_layout, 1_710_100_090_030);
+    let pending = verify_store
+        .list_pending_staged_trigger_event_records("external-trigger", 10)
+        .expect("pending staged rows should be queryable after bridge");
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn staged_duplicate_event_does_not_create_second_accepted_record() {
+    let (state_layout, plugin_root) = unique_layout("staged-external-no-double-accept");
+    let executable = plugin_root.join("plugin-ready-only.sh");
+    write_protocol_script(
+        &executable,
+        "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
+    );
+
+    let definitions = vec![trigger_definition(
+        "external-trigger",
+        "external_plugin",
+        "plugin-ready-only",
+    )];
+    let manifests = vec![plugin_manifest(
+        "plugin-ready-only",
+        "2.0.0",
+        "external_trigger",
+        "plugin-ready-only.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let mut state_store = open_runtime_store(&state_layout, 1_710_100_091_000);
+    state_store
+        .write_trigger_record(&TriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            run_id: String::from("run-preaccepted"),
+            sequence: 1,
+            trigger_id: String::from("external-trigger"),
+            workflow_id: String::from("wf-external"),
+            event_id: String::from("external-trigger:event-dupe"),
+            checkpoint: Some(String::from("cp-dupe")),
+            source: String::from("plugin-ready-only"),
+            accepted_at_ms: 1_710_100_091_000,
+            payload: serde_json::json!({"side": "sell"}),
+            dedup_key: None,
+            dedup_expires_at_ms: None,
+            cooldown_key: None,
+            cooldown_expires_at_ms: None,
+        })
+        .expect("pre-accepted trigger record should persist");
+    state_store
+        .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from("staging-dupe-1"),
+            trigger_id: String::from("external-trigger"),
+            workflow_id: String::from("wf-external"),
+            event_id: String::from("external-trigger:event-dupe"),
+            source: String::from("plugin-ready-only"),
+            occurred_at_ms: 1_710_100_091_010,
+            staged_at_ms: 1_710_100_091_011,
+            checkpoint: Some(String::from("cp-dupe")),
+            payload: serde_json::json!({"side": "sell"}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        })
+        .expect("duplicate staged row should persist for replay suppression coverage");
+    drop(state_store);
+
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
+        state_layout.clone(),
+        definitions,
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-ready-only"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+        1_710_100_091_020,
+    )
+    .expect("trigger plane should open for duplicate staged replay scenario");
+
+    let requests = plane
+        .collect_run_requests(1_710_100_091_030)
+        .expect("duplicate staged event replay should not fail");
+    assert!(requests.is_empty());
+
+    let mut verify_store = open_runtime_store(&state_layout, 1_710_100_091_040);
+    let pending = verify_store
+        .list_pending_staged_trigger_event_records("external-trigger", 10)
+        .expect("pending staged rows should be queryable after duplicate replay");
+    assert!(pending.is_empty());
+
+    let sqlite = Connection::open(&state_layout.coordination_db_path)
+        .expect("runtime sqlite database should be readable for duplicate assertion");
+    let accepted_count: i64 = sqlite
+        .query_row(
+            "SELECT COUNT(*) FROM trigger_event_records WHERE trigger_id = ?1 AND event_id = ?2",
+            rusqlite::params!["external-trigger", "external-trigger:event-dupe"],
+            |row| row.get(0),
+        )
+        .expect("accepted trigger record count should load");
+    assert_eq!(accepted_count, 1);
+}
+
+#[test]
+fn disabled_or_removed_trigger_does_not_accept_future_staged_rows_after_restart() {
+    let (state_layout, plugin_root) = unique_layout("staged-events-disable-remove-restart-safe");
+    let definitions = vec![trigger_definition(
+        "external-trigger",
+        "external_plugin",
+        "plugin-ready-only",
+    )];
+    let manifests = vec![plugin_manifest(
+        "plugin-ready-only",
+        "2.0.0",
+        "external_trigger",
+        "plugin-ready-only.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let executable = plugin_root.join("plugin-ready-only.sh");
+    write_protocol_script(
+        &executable,
+        "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
+    );
+
+    let mut state_store = open_runtime_store(&state_layout, 1_710_100_093_000);
+    state_store
+        .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from("staging-disable-remove-1"),
+            trigger_id: String::from("external-trigger"),
+            workflow_id: String::from("wf-external"),
+            event_id: String::from("external-trigger:event-before-disable"),
+            source: String::from("plugin-ready-only"),
+            occurred_at_ms: 1_710_100_093_000,
+            staged_at_ms: 1_710_100_093_001,
+            checkpoint: Some(String::from("cp-before-disable")),
+            payload: serde_json::json!({"side": "buy"}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        })
+        .expect("first staged row should persist before initial acceptance");
+    drop(state_store);
+
+    let first_store = open_runtime_store(&state_layout, 1_710_100_093_010);
+    let mut enabled_plane = TriggerPlane::open_with_store_acceptance_only(
+        first_store,
+        definitions.clone(),
+        manifests.clone(),
+        policy(
+            &plugin_root,
+            &["plugin-ready-only"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+    )
+    .expect("acceptance-only trigger plane should open for enabled baseline");
+    let first_requests = enabled_plane
+        .collect_run_requests(1_710_100_093_020)
+        .expect("enabled trigger should accept staged row exactly once");
+    assert_eq!(first_requests.len(), 1);
+    assert_eq!(
+        first_requests[0].event_id,
+        "external-trigger:event-before-disable"
+    );
+
+    let mut second_store = open_runtime_store(&state_layout, 1_710_100_093_030);
+    second_store
+        .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from("staging-disable-remove-2"),
+            trigger_id: String::from("external-trigger"),
+            workflow_id: String::from("wf-external"),
+            event_id: String::from("external-trigger:event-after-disable"),
+            source: String::from("plugin-ready-only"),
+            occurred_at_ms: 1_710_100_093_030,
+            staged_at_ms: 1_710_100_093_031,
+            checkpoint: Some(String::from("cp-after-disable")),
+            payload: serde_json::json!({"side": "sell"}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        })
+        .expect("second staged row should persist for disable/remove replay checks");
+    drop(second_store);
+
+    let mut disabled_definition =
+        trigger_definition("external-trigger", "external_plugin", "plugin-ready-only");
+    disabled_definition.enabled = false;
+    let disabled_store = open_runtime_store(&state_layout, 1_710_100_093_040);
+    let mut disabled_plane = TriggerPlane::open_with_store_acceptance_only(
+        disabled_store,
+        vec![disabled_definition],
+        manifests.clone(),
+        policy(
+            &plugin_root,
+            &["plugin-ready-only"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+    )
+    .expect("acceptance-only trigger plane should open for disabled trigger state");
+    let disabled_requests = disabled_plane
+        .collect_run_requests(1_710_100_093_050)
+        .expect("disabled trigger should not accept staged rows");
+    assert!(disabled_requests.is_empty());
+
+    let removed_store = open_runtime_store(&state_layout, 1_710_100_093_060);
+    let mut removed_plane = TriggerPlane::open_with_store_acceptance_only(
+        removed_store,
+        Vec::new(),
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-ready-only"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+    )
+    .expect("acceptance-only trigger plane should open after trigger removal");
+    let removed_requests = removed_plane
+        .collect_run_requests(1_710_100_093_070)
+        .expect("removed trigger should not accept stale staged rows");
+    assert!(removed_requests.is_empty());
+
+    let mut verify_store = open_runtime_store(&state_layout, 1_710_100_093_080);
+    let pending = verify_store
+        .list_pending_staged_trigger_event_records("external-trigger", 10)
+        .expect("pending staged rows should remain queryable after disable/remove replay");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].event_id, "external-trigger:event-after-disable");
+
+    let sqlite = Connection::open(&state_layout.coordination_db_path)
+        .expect("runtime sqlite database should be readable for accepted-count assertion");
+    let accepted_count: i64 = sqlite
+        .query_row(
+            "SELECT COUNT(*) FROM trigger_event_records WHERE trigger_id = ?1",
+            rusqlite::params!["external-trigger"],
+            |row| row.get(0),
+        )
+        .expect("accepted trigger record count should load after disable/remove replay");
+    assert_eq!(accepted_count, 1);
+}
+
+#[test]
+fn acceptance_only_trigger_plane_accepts_known_staged_rows_and_keeps_unknown_rows_pending() {
+    let (state_layout, plugin_root) = unique_layout("acceptance-only-known-vs-unknown-staged");
+    let executable = plugin_root.join("plugin-ready-only.sh");
+    write_protocol_script(
+        &executable,
+        "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
+    );
+
+    let definitions = vec![
+        trigger_definition("external-trigger-a", "external_plugin", "plugin-ready-only"),
+        trigger_definition("external-trigger-b", "external_plugin", "plugin-ready-only"),
+    ];
+    let manifests = vec![plugin_manifest(
+        "plugin-ready-only",
+        "2.0.0",
+        "external_trigger",
+        "plugin-ready-only.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let mut state_store = open_runtime_store(&state_layout, 1_710_100_094_000);
+    for (staging_id, trigger_id, workflow_id, event_id, staged_at_ms) in [
+        (
+            "staging-known-1",
+            "external-trigger-a",
+            "wf-test",
+            "external-trigger-a:event-1",
+            1_710_100_094_001,
+        ),
+        (
+            "staging-known-2",
+            "external-trigger-b",
+            "wf-test",
+            "external-trigger-b:event-1",
+            1_710_100_094_002,
+        ),
+        (
+            "staging-unknown-1",
+            "external-trigger-unknown",
+            "wf-missing",
+            "external-trigger-unknown:event-1",
+            1_710_100_094_003,
+        ),
+    ] {
+        state_store
+            .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                staging_id: String::from(staging_id),
+                trigger_id: String::from(trigger_id),
+                workflow_id: String::from(workflow_id),
+                event_id: String::from(event_id),
+                source: String::from("plugin-ready-only"),
+                occurred_at_ms: 1_710_100_094_000,
+                staged_at_ms,
+                checkpoint: Some(String::from("cp-staged")),
+                payload: serde_json::json!({"kind": "matrix"}),
+                dedup_key: None,
+                dedup_window_ms: None,
+                cooldown_key: None,
+                cooldown_ms: None,
+                accepted_at_ms: None,
+                last_error: None,
+            })
+            .expect("staged row should persist for acceptance-only matrix coverage");
+    }
+    drop(state_store);
+
+    let first_store = open_runtime_store(&state_layout, 1_710_100_094_010);
+    let mut plane = TriggerPlane::open_with_store_acceptance_only(
+        first_store,
+        definitions,
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-ready-only"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+    )
+    .expect("acceptance-only trigger plane should open for known-vs-unknown staged rows");
+
+    let requests = plane
+        .collect_run_requests(1_710_100_094_020)
+        .expect("known staged rows should normalize while unknown rows remain pending");
+    assert_eq!(requests.len(), 2);
+    let request_ids = requests
+        .iter()
+        .map(|request| request.event_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(request_ids.contains("external-trigger-a:event-1"));
+    assert!(request_ids.contains("external-trigger-b:event-1"));
+
+    let mut verify_store = open_runtime_store(&state_layout, 1_710_100_094_030);
+    assert!(verify_store
+        .list_pending_staged_trigger_event_records("external-trigger-a", 10)
+        .expect("pending rows for known trigger should list")
+        .is_empty());
+    assert!(verify_store
+        .list_pending_staged_trigger_event_records("external-trigger-b", 10)
+        .expect("pending rows for known trigger should list")
+        .is_empty());
+    let unknown_pending = verify_store
+        .list_pending_staged_trigger_event_records("external-trigger-unknown", 10)
+        .expect("pending rows for unknown trigger should remain available for future reconcile");
+    assert_eq!(unknown_pending.len(), 1);
+    assert_eq!(
+        unknown_pending[0].event_id,
+        "external-trigger-unknown:event-1"
+    );
+}
+
+#[test]
+fn acceptance_only_trigger_plane_consumes_staged_external_rows_without_direct_process_polling() {
+    let (state_layout, plugin_root) = unique_layout("acceptance-only-external-bridge");
+    let external_plugin_path = plugin_root.join("plugin-external.sh");
+    write_executable_script(
+        &external_plugin_path,
+        "{\"type\":\"event\",\"checkpoint\":\"cp-ext\",\"event_key\":\"event/ext\",\"occurred_at_ms\":1710100120000,\"payload\":{\"side\":\"sell\"}}",
+    );
+
+    let definitions = vec![trigger_definition(
+        "external-trigger",
+        "external_plugin",
+        "plugin-external",
+    )];
+    let manifests = vec![plugin_manifest(
+        "plugin-external",
+        "2.0.0",
+        "external_trigger",
+        "plugin-external.sh",
+        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+    )];
+
+    let first_store = open_runtime_store(&state_layout, 1_710_100_092_000);
+    let mut acceptance_only_plane = TriggerPlane::open_with_store_acceptance_only(
+        first_store,
+        definitions.clone(),
+        manifests.clone(),
+        policy(
+            &plugin_root,
+            &["plugin-external"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+    )
+    .expect("acceptance-only trigger plane should open");
+
+    let no_direct_requests = acceptance_only_plane
+        .collect_run_requests(1_710_100_092_010)
+        .expect("acceptance-only mode should not poll process plugin directly");
+    assert!(no_direct_requests.is_empty());
+
+    let mut stage_store = open_runtime_store(&state_layout, 1_710_100_092_020);
+    stage_store
+        .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from("staging-acceptance-only-1"),
+            trigger_id: String::from("external-trigger"),
+            workflow_id: String::from("wf-external"),
+            event_id: String::from("external-trigger:event/ext"),
+            source: String::from("plugin-external"),
+            occurred_at_ms: 1_710_100_092_000,
+            staged_at_ms: 1_710_100_092_021,
+            checkpoint: Some(String::from("cp-ext")),
+            payload: serde_json::json!({"side": "sell"}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        })
+        .expect("staged external row should persist for acceptance-only replay");
+    drop(stage_store);
+
+    let second_store = open_runtime_store(&state_layout, 1_710_100_092_030);
+    let mut replay_plane = TriggerPlane::open_with_store_acceptance_only(
+        second_store,
+        definitions,
+        manifests,
+        policy(
+            &plugin_root,
+            &["plugin-external"],
+            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
+        ),
+        BTreeMap::new(),
+    )
+    .expect("acceptance-only trigger plane should reopen");
+
+    let staged_requests = replay_plane
+        .collect_run_requests(1_710_100_092_040)
+        .expect("acceptance-only mode should normalize staged external rows");
+    assert_eq!(staged_requests.len(), 1);
+    assert_eq!(staged_requests[0].event_id, "external-trigger:event/ext");
+}
+
 fn trigger_definition(trigger_id: &str, kind: &str, source: &str) -> TriggerDefinition {
     TriggerDefinition {
         api_version: "2.0.0".to_string(),
@@ -973,6 +1542,22 @@ fn plugin_manifest(
         executable: Some(executable.to_string()),
         input_schema: Vec::new(),
         output_schema: Vec::new(),
+        trigger_runtime: (kind == "external_trigger").then(|| ExternalTriggerRuntimeContract {
+            lifecycle: Some(TriggerRuntimeLifecycle::ProcessShortLived),
+            push_callback: Some(TriggerPushCallbackSemantics::InlineResponse),
+            durable_ack: Some(TriggerDurableAckSemantics::CallerScope),
+            host_error_categories: vec![
+                TriggerHostErrorCategory::Transport,
+                TriggerHostErrorCategory::ProtocolContract,
+                TriggerHostErrorCategory::PluginFatal,
+            ],
+            module: None,
+        }),
+        operations: Vec::new(),
+        event_schema: (kind == "external_trigger").then(|| PluginEventSchemaDescriptor {
+            summary: Some("External trigger payload".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+        }),
         manifest_path: PathBuf::new(),
     }
 }
@@ -1132,5 +1717,21 @@ fn select_non_allowlisted_host_env_key() -> String {
         .next()
         .expect("test process should expose at least one non-allowlisted environment variable")
 }
+
+fn open_runtime_store(state_layout: &StateLayout, now_ms: i64) -> RuntimeStateStore {
+    RuntimeStateStore::open(
+        &RuntimeStorageConfig {
+            backend: RuntimeStorageBackend::Local {
+                database_path: state_layout.coordination_db_path.clone(),
+            },
+            history_retention: None,
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        },
+        now_ms,
+    )
+    .expect("runtime state store should open for staged trigger tests")
+}
+
 const TEST_PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
     &["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"];

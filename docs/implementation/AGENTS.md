@@ -16,6 +16,7 @@
 - `CHAINBOT_HELP_DIAGNOSTICS_IMPLEMENTATION.md`: Records the richer CLI help cards, canonical config examples, and precise TOML/argv diagnostics.
 - `CHAINBOT_CURATED_EXAMPLES_IMPLEMENTATION.md`: Records the five-root curated examples refactor and validation coverage.
 - `CHAINBOT_BUILTINS_REFACTOR_IMPLEMENTATION.md`: Records the unified builtin namespace refactor, trait-backed registries, and final public API layout.
+- `CHAINBOT_CORE_BUILTIN_NODES_IMPLEMENTATION.md`: Records the first-wave core builtin flow/data nodes, their registry wiring, and validation coverage.
 - `CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`: Records the params-backed trigger extension model, builtin cron implementation, and validation coverage.
 - `CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`: Records the canonical-only plugin/state layout cut, removed legacy compatibility, and the validation coverage for the redesign.
 - `CHAINBOT_STATE_READ_MODEL_IMPLEMENTATION.md`: Records the narrower run-summary reads, trigger snapshot read-model, and validation coverage for the state-read optimizations.

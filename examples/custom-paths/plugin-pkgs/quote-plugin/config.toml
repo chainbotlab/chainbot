@@ -1,5 +1,12 @@
 manifest_version = "2.0.0"
 plugin_id = "quote-plugin"
-kind = "builtin"
-entrypoint = "plugins.quote"
-capabilities = ["normalize"]
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "../bin/quote-plugin.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize quote payload"
+input_schema = []
+output_schema = []

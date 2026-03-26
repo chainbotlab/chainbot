@@ -1,0 +1,13 @@
+manifest_version = "2.0.0"
+trigger_id = "tr-market-feed-wasm"
+kind = "external_plugin"
+plugin = "market-trigger-wasm-plugin"
+source = "market-feed-wasm"
+workflow_id = "wf-plugin"
+enabled = true
+
+[params]
+symbol = "BTCUSDT"
+
+[input_mapping]
+symbol = "payload.symbol"

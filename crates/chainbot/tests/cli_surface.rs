@@ -45,11 +45,54 @@ fn help_lists_expected_commands() {
     assert!(stdout.contains("init"));
     assert!(stdout.contains("status"));
     assert!(stdout.contains("observe"));
+    assert!(stdout.contains("catalog"));
     assert!(stdout.contains("stop"));
     assert!(stdout.contains("trigger"));
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("list-runs"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_catalog_includes_discovery_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "catalog"])
+        .output()
+        .expect("chainbot help catalog should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Discover builtin capabilities and installed plugin contracts"));
+    assert!(stdout.contains("chainbot catalog list"));
+    assert!(stdout.contains("chainbot catalog show <reference>"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_catalog_distinguishes_trigger_lifecycle_models() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "catalog"])
+        .output()
+        .expect("chainbot help catalog should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("process_short_lived"));
+    assert!(stdout.contains("wasm_daemon_persistent_session"));
+    assert!(stdout.contains("lifecycle"));
     assert!(stderr.is_empty());
 }
 
@@ -239,8 +282,34 @@ fn help_validate_includes_config_examples() {
     assert!(stdout.contains("Root config example:"));
     assert!(stdout.contains("Workflow package example:"));
     assert!(stdout.contains("Trigger package example:"));
+    assert!(stdout.contains("Webhook trigger example:"));
+    assert!(stdout.contains("WebSocket trigger example:"));
     assert!(stdout.contains("Plugin package example:"));
     assert!(stdout.contains("chainbot.toml"));
+    assert!(stdout.contains("idempotency_header = \"x-event-id\""));
+    assert!(stdout.contains("idle_timeout_ms = 30000"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_serve_includes_ingress_trigger_examples() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "serve"])
+        .output()
+        .expect("chainbot help serve should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("Webhook trigger example:"));
+    assert!(stdout.contains("WebSocket trigger example:"));
+    assert!(stdout.contains("source = \"webhook\""));
+    assert!(stdout.contains("source = \"websocket\""));
     assert!(stderr.is_empty());
 }
 
@@ -421,6 +490,7 @@ fn validate_accepts_basic_root() {
 #[test]
 fn validate_accepts_curated_examples() {
     let single_workflow_root = workspace_root().join("examples").join("single-workflow");
+    let core_builtins_root = workspace_root().join("examples").join("core-builtins");
     let builtin_triggers_root = workspace_root().join("examples").join("builtin-triggers");
     let workflow_composition_root = workspace_root()
         .join("examples")
@@ -432,6 +502,7 @@ fn validate_accepts_curated_examples() {
 
     for root in [
         single_workflow_root,
+        core_builtins_root,
         builtin_triggers_root,
         workflow_composition_root,
         plugin_integrations_root,
@@ -498,6 +569,8 @@ fn status_prints_human_summary_for_basic_root() {
     assert!(stdout.contains("wf-alpha"));
     assert!(stdout.contains("tr-market"));
     assert!(!stdout.contains("Legacy Layout"));
+    assert!(stdout.contains("Plugins"));
+    assert!(stdout.contains("installed=1 builtin=1 external_node=0 external_trigger=0"));
     assert!(stderr.is_empty());
 }
 
@@ -1252,6 +1325,27 @@ fn stop_during_startup_cleans_up_pending_daemon_launch() {
     let status_payload = serde_json::from_slice::<serde_json::Value>(&status_output.stdout)
         .expect("status json should decode after startup-stop race");
     assert_eq!(status_payload["serve"]["state"], "idle");
+}
+
+#[test]
+fn status_json_includes_plugin_summary_without_breaking_existing_fields() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["status", "--json"])
+        .output()
+        .expect("status --json should execute");
+
+    assert!(output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("status json should decode");
+    assert_eq!(payload["root"]["profile"], "basic");
+    assert_eq!(payload["plugins"]["installed_count"], 1);
+    assert_eq!(payload["plugins"]["builtin_count"], 1);
+    assert_eq!(payload["plugins"]["external_node_count"], 0);
+    assert_eq!(payload["plugins"]["external_trigger_count"], 0);
 }
 
 fn chainbot_bin() -> PathBuf {

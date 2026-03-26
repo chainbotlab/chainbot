@@ -140,6 +140,38 @@ fn inspect_serve_lease_snapshot_tracks_idle_active_and_stale() {
 }
 
 #[test]
+fn serve_lease_can_transfer_after_expiry_across_restart_without_manual_release() {
+    let layout = unique_state_layout("serve-lease-transfer-after-expiry-restart");
+    let mut first_store =
+        CoordinationStore::open(&layout, 1_710_000_030_000).expect("sqlite store should open");
+
+    let first = first_store
+        .try_acquire_serve_lease("owner-alpha", 1_710_000_030_000, 5_000)
+        .expect("first owner should acquire lease");
+    assert!(matches!(first, LeaseAcquireResult::Acquired));
+
+    let rejected = first_store
+        .try_acquire_serve_lease("owner-beta", 1_710_000_030_100, 5_000)
+        .expect("second owner should be rejected before lease expiry");
+    assert!(matches!(rejected, LeaseAcquireResult::Rejected { .. }));
+    drop(first_store);
+
+    let mut reopened_store = CoordinationStore::open(&layout, 1_710_000_036_001)
+        .expect("sqlite store should reopen for post-expiry transfer");
+    let transferred = reopened_store
+        .try_acquire_serve_lease("owner-beta", 1_710_000_036_001, 5_000)
+        .expect("new owner should acquire after previous lease expiry");
+    assert!(matches!(transferred, LeaseAcquireResult::Acquired));
+
+    let snapshot = reopened_store
+        .inspect_serve_lease(1_710_000_036_002)
+        .expect("lease snapshot should load after transfer");
+    assert_eq!(snapshot.state, ServeLeaseState::Active);
+    assert_eq!(snapshot.owner_id.as_deref(), Some("owner-beta"));
+    assert_eq!(snapshot.expires_at_ms, Some(1_710_000_041_001));
+}
+
+#[test]
 fn file_backed_runtime_logs() {
     let layout = unique_state_layout("file-backed-runtime-logs");
     let store = FileBackedStateStore::new(layout.clone());

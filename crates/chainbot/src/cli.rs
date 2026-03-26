@@ -20,6 +20,10 @@ use crate::builtins::{
     build_builtin_registry, build_builtin_trigger_emissions, BuiltinRuntimeContext,
     SecretDecryptMode,
 };
+use crate::catalog::{
+    build_catalog_list, build_catalog_show, build_status_plugin_summary, render_catalog_list,
+    render_catalog_show, CatalogFilterKind, CatalogReference, StatusPluginSummaryView,
+};
 use crate::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
     LocalStorageDefinition, RawDebugArtifactsDefinition, RootConfigDefinition,
@@ -28,7 +32,15 @@ use crate::config::{
 };
 use crate::errors::UserFacingError;
 use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
-use crate::plugin::{PluginKind, PluginManifest};
+use crate::external_trigger_supervisor::{
+    build_desired_external_trigger_sessions, ExternalTriggerPollBudget,
+    ExternalTriggerSessionRuntime, ExternalTriggerSupervisor,
+};
+use crate::ingress::{
+    build_desired_ingress_state, drain_ingress_emissions, DesiredIngressState, IngressRuntimeError,
+    TriggerIngressSupervisor,
+};
+use crate::plugin::{PluginKind, PluginManifest, TriggerRuntimeLifecycle};
 use crate::state::{
     sanitize_path_component, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState,
     TriggerEventRecord, TriggerSnapshotRecord, WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
@@ -37,9 +49,10 @@ use crate::state_db::{
     RuntimeDaemonStatus, RuntimeHistoryArchiveCounts, RuntimeStateError, RuntimeStateStore,
 };
 use crate::trigger::{
-    TriggerDefinition, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
-    REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+    collect_external_process_trigger_emissions, TriggerDefinition, TriggerPlane, TriggerPlaneError,
+    TriggerPluginHostPolicy, TriggerRunRequest, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
+use crate::trigger_wasm::HostPushOutcome;
 use crate::workflow::WorkflowDefinition;
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
@@ -48,6 +61,8 @@ const SERVE_IDLE_POLL_INTERVAL_MS: u64 = 250;
 const SERVE_ERROR_BACKOFF_MS: u64 = 1_000;
 const SERVE_START_ACK_TIMEOUT_MS: u64 = 5_000;
 const SERVE_STOP_TIMEOUT_MS: u64 = 5_000;
+const INGRESS_INBOX_BATCH_LIMIT: usize = 256;
+const REPLAYABLE_TRIGGER_BATCH_LIMIT: usize = 256;
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const CHAINBOT_TEST_DAEMON_START_DELAY_MS_ENV: &str = "CHAINBOT_TEST_DAEMON_START_DELAY_MS";
 const CHAINBOT_TEST_DAEMON_START_ACK_TIMEOUT_MS_ENV: &str =
@@ -106,13 +121,70 @@ symbol = "BTCUSDT"
 symbol = "payload.symbol"
 price = "payload.price"
 "#;
+const WEBHOOK_TRIGGER_CONFIG_EXAMPLE: &str = r#"# triggers/tr-webhook/config.toml
+manifest_version = "2.0.0"
+trigger_id = "tr-webhook"
+kind = "builtin"
+source = "webhook"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+bind = "127.0.0.1:8080"
+path = "/ingress/webhook"
+method = "POST"
+max_body_bytes = 65536
+content_type = "application/json"
+idempotency_header = "x-event-id"
+
+[params.auth]
+kind = "header_token"
+header_name = "x-chainbot-token"
+token = "dev-webhook-token"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+event_id = "payload.id"
+"#;
+const WEBSOCKET_TRIGGER_CONFIG_EXAMPLE: &str = r#"# triggers/tr-websocket/config.toml
+manifest_version = "2.0.0"
+trigger_id = "tr-websocket"
+kind = "builtin"
+source = "websocket"
+workflow_id = "wf-alpha"
+enabled = true
+
+[params]
+bind = "127.0.0.1:8081"
+path = "/ingress/ws"
+max_connections = 32
+max_message_bytes = 65536
+idle_timeout_ms = 30000
+
+[params.auth]
+kind = "header_token"
+header_name = "x-chainbot-token"
+token = "dev-websocket-token"
+
+[input_mapping]
+symbol = "payload.symbol"
+price = "payload.price"
+event = "payload.event"
+"#;
 const PLUGIN_CONFIG_EXAMPLE: &str = r#"# plugins/quote-plugin/config.toml
 manifest_version = "2.0.0"
 plugin_id = "quote-plugin"
 kind = "external_node"
 entrypoint = "node.exec.v1"
-capabilities = ["normalize"]
+capabilities = ["node:execute"]
 executable = "bin/quote-plugin.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize quote payload"
+input_schema = ["symbol", "token"]
+output_schema = ["decision"]
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +194,7 @@ pub enum CliCommand {
     Init,
     Status,
     Observe,
+    Catalog,
     Stop,
     Trigger,
     Validate,
@@ -138,6 +211,7 @@ pub enum HelpTopic {
     Init,
     Status,
     Observe,
+    Catalog,
     Stop,
     Trigger,
     Validate,
@@ -151,6 +225,7 @@ pub struct CliRequest {
     pub command: CliCommand,
     pub json_output: bool,
     pub trigger_operation: Option<TriggerOperation>,
+    pub catalog_request: Option<CatalogRequest>,
     pub observe_request: Option<ObserveRequest>,
     pub daemon_owner_id: Option<String>,
 }
@@ -172,6 +247,12 @@ pub struct ObserveRequest {
     pub limit: usize,
     pub trigger_id: Option<String>,
     pub run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogRequest {
+    List { filter: Option<CatalogFilterKind> },
+    Show { reference: CatalogReference },
 }
 
 #[derive(Debug)]
@@ -264,6 +345,7 @@ struct StatusOutput {
     serve: StatusServeView,
     workflows: Vec<StatusWorkflowView>,
     triggers: Vec<StatusTriggerView>,
+    plugins: StatusPluginSummaryView,
     summary: StatusSummaryView,
 }
 
@@ -353,6 +435,7 @@ impl CliRequest {
                 command: CliCommand::Help(HelpTopic::General),
                 json_output: false,
                 trigger_operation: None,
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             }),
@@ -360,6 +443,7 @@ impl CliRequest {
                 command: CliCommand::Version,
                 json_output: false,
                 trigger_operation: None,
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             }),
@@ -368,6 +452,7 @@ impl CliRequest {
             "init" => Self::parse_command_args(CliCommand::Init, args),
             "status" => Self::parse_command_args(CliCommand::Status, args),
             "observe" => Self::parse_observe_args(args),
+            "catalog" => Self::parse_catalog_args(args),
             "stop" => Self::parse_command_args(CliCommand::Stop, args),
             "trigger" => Self::parse_trigger_args(args),
             "validate" => Self::parse_command_args(CliCommand::Validate, args),
@@ -389,6 +474,7 @@ impl CliRequest {
             CliCommand::Init => self.execute_init(),
             CliCommand::Status => self.execute_status(),
             CliCommand::Observe => self.execute_observe(),
+            CliCommand::Catalog => self.execute_catalog(),
             CliCommand::Stop => self.execute_stop(),
             CliCommand::Trigger => self.execute_trigger(),
             CliCommand::Validate => self.execute_validate(),
@@ -419,6 +505,7 @@ impl CliRequest {
             command: CliCommand::Help(topic),
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -439,6 +526,7 @@ impl CliRequest {
                         command: CliCommand::Help(help_topic_for(command)),
                         json_output: false,
                         trigger_operation: None,
+                        catalog_request: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -474,6 +562,7 @@ impl CliRequest {
             command,
             json_output,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -529,9 +618,144 @@ impl CliRequest {
             command: CliCommand::InternalServeDaemon,
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: Some(daemon_owner_id),
         })
+    }
+
+    fn parse_catalog_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let Some(action) = args.next() else {
+            return Err(UserFacingError::usage(
+                "`chainbot catalog` requires `list` or `show`. Run `chainbot help catalog`.",
+            ));
+        };
+        let action = action.to_string_lossy().into_owned();
+        if matches!(action.as_str(), "-h" | "--help") {
+            return Ok(Self {
+                command: CliCommand::Help(HelpTopic::Catalog),
+                json_output: false,
+                trigger_operation: None,
+                catalog_request: None,
+                observe_request: None,
+                daemon_owner_id: None,
+            });
+        }
+
+        match action.as_str() {
+            "list" => {
+                let mut json_output = false;
+                let mut filter = None;
+                let mut position = 1usize;
+                while let Some(arg) = args.next() {
+                    position += 1;
+                    let raw = arg.to_string_lossy().into_owned();
+                    match raw.as_str() {
+                        "--json" => json_output = true,
+                        "--kind" => {
+                            let Some(value) = args.next() else {
+                                return Err(UserFacingError::usage(
+                                    "`chainbot catalog list --kind` requires builtin_node, builtin_trigger, or plugin.",
+                                ));
+                            };
+                            position += 1;
+                            filter = Some(parse_catalog_filter_kind(
+                                &value.to_string_lossy(),
+                                position,
+                            )?);
+                        }
+                        _ => {
+                            if let Some((flag, value)) = raw.split_once('=') {
+                                match flag {
+                                    "--json" => {
+                                        json_output = parse_bool_flag_value(
+                                            "--json",
+                                            value,
+                                            position,
+                                            "chainbot catalog list",
+                                        )?;
+                                        continue;
+                                    }
+                                    "--kind" => {
+                                        filter = Some(parse_catalog_filter_kind(value, position)?);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            return Err(UserFacingError::usage(format!(
+                                "Unexpected argument #{position} after `chainbot catalog list`: `{raw}`. Run `chainbot help catalog` for valid forms."
+                            )));
+                        }
+                    }
+                }
+
+                Ok(Self {
+                    command: CliCommand::Catalog,
+                    json_output,
+                    trigger_operation: None,
+                    catalog_request: Some(CatalogRequest::List { filter }),
+                    observe_request: None,
+                    daemon_owner_id: None,
+                })
+            }
+            "show" => {
+                let mut json_output = false;
+                let mut reference = None;
+                let mut position = 1usize;
+                while let Some(arg) = args.next() {
+                    position += 1;
+                    let raw = arg.to_string_lossy().into_owned();
+                    match raw.as_str() {
+                        "--json" => json_output = true,
+                        _ => {
+                            if let Some((flag, value)) = raw.split_once('=') {
+                                if flag == "--json" {
+                                    json_output = parse_bool_flag_value(
+                                        "--json",
+                                        value,
+                                        position,
+                                        "chainbot catalog show",
+                                    )?;
+                                    continue;
+                                }
+                            }
+                            if reference.is_none() {
+                                reference = Some(CatalogReference::parse(&raw).map_err(|error| {
+                                    UserFacingError::usage(format!(
+                                        "Unsupported catalog reference at argument #{position} after `chainbot catalog show`: {error}. Run `chainbot catalog list` first."
+                                    ))
+                                })?);
+                                continue;
+                            }
+                            return Err(UserFacingError::usage(format!(
+                                "Unexpected argument #{position} after `chainbot catalog show`: `{raw}`. Run `chainbot help catalog` for valid forms."
+                            )));
+                        }
+                    }
+                }
+                let reference = reference.ok_or_else(|| {
+                    UserFacingError::usage(
+                        "`chainbot catalog show` requires a <kind>:<value> reference. Run `chainbot catalog list`."
+                    )
+                })?;
+
+                Ok(Self {
+                    command: CliCommand::Catalog,
+                    json_output,
+                    trigger_operation: None,
+                    catalog_request: Some(CatalogRequest::Show { reference }),
+                    observe_request: None,
+                    daemon_owner_id: None,
+                })
+            }
+            other => Err(UserFacingError::usage(format!(
+                "Unsupported catalog action at argument #1 after `chainbot catalog`: `{other}`. Use `list` or `show`."
+            ))),
+        }
     }
 
     fn parse_observe_args<I>(mut args: I) -> Result<Self, UserFacingError>
@@ -553,6 +777,7 @@ impl CliRequest {
                         command: CliCommand::Help(HelpTopic::Observe),
                         json_output: false,
                         trigger_operation: None,
+                        catalog_request: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -626,6 +851,7 @@ impl CliRequest {
             command: CliCommand::Observe,
             json_output,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: Some(ObserveRequest {
                 limit,
                 trigger_id,
@@ -650,6 +876,7 @@ impl CliRequest {
                 command: CliCommand::Help(HelpTopic::Trigger),
                 json_output: false,
                 trigger_operation: None,
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -689,6 +916,7 @@ impl CliRequest {
                 command: CliCommand::Trigger,
                 json_output,
                 trigger_operation: Some(TriggerOperation::List),
+                catalog_request: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -715,6 +943,7 @@ impl CliRequest {
                         command: CliCommand::Help(HelpTopic::Trigger),
                         json_output: false,
                         trigger_operation: None,
+                        catalog_request: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -747,6 +976,7 @@ impl CliRequest {
             } else {
                 TriggerOperation::Disable { trigger_id }
             }),
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -785,6 +1015,7 @@ impl CliRequest {
             definitions.root_config.profile,
             &definitions.workflows,
             &definitions.triggers,
+            &definitions.plugins,
             &run_summaries,
             &trigger_snapshots,
             daemon_status,
@@ -845,6 +1076,54 @@ impl CliRequest {
         }
 
         Ok(CliOutput::text(render_observe_output(&payload)))
+    }
+
+    fn execute_catalog(&self) -> Result<CliOutput, UserFacingError> {
+        let catalog_request = self.catalog_request.as_ref().ok_or_else(|| {
+            UserFacingError::usage("Missing catalog request. Run `chainbot help catalog`.")
+        })?;
+        match catalog_request {
+            CatalogRequest::List { filter } => {
+                let plugins = match filter {
+                    Some(CatalogFilterKind::BuiltinNode | CatalogFilterKind::BuiltinTrigger) => {
+                        Vec::new()
+                    }
+                    Some(CatalogFilterKind::Plugin) | None => load_catalog_plugins_if_available()?,
+                };
+                let payload = build_catalog_list(*filter, &plugins);
+                if self.json_output {
+                    let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                        UserFacingError::state(format!(
+                            "Failed to serialize catalog list payload: {source}"
+                        ))
+                    })?;
+                    return Ok(CliOutput::text(stdout));
+                }
+                Ok(CliOutput::text(render_catalog_list(&payload, *filter)))
+            }
+            CatalogRequest::Show { reference } => {
+                let plugins = match reference {
+                    CatalogReference::BuiltinNode(_) | CatalogReference::BuiltinTrigger(_) => {
+                        Vec::new()
+                    }
+                    CatalogReference::Plugin(_) => load_catalog_plugins_strict()?,
+                };
+                let payload = build_catalog_show(reference, &plugins).map_err(|error| {
+                    UserFacingError::usage(format!(
+                        "{error}. Run `chainbot catalog list` to inspect available references."
+                    ))
+                })?;
+                if self.json_output {
+                    let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                        UserFacingError::state(format!(
+                            "Failed to serialize catalog detail payload: {source}"
+                        ))
+                    })?;
+                    return Ok(CliOutput::text(stdout));
+                }
+                Ok(CliOutput::text(render_catalog_show(&payload)))
+            }
+        }
     }
 
     fn execute_validate(&self) -> Result<CliOutput, UserFacingError> {
@@ -1235,6 +1514,7 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
         "init" => Ok(HelpTopic::Init),
         "status" => Ok(HelpTopic::Status),
         "observe" => Ok(HelpTopic::Observe),
+        "catalog" => Ok(HelpTopic::Catalog),
         "stop" => Ok(HelpTopic::Stop),
         "trigger" => Ok(HelpTopic::Trigger),
         "validate" => Ok(HelpTopic::Validate),
@@ -1254,6 +1534,7 @@ fn help_topic_for(command: CliCommand) -> HelpTopic {
         CliCommand::Init => HelpTopic::Init,
         CliCommand::Status => HelpTopic::Status,
         CliCommand::Observe => HelpTopic::Observe,
+        CliCommand::Catalog => HelpTopic::Catalog,
         CliCommand::Stop => HelpTopic::Stop,
         CliCommand::Trigger => HelpTopic::Trigger,
         CliCommand::Validate => HelpTopic::Validate,
@@ -1271,6 +1552,7 @@ fn command_name(command: CliCommand) -> &'static str {
         CliCommand::Init => "init",
         CliCommand::Status => "status",
         CliCommand::Observe => "observe",
+        CliCommand::Catalog => "catalog",
         CliCommand::Stop => "stop",
         CliCommand::Trigger => "trigger",
         CliCommand::Validate => "validate",
@@ -1350,6 +1632,8 @@ fn general_help_text() -> String {
             "chainbot init",
             "chainbot status [--json]",
             "chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]",
+            "chainbot catalog list [--json] [--kind <builtin_node|builtin_trigger|plugin>]",
+            "chainbot catalog show <reference> [--json]",
             "chainbot stop",
             "chainbot trigger list [--json]",
             "chainbot trigger <enable|disable> <trigger-id>",
@@ -1376,6 +1660,7 @@ fn general_help_text() -> String {
             "init       Bootstrap a minimal ChainBot root.",
             "status     Inspect runtime state without executing workflows.",
             "observe    Inspect persisted trigger events, workflow logs, and runs.",
+            "catalog    Discover builtin capabilities and installed plugin contracts.",
             "stop       Request graceful daemon shutdown.",
             "trigger    Inspect or persist trigger package state.",
             "validate   Validate config and package contracts.",
@@ -1391,6 +1676,8 @@ fn general_help_text() -> String {
             "start with `chainbot help <command>` before generating automation around a command",
             GENERAL_HELP_EXAMPLE_HINT,
             "prefer `chainbot status --json` and `chainbot trigger list --json` for machine-readable snapshots",
+            "use `chainbot catalog list --json` when an agent needs a capability inventory",
+            "use `chainbot catalog show <reference> --json` for one capability contract",
             "use `chainbot observe --json` when an agent needs recent persisted events or logs",
         ],
     );
@@ -1529,7 +1816,45 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot observe --json --limit 5",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot observe --trigger-id tr-market",
             ],
-            &["status", "list-runs", "serve"],
+            &["status", "list-runs", "serve", "catalog"],
+        ),
+        HelpTopic::Catalog => render_help_card(
+            "catalog",
+            "Discover builtin capabilities and installed plugin contracts",
+            &[
+                "chainbot catalog list [--json] [--kind <builtin_node|builtin_trigger|plugin>]",
+                "chainbot catalog show <reference> [--json]",
+            ],
+            &[
+                "you need builtin node or trigger inventory without opening source code",
+                "you want installed plugin callable or event structure details",
+                "you need to distinguish external trigger lifecycle: process_short_lived (poll-based) vs wasm_daemon_persistent_session (long-lived)",
+                "an agent needs stable machine-readable capability discovery before generating config",
+            ],
+            &["builtin descriptors", "installed plugin manifests when a root is available"],
+            &[],
+            &[],
+            &[
+                "prints grouped human-readable capability lists by default",
+                "prints stable JSON read models when `--json` is enabled",
+                "external trigger plugins show lifecycle (process_short_lived or wasm_daemon_persistent_session) and runtime semantics",
+                "wasm trigger plugins show host callback outcomes: retryable backpressure (queue_saturated/budget_exhausted) vs terminal lease_lost/shutting_down",
+            ],
+            &[
+                "builtin descriptors are always available",
+                "installed plugins are loaded from the resolved root when one exists",
+            ],
+            &[],
+            &[
+                "malformed references are rejected with the expected `<kind>:<value>` format",
+                "unknown references direct you back to `chainbot catalog list`",
+            ],
+            &[
+                "chainbot catalog list",
+                "chainbot catalog list --json --kind plugin",
+                "chainbot catalog show plugin:quote-node-plugin",
+            ],
+            &["help", "status", "validate"],
         ),
         HelpTopic::Stop => render_help_card(
             "stop",
@@ -1593,7 +1918,7 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot trigger enable tr-market",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot trigger disable tr-market",
             ],
-            &["init", "status", "validate", "serve"],
+            &["init", "status", "validate", "serve", "catalog"],
         ),
         HelpTopic::Validate => render_help_card(
             "validate",
@@ -1624,6 +1949,8 @@ fn help_text(topic: HelpTopic) -> String {
                 ("Root config example", "toml", ROOT_CONFIG_EXAMPLE),
                 ("Workflow package example", "toml", WORKFLOW_CONFIG_EXAMPLE),
                 ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
+                ("Webhook trigger example", "toml", WEBHOOK_TRIGGER_CONFIG_EXAMPLE),
+                ("WebSocket trigger example", "toml", WEBSOCKET_TRIGGER_CONFIG_EXAMPLE),
                 ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
             ],
             &[
@@ -1634,7 +1961,7 @@ fn help_text(topic: HelpTopic) -> String {
                 "chainbot validate",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate",
             ],
-            &["status", "run", "serve"],
+            &["status", "run", "serve", "catalog"],
         ),
         HelpTopic::ListRuns => render_help_card(
             "list-runs",
@@ -1734,6 +2061,8 @@ fn help_text(topic: HelpTopic) -> String {
             ],
             &[
                 ("Trigger package example", "toml", TRIGGER_CONFIG_EXAMPLE),
+                ("Webhook trigger example", "toml", WEBHOOK_TRIGGER_CONFIG_EXAMPLE),
+                ("WebSocket trigger example", "toml", WEBSOCKET_TRIGGER_CONFIG_EXAMPLE),
                 ("Plugin package example", "toml", PLUGIN_CONFIG_EXAMPLE),
             ],
             &[
@@ -1758,6 +2087,7 @@ fn build_status_output(
     profile: Option<String>,
     workflows: &[WorkflowDefinition],
     triggers: &[TriggerDefinition],
+    plugins: &[PluginManifest],
     run_summaries: &[RunRecordSummary],
     trigger_snapshots: &[TriggerSnapshotRecord],
     daemon_status: RuntimeDaemonStatus,
@@ -1824,6 +2154,7 @@ fn build_status_output(
         },
         workflows: workflow_views,
         triggers: trigger_views,
+        plugins: build_status_plugin_summary(plugins),
         summary: StatusSummaryView {
             workflow_count: workflows.len(),
             trigger_count: triggers.len(),
@@ -1919,6 +2250,19 @@ fn render_status_output(status: &StatusOutput) -> String {
     }
 
     lines.push(String::new());
+    lines.push(String::from("Plugins"));
+    lines.push(format!(
+        "  installed={} builtin={} external_node={} external_trigger={}",
+        status.plugins.installed_count,
+        status.plugins.builtin_count,
+        status.plugins.external_node_count,
+        status.plugins.external_trigger_count
+    ));
+    lines.push(String::from(
+        "  use `chainbot catalog list` for capability details",
+    ));
+
+    lines.push(String::new());
     lines.push(String::from("Summary"));
     lines.push(format!(
         "  workflows={} triggers={} runs={} running={}",
@@ -1929,6 +2273,37 @@ fn render_status_output(status: &StatusOutput) -> String {
     ));
 
     lines.join("\n")
+}
+
+fn parse_catalog_filter_kind(
+    value: &str,
+    position: usize,
+) -> Result<CatalogFilterKind, UserFacingError> {
+    CatalogFilterKind::parse(value).ok_or_else(|| {
+        UserFacingError::usage(format!(
+            "Unsupported --kind value at argument #{position} after `chainbot catalog list`: `{value}`. Use builtin_node, builtin_trigger, or plugin."
+        ))
+    })
+}
+
+fn load_catalog_plugins_strict() -> Result<Vec<PluginManifest>, UserFacingError> {
+    let root_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+    let bundle =
+        RootDefinitionBundle::load(&root_layout).map_err(UserFacingError::from_contract)?;
+    Ok(bundle.plugins)
+}
+
+fn load_catalog_plugins_if_available() -> Result<Vec<PluginManifest>, UserFacingError> {
+    let root_layout = resolve_root_layout().map_err(UserFacingError::from_contract)?;
+    match RootDefinitionBundle::load(&root_layout) {
+        Ok(bundle) => Ok(bundle.plugins),
+        Err(crate::errors::ContractError::MissingDirectory { kind: "root", .. })
+        | Err(crate::errors::ContractError::MissingFile {
+            kind: "root config",
+            ..
+        }) => Ok(Vec::new()),
+        Err(error) => Err(UserFacingError::from_contract(error)),
+    }
 }
 
 fn render_observe_output(output: &ObserveOutput) -> String {
@@ -2382,6 +2757,15 @@ fn map_trigger_error(error: TriggerPlaneError) -> UserFacingError {
     }
 }
 
+fn map_ingress_error(error: IngressRuntimeError) -> UserFacingError {
+    match error {
+        IngressRuntimeError::RuntimeState(source) => {
+            map_runtime_state_error("operate ingress runtime state", source)
+        }
+        other => UserFacingError::state_with_code("ingress_runtime_error", other.to_string()),
+    }
+}
+
 fn maybe_prepare_e2e_root(layout: &RootLayout) -> Result<(), UserFacingError> {
     if layout.root.exists() {
         return Ok(());
@@ -2505,6 +2889,9 @@ fn run_internal_serve_daemon_loop(
     owner_id: &str,
     pid: i64,
 ) -> Result<(), UserFacingError> {
+    let ingress_supervisor =
+        TriggerIngressSupervisor::start(storage_config.clone()).map_err(map_ingress_error)?;
+    let mut external_trigger_supervisor = ExternalTriggerSupervisor::new(owner_id.to_owned());
     let mut lease_supervisor = ServeLeaseSupervisor::new(
         storage_config.clone(),
         owner_id.to_owned(),
@@ -2512,7 +2899,7 @@ fn run_internal_serve_daemon_loop(
         current_time_ms()?,
     );
 
-    loop {
+    let loop_result = (|| loop {
         let observed_at_ms = current_time_ms()?;
         let mut control_store = RuntimeStateStore::open(storage_config, observed_at_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
@@ -2528,6 +2915,11 @@ fn run_internal_serve_daemon_loop(
         let mut runtime = match request.load_runtime_context() {
             Ok(runtime) => runtime,
             Err(error) => {
+                let _ = ingress_supervisor.reconcile(DesiredIngressState::default());
+                teardown_external_trigger_sessions(
+                    &mut external_trigger_supervisor,
+                    observed_at_ms,
+                );
                 let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
                     .map_err(|open_error| {
                     map_runtime_state_error("open runtime state store", open_error)
@@ -2541,19 +2933,40 @@ fn run_internal_serve_daemon_loop(
                 continue;
             }
         };
+        let external_trigger_manifests =
+            collect_external_trigger_manifests(&runtime.definitions.plugins);
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &external_trigger_manifests,
+        )
+        .map_err(UserFacingError::from_contract)?;
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, observed_at_ms);
+        let desired_ingress = build_desired_ingress_state(&runtime.definitions.triggers)
+            .map_err(UserFacingError::from_contract)?;
+        ingress_supervisor
+            .reconcile(desired_ingress)
+            .map_err(map_ingress_error)?;
         let mut iteration_store = RuntimeStateStore::open(&runtime.storage_config, observed_at_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         iteration_store
             .mark_daemon_reload(owner_id, observed_at_ms)
             .map_err(|error| map_runtime_state_error("mark daemon reload", error))?;
 
-        match serve_once_with_lease(&mut runtime, observed_at_ms, &mut lease_supervisor) {
+        match serve_once_with_lease(
+            &mut runtime,
+            observed_at_ms,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        ) {
             Ok(_) => {
                 thread::sleep(std::time::Duration::from_millis(
                     SERVE_IDLE_POLL_INTERVAL_MS,
                 ));
             }
             Err(error) => {
+                if matches!(error, UserFacingError::Conflict { .. }) {
+                    return Err(error);
+                }
                 let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
                     .map_err(|open_error| {
                     map_runtime_state_error("open runtime state store", open_error)
@@ -2566,44 +2979,36 @@ fn run_internal_serve_daemon_loop(
                 thread::sleep(std::time::Duration::from_millis(SERVE_ERROR_BACKOFF_MS));
             }
         }
-    }
+    })();
+
+    teardown_external_trigger_sessions(
+        &mut external_trigger_supervisor,
+        current_time_ms().unwrap_or_default(),
+    );
+    let shutdown_result = ingress_supervisor.shutdown().map_err(map_ingress_error);
+    loop_result.and(shutdown_result)
+}
+
+fn teardown_external_trigger_sessions(
+    supervisor: &mut ExternalTriggerSupervisor,
+    observed_at_ms: i64,
+) {
+    let _ = supervisor.reconcile(BTreeMap::new(), observed_at_ms);
 }
 
 fn serve_once_with_lease(
     runtime: &mut RuntimeContext,
     accepted_at_ms: i64,
     lease_supervisor: &mut ServeLeaseSupervisor,
+    external_trigger_supervisor: &mut ExternalTriggerSupervisor,
 ) -> Result<CliOutput, UserFacingError> {
     lease_supervisor.maybe_renew(accepted_at_ms)?;
-    let trigger_manifests = runtime
-        .definitions
-        .plugins
-        .iter()
-        .filter_map(|manifest| {
-            manifest
-                .kind()
-                .ok()
-                .filter(|kind| *kind == PluginKind::ExternalTrigger)
-                .map(|_| manifest.clone())
-        })
-        .collect::<Vec<_>>();
+    let process_poll_budget =
+        external_trigger_supervisor.plan_process_polls_for_cycle(accepted_at_ms);
+    let replay_requests =
+        load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
+    let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
     let policy = build_trigger_host_policy(&trigger_manifests, &runtime.root_layout.plugins_dir);
-    let builtin_events =
-        build_builtin_trigger_emissions(&runtime.definitions.triggers, accepted_at_ms)
-            .map_err(UserFacingError::from_contract)?;
-
-    let trigger_store = RuntimeStateStore::open(&runtime.storage_config, accepted_at_ms)
-        .map_err(|error| map_runtime_state_error("open trigger runtime state store", error))?;
-
-    let mut trigger_plane = TriggerPlane::open_with_store(
-        trigger_store,
-        runtime.definitions.triggers.clone(),
-        trigger_manifests,
-        policy,
-        builtin_events,
-    )
-    .map_err(map_trigger_error)?;
-
     let mut renew_progress = || {
         let now_ms = current_time_ms().map_err(|error| {
             TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
@@ -2618,14 +3023,74 @@ fn serve_once_with_lease(
             })
         })
     };
+    stage_process_external_trigger_sessions(
+        &runtime.definitions.triggers,
+        &trigger_manifests,
+        &policy,
+        external_trigger_supervisor,
+        &process_poll_budget,
+        &mut runtime.state_store,
+        accepted_at_ms,
+        &mut renew_progress,
+    )
+    .map_err(map_trigger_error)?;
+    stage_wasm_external_trigger_sessions(
+        &runtime.definitions.triggers,
+        &trigger_manifests,
+        external_trigger_supervisor,
+        &mut runtime.state_store,
+        accepted_at_ms,
+        &mut renew_progress,
+    )
+    .map_err(map_trigger_error)?;
+
+    let builtin_events =
+        build_builtin_trigger_emissions(&runtime.definitions.triggers, accepted_at_ms)
+            .map_err(UserFacingError::from_contract)?;
+    let drained_ingress = drain_ingress_emissions(
+        &mut runtime.state_store,
+        &runtime.definitions.triggers,
+        INGRESS_INBOX_BATCH_LIMIT,
+    )
+    .map_err(map_trigger_error)?;
+    let mut builtin_events = builtin_events;
+    for (trigger_id, mut ingress_events) in drained_ingress.emissions {
+        builtin_events
+            .entry(trigger_id)
+            .or_default()
+            .append(&mut ingress_events);
+    }
+
+    let trigger_store = RuntimeStateStore::open(&runtime.storage_config, accepted_at_ms)
+        .map_err(|error| map_runtime_state_error("open trigger runtime state store", error))?;
+
+    let mut trigger_plane = TriggerPlane::open_with_store_acceptance_only(
+        trigger_store,
+        runtime.definitions.triggers.clone(),
+        trigger_manifests,
+        policy,
+        builtin_events,
+    )
+    .map_err(map_trigger_error)?;
+
     let run_requests = trigger_plane
         .collect_run_requests_with_progress(accepted_at_ms, &mut renew_progress)
         .map_err(map_trigger_error)?;
-    if run_requests.is_empty() {
-        return Ok(CliOutput::text(
-            "serve completed: no accepted trigger events",
-        ));
+    for inbox_id in drained_ingress.inbox_ids {
+        runtime
+            .state_store
+            .mark_ingress_inbox_processed(&inbox_id, accepted_at_ms)
+            .map_err(|error| map_runtime_state_error("mark ingress inbox processed", error))?;
     }
+    if run_requests.is_empty() {
+        if replay_requests.is_empty() {
+            return Ok(CliOutput::text(
+                "serve completed: no accepted trigger events",
+            ));
+        }
+    }
+
+    let run_requests = merge_trigger_requests(replay_requests, run_requests);
 
     let mut completed_runs = Vec::with_capacity(run_requests.len());
     let mut failures = Vec::new();
@@ -2783,21 +3248,18 @@ fn execute_single_run(
 fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, UserFacingError> {
     let registry = build_builtin_registry(BuiltinRuntimeContext {
         root_layout: runtime.root_layout.clone(),
-        manifests: runtime
-            .definitions
-            .plugins
-            .iter()
-            .cloned()
-            .map(|manifest| (manifest.plugin_id.clone(), manifest))
-            .collect(),
         secret_mode: runtime.secret_mode,
         worker_host: runtime.worker_host.clone(),
     });
 
-    ExecutionPlane::new(
+    ExecutionPlane::with_plugin_runtime(
         runtime.definitions.workflows.clone(),
         runtime.definitions.root_config.runtime_defaults.clone(),
         registry,
+        runtime.definitions.plugins.clone(),
+        runtime.root_layout.plugins_dir.clone(),
+        runtime.root_layout.secrets_dir.clone(),
+        runtime.secret_mode,
     )
     .map_err(UserFacingError::from_contract)
 }
@@ -2824,6 +3286,227 @@ fn build_trigger_host_policy(
     }
 }
 
+fn collect_external_trigger_manifests(plugin_manifests: &[PluginManifest]) -> Vec<PluginManifest> {
+    plugin_manifests
+        .iter()
+        .filter_map(|manifest| {
+            manifest
+                .kind()
+                .ok()
+                .filter(|kind| *kind == PluginKind::ExternalTrigger)
+                .map(|_| manifest.clone())
+        })
+        .collect()
+}
+
+fn stage_process_external_trigger_sessions<F>(
+    definitions: &[TriggerDefinition],
+    manifests: &[PluginManifest],
+    policy: &TriggerPluginHostPolicy,
+    supervisor: &ExternalTriggerSupervisor,
+    process_poll_budget: &[ExternalTriggerPollBudget],
+    state_store: &mut RuntimeStateStore,
+    staged_at_ms: i64,
+    on_progress: &mut F,
+) -> Result<(), TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let definitions_by_id = definitions
+        .iter()
+        .map(|definition| (definition.trigger_id.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let manifests_by_id = manifests
+        .iter()
+        .map(|manifest| (manifest.plugin_id.clone(), manifest))
+        .collect::<BTreeMap<_, _>>();
+
+    for poll_budget in process_poll_budget {
+        let session = supervisor
+            .sessions()
+            .get(&poll_budget.trigger_id)
+            .ok_or_else(|| {
+                TriggerPlaneError::Contract(
+                    crate::errors::ContractError::InvalidTriggerDefinitionField {
+                        trigger_id: poll_budget.trigger_id.clone(),
+                        field: "trigger.trigger_id",
+                        detail: "process polling budget references a missing supervisor session"
+                            .to_owned(),
+                    },
+                )
+            })?;
+        if session.runtime != ExternalTriggerSessionRuntime::Process {
+            continue;
+        }
+
+        let definition = definitions_by_id.get(&session.trigger_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(
+                crate::errors::ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: session.trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "process supervisor session is missing trigger definition".to_owned(),
+                },
+            )
+        })?;
+        let manifest = manifests_by_id.get(&session.plugin_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
+                trigger_id: session.trigger_id.clone(),
+                plugin_id: session.plugin_id.clone(),
+            })
+        })?;
+
+        for poll_ordinal in 0..poll_budget.poll_budget {
+            let emissions = collect_external_process_trigger_emissions(
+                state_store,
+                definition,
+                manifest,
+                policy,
+                on_progress,
+            )?;
+            for (index, emission) in emissions.into_iter().enumerate() {
+                on_progress()?;
+                let staged_record = crate::state::StagedTriggerEventRecord {
+                    schema_version: String::from("1.0.0"),
+                    staging_id: format!(
+                        "process:{}:{}:{}:{poll_ordinal}:{index}",
+                        definition.trigger_id, emission.event_id, staged_at_ms
+                    ),
+                    trigger_id: definition.trigger_id.clone(),
+                    workflow_id: definition.workflow_id.clone(),
+                    event_id: emission.event_id,
+                    source: emission
+                        .source
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| definition.source.clone()),
+                    occurred_at_ms: emission.occurred_at_ms,
+                    staged_at_ms,
+                    checkpoint: emission.checkpoint,
+                    payload: map_definition_input_payload(definition, &emission.payload),
+                    dedup_key: emission.dedup_key,
+                    dedup_window_ms: emission.dedup_window_ms,
+                    cooldown_key: emission.cooldown_key,
+                    cooldown_ms: emission.cooldown_ms,
+                    accepted_at_ms: None,
+                    last_error: None,
+                };
+                let _ = state_store.append_staged_trigger_event_record(&staged_record)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn stage_wasm_external_trigger_sessions<F>(
+    definitions: &[TriggerDefinition],
+    manifests: &[PluginManifest],
+    supervisor: &mut ExternalTriggerSupervisor,
+    state_store: &mut RuntimeStateStore,
+    staged_at_ms: i64,
+    on_progress: &mut F,
+) -> Result<(), TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let definitions_by_id = definitions
+        .iter()
+        .map(|definition| (definition.trigger_id.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let manifests_by_id = manifests
+        .iter()
+        .map(|manifest| (manifest.plugin_id.clone(), manifest))
+        .collect::<BTreeMap<_, _>>();
+
+    let wasm_sessions = supervisor
+        .sessions()
+        .values()
+        .filter(|session| session.runtime == ExternalTriggerSessionRuntime::Wasm)
+        .map(|session| (session.trigger_id.clone(), session.plugin_id.clone()))
+        .collect::<Vec<_>>();
+
+    for (trigger_id, plugin_id) in wasm_sessions {
+        on_progress()?;
+
+        let definition = definitions_by_id.get(&trigger_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(
+                crate::errors::ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "wasm supervisor session is missing trigger definition".to_owned(),
+                },
+            )
+        })?;
+        let manifest = manifests_by_id.get(&plugin_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
+                trigger_id: trigger_id.clone(),
+                plugin_id: plugin_id.clone(),
+            })
+        })?;
+
+        if manifest
+            .trigger_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lifecycle)
+            != Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession)
+        {
+            return Err(TriggerPlaneError::Contract(
+                crate::errors::ContractError::NodePluginInvalidField {
+                    plugin_id: manifest.plugin_id.clone(),
+                    field: "plugin.trigger_runtime.lifecycle",
+                    detail:
+                        "wasm supervisor session requires wasm_daemon_persistent_session lifecycle"
+                            .to_owned(),
+                },
+            ));
+        }
+
+        let outcome =
+            supervisor.stage_wasm_guest_turn(&trigger_id, definition, staged_at_ms, state_store);
+
+        if matches!(
+            outcome,
+            HostPushOutcome::DurableAck | HostPushOutcome::RetryableBackpressure
+        ) {
+            continue;
+        }
+    }
+
+    Ok(())
+}
+
+fn map_definition_input_payload(
+    definition: &TriggerDefinition,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    if definition.input_mapping.is_empty() {
+        return payload.clone();
+    }
+
+    let mut mapped = serde_json::Map::new();
+    for (target, selector) in &definition.input_mapping {
+        if let Some(value) = select_payload_value(payload, selector) {
+            mapped.insert(target.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(mapped)
+}
+
+fn select_payload_value<'a>(
+    payload: &'a serde_json::Value,
+    selector: &str,
+) -> Option<&'a serde_json::Value> {
+    if selector == "payload" {
+        return Some(payload);
+    }
+    let remainder = selector.strip_prefix("payload.")?;
+
+    let mut current = payload;
+    for segment in remainder.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> NormalizedRunRequest {
     let mut request = NormalizedRunRequest::new(
         trigger_request.run_id.clone(),
@@ -2846,6 +3529,54 @@ fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> Norma
     }
 
     request
+}
+
+fn load_replayable_trigger_requests(
+    runtime: &mut RuntimeContext,
+    limit: usize,
+) -> Result<Vec<TriggerRunRequest>, UserFacingError> {
+    runtime
+        .state_store
+        .list_replayable_trigger_records(limit)
+        .map_err(|error| map_runtime_state_error("list replayable trigger records", error))
+        .map(|records| {
+            records
+                .into_iter()
+                .map(replay_trigger_request_from_record)
+                .collect()
+        })
+}
+
+fn replay_trigger_request_from_record(record: TriggerEventRecord) -> TriggerRunRequest {
+    TriggerRunRequest {
+        run_id: record.run_id,
+        workflow_id: record.workflow_id,
+        trigger_id: record.trigger_id.clone(),
+        event_id: record.event_id,
+        source: record.source,
+        accepted_at_ms: record.accepted_at_ms,
+        payload: record.payload,
+        trigger_record_ref: format!(
+            "db://trigger_event_records/{}/{}",
+            record.trigger_id, record.sequence
+        ),
+    }
+}
+
+fn merge_trigger_requests(
+    replay_requests: Vec<TriggerRunRequest>,
+    new_requests: Vec<TriggerRunRequest>,
+) -> Vec<TriggerRunRequest> {
+    let mut merged = Vec::with_capacity(replay_requests.len().saturating_add(new_requests.len()));
+    let mut seen_run_ids = BTreeSet::new();
+
+    for request in replay_requests.into_iter().chain(new_requests) {
+        if seen_run_ids.insert(request.run_id.clone()) {
+            merged.push(request);
+        }
+    }
+
+    merged
 }
 
 fn write_run_status(
@@ -2914,6 +3645,7 @@ mod tests {
             command: CliCommand::Serve,
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -2941,9 +3673,20 @@ mod tests {
             i64::from(std::process::id()),
             1_710_300_000_000,
         );
-        let serve_output =
-            serve_once_with_lease(&mut runtime, 1_710_300_000_000, &mut lease_supervisor)
-                .expect("already loaded runtime should ignore on-disk config mutation");
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &collect_external_trigger_manifests(&runtime.definitions.plugins),
+        )
+        .expect("external trigger desired sessions should build");
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_000_000);
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_000_000,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("already loaded runtime should ignore on-disk config mutation");
         assert!(serve_output
             .stdout()
             .contains("serve completed: executed 1 accepted trigger event(s)"));
@@ -2983,6 +3726,7 @@ mod tests {
             command: CliCommand::Serve,
             json_output: false,
             trigger_operation: None,
+            catalog_request: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -3001,9 +3745,20 @@ mod tests {
             i64::from(std::process::id()),
             1_710_300_100_000,
         );
-        let serve_output =
-            serve_once_with_lease(&mut runtime, 1_710_300_100_000, &mut lease_supervisor)
-                .expect("serve should execute every accepted request from the snapshot");
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &collect_external_trigger_manifests(&runtime.definitions.plugins),
+        )
+        .expect("external trigger desired sessions should build");
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_100_000);
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_100_000,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("serve should execute every accepted request from the snapshot");
 
         assert!(serve_output
             .stdout()
@@ -3020,6 +3775,92 @@ mod tests {
             .list_run_summaries()
             .expect("serve snapshot runs should be persisted");
         assert_eq!(run_summaries.len(), 2);
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn serve_bridges_pending_staged_external_events() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-serve-bridges-staged-external-events");
+        let request = CliRequest {
+            command: CliCommand::Serve,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        };
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let mut runtime = request
+            .load_runtime_context()
+            .expect("runtime load should succeed for staged external bridge coverage");
+        runtime
+            .state_store
+            .append_staged_trigger_event_record(&crate::state::StagedTriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                staging_id: String::from("staging-external-bridge-1"),
+                trigger_id: String::from("external-trigger-e2e"),
+                workflow_id: String::from("wf-e2e"),
+                event_id: String::from("external-trigger-e2e:event-staged"),
+                source: String::from("external-trigger-plugin"),
+                occurred_at_ms: 1_710_300_150_000,
+                staged_at_ms: 1_710_300_150_001,
+                checkpoint: Some(String::from("cp-staged-1")),
+                payload: serde_json::json!({"symbol": "ETHUSDT"}),
+                dedup_key: None,
+                dedup_window_ms: None,
+                cooldown_key: None,
+                cooldown_ms: None,
+                accepted_at_ms: None,
+                last_error: None,
+            })
+            .expect("staged external trigger row should persist before serve turn");
+
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            runtime.storage_config.clone(),
+            String::from("test-owner"),
+            i64::from(std::process::id()),
+            1_710_300_150_000,
+        );
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &collect_external_trigger_manifests(&runtime.definitions.plugins),
+        )
+        .expect("external trigger desired sessions should build");
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_150_000);
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_150_010,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("serve should bridge staged external rows through trigger acceptance");
+
+        assert!(serve_output
+            .stdout()
+            .contains("serve completed: executed 2 accepted trigger event(s)"));
+        assert!(serve_output
+            .stdout()
+            .contains("event_id=external-trigger-e2e:event-staged"));
+
+        let pending = runtime
+            .state_store
+            .list_pending_staged_trigger_event_records("external-trigger-e2e", 10)
+            .expect("pending staged rows should be queryable after serve bridge");
+        assert!(pending.is_empty());
 
         unsafe {
             std::env::remove_var("CHAINBOT_CONFIG_DIR");
@@ -3063,6 +3904,108 @@ mod tests {
         assert!(matches!(snapshot.state, ServeLeaseState::Active));
         assert_eq!(snapshot.owner_id.as_deref(), Some("owner-renew"));
         assert_eq!(snapshot.expires_at_ms, Some(1_710_300_240_100));
+    }
+
+    #[test]
+    fn daemon_composes_external_trigger_supervisor_from_runtime_definitions() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-external-trigger-supervisor-composition");
+        let request = CliRequest {
+            command: CliCommand::Serve,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        };
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let runtime = request
+            .load_runtime_context()
+            .expect("runtime load should succeed for supervisor composition");
+        let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
+        let desired_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &trigger_manifests,
+        )
+        .expect("external trigger desired sessions should build");
+        let mut supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let report = supervisor.reconcile(desired_sessions, 1_710_300_300_000);
+
+        assert!(
+            report
+                .started
+                .iter()
+                .any(|trigger_id| trigger_id == "external-trigger-e2e"),
+            "daemon composition should include enabled external trigger session"
+        );
+        assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn daemon_teardown_reconciles_external_trigger_sessions_to_empty() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-external-trigger-supervisor-teardown");
+        let request = CliRequest {
+            command: CliCommand::Serve,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        };
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let runtime = request
+            .load_runtime_context()
+            .expect("runtime load should succeed for supervisor teardown coverage");
+        let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
+        let desired_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &trigger_manifests,
+        )
+        .expect("external trigger desired sessions should build");
+        let mut supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let start_report = supervisor.reconcile(desired_sessions, 1_710_300_400_000);
+
+        assert!(
+            start_report
+                .started
+                .iter()
+                .any(|trigger_id| trigger_id == "external-trigger-e2e"),
+            "fixture should start at least one external trigger session before teardown"
+        );
+        assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
+
+        teardown_external_trigger_sessions(&mut supervisor, 1_710_300_400_250);
+        assert!(
+            supervisor.sessions().is_empty(),
+            "daemon lifecycle teardown should reconcile external sessions to empty"
+        );
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
     }
 
     fn prepare_fixture_root(case_name: &str, root_name: &str) -> PathBuf {

@@ -7,5 +7,5 @@
 
 ## Members
 - `mod.rs`: Stable public facade that re-exports the supported plugin contract and host surfaces.
-- `contract.rs`: Internal plugin manifest and external-node protocol contract types plus schema validation helpers.
-- `host.rs`: Internal external node-plugin host runtime with executable-path policy, process execution, and environment guards.
+- `contract.rs`: Internal plugin manifest plus richer optional discovery metadata and external-node protocol contract types with schema validation helpers.
+- `host.rs`: Internal external node-plugin host runtime with executable-path policy, per-operation schema enforcement, process execution, and environment guards.

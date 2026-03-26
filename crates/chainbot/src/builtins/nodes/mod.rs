@@ -7,6 +7,7 @@
 //! [ROLE]
 //! Owns the workflow builtin-node subsystem beneath the unified builtin namespace.
 
+pub mod catalog;
 pub mod context;
 pub mod contract;
 pub mod dispatch;

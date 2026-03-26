@@ -4,5 +4,9 @@ kind = "external_node"
 entrypoint = "node.exec.v1"
 capabilities = ["node:execute"]
 executable = "../bin/external_node.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize quote payload"
 input_schema = ["symbol", "token"]
 output_schema = ["decision"]
