@@ -49,7 +49,7 @@ fn catalog_list_json_can_filter_to_plugins() {
         .expect("catalog list json should decode");
     assert!(payload.get("builtin_nodes").is_none());
     assert!(payload.get("builtin_triggers").is_none());
-    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(2));
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(3));
 }
 
 #[test]
@@ -157,7 +157,144 @@ fn catalog_show_reports_external_trigger_event_schema() {
 }
 
 #[test]
-fn catalog_show_rejects_legacy_external_trigger_without_event_schema() {
+fn catalog_show_reports_wasm_trigger_lifecycle_in_json_and_text() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("catalog-wasm-trigger-lifecycle");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("plugins").join("wasm-trigger-plugin"))
+        .expect("plugin package directory should be creatable");
+    fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+    fs::write(
+        root.join("chainbot.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"catalog\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("plugins")
+            .join("wasm-trigger-plugin")
+            .join("config.toml"),
+        r#"manifest_version = "2.0.0"
+plugin_id = "wasm-trigger-plugin"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+
+[trigger_runtime]
+lifecycle = "wasm_daemon_persistent_session"
+push_callback = "host_callback"
+durable_ack = "after_store_persist"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+module = "bin/trigger.wasm"
+
+[event_schema]
+summary = "Wasm trigger payload"
+fields = ["symbol", "price"]
+"#,
+    )
+    .expect("wasm trigger plugin config should be writable");
+
+    let json_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:wasm-trigger-plugin", "--json"])
+        .output()
+        .expect("catalog show wasm trigger plugin should execute");
+
+    assert!(json_output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&json_output.stdout)
+        .expect("wasm trigger catalog json should decode");
+    assert_eq!(payload["detail"]["plugin_kind"], "external_trigger");
+    assert_eq!(
+        payload["detail"]["lifecycle"],
+        "wasm_daemon_persistent_session"
+    );
+
+    let text_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:wasm-trigger-plugin"])
+        .output()
+        .expect("catalog show wasm trigger plugin text should execute");
+
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8(text_output.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("lifecycle: wasm_daemon_persistent_session"));
+    assert!(stdout.contains("Daemon-persistent wasm session"));
+}
+
+#[test]
+fn catalog_show_reports_process_trigger_lifecycle_in_json_and_text() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("catalog-process-trigger-lifecycle");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("plugins").join("process-trigger-plugin"))
+        .expect("plugin package directory should be creatable");
+    fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+    fs::write(
+        root.join("chainbot.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"catalog\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("plugins")
+            .join("process-trigger-plugin")
+            .join("config.toml"),
+        r#"manifest_version = "2.0.0"
+plugin_id = "process-trigger-plugin"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+executable = "bin/external_trigger.sh"
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "Process trigger payload"
+fields = ["symbol", "price"]
+"#,
+    )
+    .expect("process trigger plugin config should be writable");
+
+    let json_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:process-trigger-plugin", "--json"])
+        .output()
+        .expect("catalog show process trigger plugin should execute");
+
+    assert!(json_output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&json_output.stdout)
+        .expect("process trigger catalog json should decode");
+    assert_eq!(payload["detail"]["plugin_kind"], "external_trigger");
+    assert_eq!(payload["detail"]["lifecycle"], "process_short_lived");
+
+    let text_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:process-trigger-plugin"])
+        .output()
+        .expect("catalog show process trigger plugin text should execute");
+
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8(text_output.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("lifecycle: process_short_lived"));
+    assert!(stdout.contains("Short-lived process adapter"));
+}
+
+#[test]
+fn catalog_show_rejects_legacy_external_trigger_without_runtime_lifecycle() {
     let _lock = acquire_fixture_lock();
     let root = unique_root("catalog-legacy-trigger-plugin");
     let _ = fs::remove_dir_all(&root);
@@ -177,7 +314,7 @@ fn catalog_show_rejects_legacy_external_trigger_without_event_schema() {
     .expect("root config should be writable");
     fs::write(
         root.join("plugins").join("legacy-trigger").join("config.toml"),
-        "manifest_version = \"2.0.0\"\nplugin_id = \"legacy-trigger\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/external_trigger.sh\"\n",
+        "manifest_version = \"2.0.0\"\nplugin_id = \"legacy-trigger\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/external_trigger.sh\"\n\n[event_schema]\nsummary = \"Legacy trigger payload\"\nfields = [\"symbol\", \"price\"]\n",
     )
     .expect("legacy plugin config should be writable");
 
@@ -189,7 +326,7 @@ fn catalog_show_rejects_legacy_external_trigger_without_event_schema() {
 
     assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
-    assert!(stderr.contains("plugin.event_schema"));
+    assert!(stderr.contains("plugin.trigger_runtime.lifecycle"));
 }
 
 #[test]

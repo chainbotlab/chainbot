@@ -76,6 +76,27 @@ fn help_catalog_includes_discovery_guidance() {
 }
 
 #[test]
+fn help_catalog_distinguishes_trigger_lifecycle_models() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "catalog"])
+        .output()
+        .expect("chainbot help catalog should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("process_short_lived"));
+    assert!(stdout.contains("wasm_daemon_persistent_session"));
+    assert!(stdout.contains("lifecycle"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn version_command_prints_running_release() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();

@@ -150,6 +150,8 @@ pub struct PluginDetail {
     pub entrypoint: String,
     pub capabilities: Vec<String>,
     pub schema_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<PluginOperationDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,6 +321,7 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
             entrypoint: manifest.entrypoint.clone(),
             capabilities: manifest.capabilities.clone(),
             schema_status: String::from("manifest_only"),
+            lifecycle: None,
             operations: Vec::new(),
             event_schema: None,
             protocol: None,
@@ -331,40 +334,65 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
             entrypoint: manifest.entrypoint.clone(),
             capabilities: manifest.capabilities.clone(),
             schema_status: String::from("declared"),
+            lifecycle: None,
             operations: manifest.operations.clone(),
             event_schema: None,
             protocol: None,
             input_schema: Vec::new(),
             output_schema: Vec::new(),
         }),
-        PluginKind::ExternalTrigger => Ok(PluginDetail {
-            plugin_id: manifest.plugin_id.clone(),
-            plugin_kind: manifest.kind.clone(),
-            entrypoint: manifest.entrypoint.clone(),
-            capabilities: manifest.capabilities.clone(),
-            schema_status: String::from("declared"),
-            operations: Vec::new(),
-            event_schema: manifest.event_schema.clone(),
-            protocol: Some(PluginProtocolDetail {
-                start_message: vec![
-                    String::from("protocol_version"),
-                    String::from("trigger_id"),
-                    String::from("source"),
-                    String::from("params"),
-                    String::from("resume_checkpoint"),
-                ],
-                event_message: vec![
-                    String::from("checkpoint"),
-                    String::from("event_key"),
-                    String::from("occurred_at_ms"),
-                    String::from("payload"),
-                    String::from("dedup_key"),
-                    String::from("cooldown_key"),
-                ],
-            }),
-            input_schema: Vec::new(),
-            output_schema: Vec::new(),
-        }),
+        PluginKind::ExternalTrigger => {
+            let lifecycle = manifest
+                .trigger_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.lifecycle)
+                .map(|l| match l {
+                    crate::plugin::TriggerRuntimeLifecycle::ProcessShortLived => {
+                        String::from("process_short_lived")
+                    }
+                    crate::plugin::TriggerRuntimeLifecycle::WasmDaemonPersistentSession => {
+                        String::from("wasm_daemon_persistent_session")
+                    }
+                });
+
+            let is_wasm = lifecycle.as_deref() == Some("wasm_daemon_persistent_session");
+
+            let protocol = if is_wasm {
+                None
+            } else {
+                Some(PluginProtocolDetail {
+                    start_message: vec![
+                        String::from("protocol_version"),
+                        String::from("trigger_id"),
+                        String::from("source"),
+                        String::from("params"),
+                        String::from("resume_checkpoint"),
+                    ],
+                    event_message: vec![
+                        String::from("checkpoint"),
+                        String::from("event_key"),
+                        String::from("occurred_at_ms"),
+                        String::from("payload"),
+                        String::from("dedup_key"),
+                        String::from("cooldown_key"),
+                    ],
+                })
+            };
+
+            Ok(PluginDetail {
+                plugin_id: manifest.plugin_id.clone(),
+                plugin_kind: manifest.kind.clone(),
+                entrypoint: manifest.entrypoint.clone(),
+                capabilities: manifest.capabilities.clone(),
+                schema_status: String::from("declared"),
+                lifecycle,
+                operations: Vec::new(),
+                event_schema: manifest.event_schema.clone(),
+                protocol,
+                input_schema: Vec::new(),
+                output_schema: Vec::new(),
+            })
+        }
     }
 }
 
@@ -481,6 +509,18 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
             lines.push(format!("  plugin_kind: {}", detail.plugin_kind));
             lines.push(format!("  entrypoint: {}", detail.entrypoint));
             lines.push(format!("  schema_status: {}", detail.schema_status));
+            if let Some(ref lifecycle) = detail.lifecycle {
+                lines.push(format!("  lifecycle: {}", lifecycle));
+                if lifecycle == "process_short_lived" {
+                    lines.push(String::from(
+                        "    Short-lived process adapter: poll-based, supervisor-orchestrated",
+                    ));
+                } else if lifecycle == "wasm_daemon_persistent_session" {
+                    lines.push(String::from(
+                        "    Daemon-persistent wasm session: long-lived Wasmtime ownership",
+                    ));
+                }
+            }
             if !detail.capabilities.is_empty() {
                 lines.push(format!(
                     "  capabilities: {}",
@@ -527,7 +567,17 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
                     lines.push(format!("  fields: {}", event_schema.fields.join(", ")));
                 }
             }
-            if let Some(protocol) = &detail.protocol {
+            if detail.lifecycle.as_deref() == Some("wasm_daemon_persistent_session") {
+                lines.push(String::new());
+                lines.push(String::from("Host callback protocol"));
+                lines.push(String::from(
+                    "  daemon-persistent session with host callback push semantics",
+                ));
+                lines.push(String::from(
+                    "  durable ack returned after store persist succeeds",
+                ));
+                lines.push(String::from("  host outcomes: retryable (queue_saturated/budget_exhausted) or terminal (lease_lost/shutting_down)"));
+            } else if let Some(protocol) = &detail.protocol {
                 lines.push(String::new());
                 lines.push(String::from("Protocol"));
                 lines.push(format!(

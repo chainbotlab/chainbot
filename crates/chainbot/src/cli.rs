@@ -32,11 +32,15 @@ use crate::config::{
 };
 use crate::errors::UserFacingError;
 use crate::executor::{ExecutionPlane, NormalizedRunRequest, WorkflowRunStatus};
+use crate::external_trigger_supervisor::{
+    build_desired_external_trigger_sessions, ExternalTriggerPollBudget,
+    ExternalTriggerSessionRuntime, ExternalTriggerSupervisor,
+};
 use crate::ingress::{
     build_desired_ingress_state, drain_ingress_emissions, DesiredIngressState, IngressRuntimeError,
     TriggerIngressSupervisor,
 };
-use crate::plugin::{PluginKind, PluginManifest};
+use crate::plugin::{PluginKind, PluginManifest, TriggerRuntimeLifecycle};
 use crate::state::{
     sanitize_path_component, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState,
     TriggerEventRecord, TriggerSnapshotRecord, WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
@@ -45,9 +49,10 @@ use crate::state_db::{
     RuntimeDaemonStatus, RuntimeHistoryArchiveCounts, RuntimeStateError, RuntimeStateStore,
 };
 use crate::trigger::{
-    TriggerDefinition, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
-    REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+    collect_external_process_trigger_emissions, TriggerDefinition, TriggerPlane, TriggerPlaneError,
+    TriggerPluginHostPolicy, TriggerRunRequest, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
+use crate::trigger_wasm::HostPushOutcome;
 use crate::workflow::WorkflowDefinition;
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
@@ -1823,6 +1828,7 @@ fn help_text(topic: HelpTopic) -> String {
             &[
                 "you need builtin node or trigger inventory without opening source code",
                 "you want installed plugin callable or event structure details",
+                "you need to distinguish external trigger lifecycle: process_short_lived (poll-based) vs wasm_daemon_persistent_session (long-lived)",
                 "an agent needs stable machine-readable capability discovery before generating config",
             ],
             &["builtin descriptors", "installed plugin manifests when a root is available"],
@@ -1831,6 +1837,8 @@ fn help_text(topic: HelpTopic) -> String {
             &[
                 "prints grouped human-readable capability lists by default",
                 "prints stable JSON read models when `--json` is enabled",
+                "external trigger plugins show lifecycle (process_short_lived or wasm_daemon_persistent_session) and runtime semantics",
+                "wasm trigger plugins show host callback outcomes: retryable backpressure (queue_saturated/budget_exhausted) vs terminal lease_lost/shutting_down",
             ],
             &[
                 "builtin descriptors are always available",
@@ -2883,6 +2891,7 @@ fn run_internal_serve_daemon_loop(
 ) -> Result<(), UserFacingError> {
     let ingress_supervisor =
         TriggerIngressSupervisor::start(storage_config.clone()).map_err(map_ingress_error)?;
+    let mut external_trigger_supervisor = ExternalTriggerSupervisor::new(owner_id.to_owned());
     let mut lease_supervisor = ServeLeaseSupervisor::new(
         storage_config.clone(),
         owner_id.to_owned(),
@@ -2907,6 +2916,10 @@ fn run_internal_serve_daemon_loop(
             Ok(runtime) => runtime,
             Err(error) => {
                 let _ = ingress_supervisor.reconcile(DesiredIngressState::default());
+                teardown_external_trigger_sessions(
+                    &mut external_trigger_supervisor,
+                    observed_at_ms,
+                );
                 let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
                     .map_err(|open_error| {
                     map_runtime_state_error("open runtime state store", open_error)
@@ -2920,6 +2933,14 @@ fn run_internal_serve_daemon_loop(
                 continue;
             }
         };
+        let external_trigger_manifests =
+            collect_external_trigger_manifests(&runtime.definitions.plugins);
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &external_trigger_manifests,
+        )
+        .map_err(UserFacingError::from_contract)?;
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, observed_at_ms);
         let desired_ingress = build_desired_ingress_state(&runtime.definitions.triggers)
             .map_err(UserFacingError::from_contract)?;
         ingress_supervisor
@@ -2931,13 +2952,21 @@ fn run_internal_serve_daemon_loop(
             .mark_daemon_reload(owner_id, observed_at_ms)
             .map_err(|error| map_runtime_state_error("mark daemon reload", error))?;
 
-        match serve_once_with_lease(&mut runtime, observed_at_ms, &mut lease_supervisor) {
+        match serve_once_with_lease(
+            &mut runtime,
+            observed_at_ms,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        ) {
             Ok(_) => {
                 thread::sleep(std::time::Duration::from_millis(
                     SERVE_IDLE_POLL_INTERVAL_MS,
                 ));
             }
             Err(error) => {
+                if matches!(error, UserFacingError::Conflict { .. }) {
+                    return Err(error);
+                }
                 let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
                     .map_err(|open_error| {
                     map_runtime_state_error("open runtime state store", open_error)
@@ -2952,31 +2981,69 @@ fn run_internal_serve_daemon_loop(
         }
     })();
 
+    teardown_external_trigger_sessions(
+        &mut external_trigger_supervisor,
+        current_time_ms().unwrap_or_default(),
+    );
     let shutdown_result = ingress_supervisor.shutdown().map_err(map_ingress_error);
     loop_result.and(shutdown_result)
+}
+
+fn teardown_external_trigger_sessions(
+    supervisor: &mut ExternalTriggerSupervisor,
+    observed_at_ms: i64,
+) {
+    let _ = supervisor.reconcile(BTreeMap::new(), observed_at_ms);
 }
 
 fn serve_once_with_lease(
     runtime: &mut RuntimeContext,
     accepted_at_ms: i64,
     lease_supervisor: &mut ServeLeaseSupervisor,
+    external_trigger_supervisor: &mut ExternalTriggerSupervisor,
 ) -> Result<CliOutput, UserFacingError> {
     lease_supervisor.maybe_renew(accepted_at_ms)?;
+    let process_poll_budget =
+        external_trigger_supervisor.plan_process_polls_for_cycle(accepted_at_ms);
     let replay_requests =
         load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
-    let trigger_manifests = runtime
-        .definitions
-        .plugins
-        .iter()
-        .filter_map(|manifest| {
-            manifest
-                .kind()
-                .ok()
-                .filter(|kind| *kind == PluginKind::ExternalTrigger)
-                .map(|_| manifest.clone())
-        })
-        .collect::<Vec<_>>();
+    let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
     let policy = build_trigger_host_policy(&trigger_manifests, &runtime.root_layout.plugins_dir);
+    let mut renew_progress = || {
+        let now_ms = current_time_ms().map_err(|error| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
+                trigger_id: String::from("serve"),
+                detail: error.to_string(),
+            })
+        })?;
+        lease_supervisor.maybe_renew(now_ms).map_err(|error| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
+                trigger_id: String::from("serve"),
+                detail: error.to_string(),
+            })
+        })
+    };
+    stage_process_external_trigger_sessions(
+        &runtime.definitions.triggers,
+        &trigger_manifests,
+        &policy,
+        external_trigger_supervisor,
+        &process_poll_budget,
+        &mut runtime.state_store,
+        accepted_at_ms,
+        &mut renew_progress,
+    )
+    .map_err(map_trigger_error)?;
+    stage_wasm_external_trigger_sessions(
+        &runtime.definitions.triggers,
+        &trigger_manifests,
+        external_trigger_supervisor,
+        &mut runtime.state_store,
+        accepted_at_ms,
+        &mut renew_progress,
+    )
+    .map_err(map_trigger_error)?;
+
     let builtin_events =
         build_builtin_trigger_emissions(&runtime.definitions.triggers, accepted_at_ms)
             .map_err(UserFacingError::from_contract)?;
@@ -2997,7 +3064,7 @@ fn serve_once_with_lease(
     let trigger_store = RuntimeStateStore::open(&runtime.storage_config, accepted_at_ms)
         .map_err(|error| map_runtime_state_error("open trigger runtime state store", error))?;
 
-    let mut trigger_plane = TriggerPlane::open_with_store(
+    let mut trigger_plane = TriggerPlane::open_with_store_acceptance_only(
         trigger_store,
         runtime.definitions.triggers.clone(),
         trigger_manifests,
@@ -3006,20 +3073,6 @@ fn serve_once_with_lease(
     )
     .map_err(map_trigger_error)?;
 
-    let mut renew_progress = || {
-        let now_ms = current_time_ms().map_err(|error| {
-            TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
-                trigger_id: String::from("serve"),
-                detail: error.to_string(),
-            })
-        })?;
-        lease_supervisor.maybe_renew(now_ms).map_err(|error| {
-            TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
-                trigger_id: String::from("serve"),
-                detail: error.to_string(),
-            })
-        })
-    };
     let run_requests = trigger_plane
         .collect_run_requests_with_progress(accepted_at_ms, &mut renew_progress)
         .map_err(map_trigger_error)?;
@@ -3233,6 +3286,227 @@ fn build_trigger_host_policy(
     }
 }
 
+fn collect_external_trigger_manifests(plugin_manifests: &[PluginManifest]) -> Vec<PluginManifest> {
+    plugin_manifests
+        .iter()
+        .filter_map(|manifest| {
+            manifest
+                .kind()
+                .ok()
+                .filter(|kind| *kind == PluginKind::ExternalTrigger)
+                .map(|_| manifest.clone())
+        })
+        .collect()
+}
+
+fn stage_process_external_trigger_sessions<F>(
+    definitions: &[TriggerDefinition],
+    manifests: &[PluginManifest],
+    policy: &TriggerPluginHostPolicy,
+    supervisor: &ExternalTriggerSupervisor,
+    process_poll_budget: &[ExternalTriggerPollBudget],
+    state_store: &mut RuntimeStateStore,
+    staged_at_ms: i64,
+    on_progress: &mut F,
+) -> Result<(), TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let definitions_by_id = definitions
+        .iter()
+        .map(|definition| (definition.trigger_id.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let manifests_by_id = manifests
+        .iter()
+        .map(|manifest| (manifest.plugin_id.clone(), manifest))
+        .collect::<BTreeMap<_, _>>();
+
+    for poll_budget in process_poll_budget {
+        let session = supervisor
+            .sessions()
+            .get(&poll_budget.trigger_id)
+            .ok_or_else(|| {
+                TriggerPlaneError::Contract(
+                    crate::errors::ContractError::InvalidTriggerDefinitionField {
+                        trigger_id: poll_budget.trigger_id.clone(),
+                        field: "trigger.trigger_id",
+                        detail: "process polling budget references a missing supervisor session"
+                            .to_owned(),
+                    },
+                )
+            })?;
+        if session.runtime != ExternalTriggerSessionRuntime::Process {
+            continue;
+        }
+
+        let definition = definitions_by_id.get(&session.trigger_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(
+                crate::errors::ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: session.trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "process supervisor session is missing trigger definition".to_owned(),
+                },
+            )
+        })?;
+        let manifest = manifests_by_id.get(&session.plugin_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
+                trigger_id: session.trigger_id.clone(),
+                plugin_id: session.plugin_id.clone(),
+            })
+        })?;
+
+        for poll_ordinal in 0..poll_budget.poll_budget {
+            let emissions = collect_external_process_trigger_emissions(
+                state_store,
+                definition,
+                manifest,
+                policy,
+                on_progress,
+            )?;
+            for (index, emission) in emissions.into_iter().enumerate() {
+                on_progress()?;
+                let staged_record = crate::state::StagedTriggerEventRecord {
+                    schema_version: String::from("1.0.0"),
+                    staging_id: format!(
+                        "process:{}:{}:{}:{poll_ordinal}:{index}",
+                        definition.trigger_id, emission.event_id, staged_at_ms
+                    ),
+                    trigger_id: definition.trigger_id.clone(),
+                    workflow_id: definition.workflow_id.clone(),
+                    event_id: emission.event_id,
+                    source: emission
+                        .source
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| definition.source.clone()),
+                    occurred_at_ms: emission.occurred_at_ms,
+                    staged_at_ms,
+                    checkpoint: emission.checkpoint,
+                    payload: map_definition_input_payload(definition, &emission.payload),
+                    dedup_key: emission.dedup_key,
+                    dedup_window_ms: emission.dedup_window_ms,
+                    cooldown_key: emission.cooldown_key,
+                    cooldown_ms: emission.cooldown_ms,
+                    accepted_at_ms: None,
+                    last_error: None,
+                };
+                let _ = state_store.append_staged_trigger_event_record(&staged_record)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn stage_wasm_external_trigger_sessions<F>(
+    definitions: &[TriggerDefinition],
+    manifests: &[PluginManifest],
+    supervisor: &mut ExternalTriggerSupervisor,
+    state_store: &mut RuntimeStateStore,
+    staged_at_ms: i64,
+    on_progress: &mut F,
+) -> Result<(), TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let definitions_by_id = definitions
+        .iter()
+        .map(|definition| (definition.trigger_id.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let manifests_by_id = manifests
+        .iter()
+        .map(|manifest| (manifest.plugin_id.clone(), manifest))
+        .collect::<BTreeMap<_, _>>();
+
+    let wasm_sessions = supervisor
+        .sessions()
+        .values()
+        .filter(|session| session.runtime == ExternalTriggerSessionRuntime::Wasm)
+        .map(|session| (session.trigger_id.clone(), session.plugin_id.clone()))
+        .collect::<Vec<_>>();
+
+    for (trigger_id, plugin_id) in wasm_sessions {
+        on_progress()?;
+
+        let definition = definitions_by_id.get(&trigger_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(
+                crate::errors::ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "wasm supervisor session is missing trigger definition".to_owned(),
+                },
+            )
+        })?;
+        let manifest = manifests_by_id.get(&plugin_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
+                trigger_id: trigger_id.clone(),
+                plugin_id: plugin_id.clone(),
+            })
+        })?;
+
+        if manifest
+            .trigger_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lifecycle)
+            != Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession)
+        {
+            return Err(TriggerPlaneError::Contract(
+                crate::errors::ContractError::NodePluginInvalidField {
+                    plugin_id: manifest.plugin_id.clone(),
+                    field: "plugin.trigger_runtime.lifecycle",
+                    detail:
+                        "wasm supervisor session requires wasm_daemon_persistent_session lifecycle"
+                            .to_owned(),
+                },
+            ));
+        }
+
+        let outcome =
+            supervisor.stage_wasm_guest_turn(&trigger_id, definition, staged_at_ms, state_store);
+
+        if matches!(
+            outcome,
+            HostPushOutcome::DurableAck | HostPushOutcome::RetryableBackpressure
+        ) {
+            continue;
+        }
+    }
+
+    Ok(())
+}
+
+fn map_definition_input_payload(
+    definition: &TriggerDefinition,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    if definition.input_mapping.is_empty() {
+        return payload.clone();
+    }
+
+    let mut mapped = serde_json::Map::new();
+    for (target, selector) in &definition.input_mapping {
+        if let Some(value) = select_payload_value(payload, selector) {
+            mapped.insert(target.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(mapped)
+}
+
+fn select_payload_value<'a>(
+    payload: &'a serde_json::Value,
+    selector: &str,
+) -> Option<&'a serde_json::Value> {
+    if selector == "payload" {
+        return Some(payload);
+    }
+    let remainder = selector.strip_prefix("payload.")?;
+
+    let mut current = payload;
+    for segment in remainder.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 fn normalized_request_from_trigger(trigger_request: &TriggerRunRequest) -> NormalizedRunRequest {
     let mut request = NormalizedRunRequest::new(
         trigger_request.run_id.clone(),
@@ -3399,9 +3673,20 @@ mod tests {
             i64::from(std::process::id()),
             1_710_300_000_000,
         );
-        let serve_output =
-            serve_once_with_lease(&mut runtime, 1_710_300_000_000, &mut lease_supervisor)
-                .expect("already loaded runtime should ignore on-disk config mutation");
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &collect_external_trigger_manifests(&runtime.definitions.plugins),
+        )
+        .expect("external trigger desired sessions should build");
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_000_000);
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_000_000,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("already loaded runtime should ignore on-disk config mutation");
         assert!(serve_output
             .stdout()
             .contains("serve completed: executed 1 accepted trigger event(s)"));
@@ -3460,9 +3745,20 @@ mod tests {
             i64::from(std::process::id()),
             1_710_300_100_000,
         );
-        let serve_output =
-            serve_once_with_lease(&mut runtime, 1_710_300_100_000, &mut lease_supervisor)
-                .expect("serve should execute every accepted request from the snapshot");
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &collect_external_trigger_manifests(&runtime.definitions.plugins),
+        )
+        .expect("external trigger desired sessions should build");
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_100_000);
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_100_000,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("serve should execute every accepted request from the snapshot");
 
         assert!(serve_output
             .stdout()
@@ -3479,6 +3775,92 @@ mod tests {
             .list_run_summaries()
             .expect("serve snapshot runs should be persisted");
         assert_eq!(run_summaries.len(), 2);
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn serve_bridges_pending_staged_external_events() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-serve-bridges-staged-external-events");
+        let request = CliRequest {
+            command: CliCommand::Serve,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        };
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let mut runtime = request
+            .load_runtime_context()
+            .expect("runtime load should succeed for staged external bridge coverage");
+        runtime
+            .state_store
+            .append_staged_trigger_event_record(&crate::state::StagedTriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                staging_id: String::from("staging-external-bridge-1"),
+                trigger_id: String::from("external-trigger-e2e"),
+                workflow_id: String::from("wf-e2e"),
+                event_id: String::from("external-trigger-e2e:event-staged"),
+                source: String::from("external-trigger-plugin"),
+                occurred_at_ms: 1_710_300_150_000,
+                staged_at_ms: 1_710_300_150_001,
+                checkpoint: Some(String::from("cp-staged-1")),
+                payload: serde_json::json!({"symbol": "ETHUSDT"}),
+                dedup_key: None,
+                dedup_window_ms: None,
+                cooldown_key: None,
+                cooldown_ms: None,
+                accepted_at_ms: None,
+                last_error: None,
+            })
+            .expect("staged external trigger row should persist before serve turn");
+
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            runtime.storage_config.clone(),
+            String::from("test-owner"),
+            i64::from(std::process::id()),
+            1_710_300_150_000,
+        );
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let desired_external_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &collect_external_trigger_manifests(&runtime.definitions.plugins),
+        )
+        .expect("external trigger desired sessions should build");
+        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_150_000);
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_150_010,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("serve should bridge staged external rows through trigger acceptance");
+
+        assert!(serve_output
+            .stdout()
+            .contains("serve completed: executed 2 accepted trigger event(s)"));
+        assert!(serve_output
+            .stdout()
+            .contains("event_id=external-trigger-e2e:event-staged"));
+
+        let pending = runtime
+            .state_store
+            .list_pending_staged_trigger_event_records("external-trigger-e2e", 10)
+            .expect("pending staged rows should be queryable after serve bridge");
+        assert!(pending.is_empty());
 
         unsafe {
             std::env::remove_var("CHAINBOT_CONFIG_DIR");
@@ -3522,6 +3904,108 @@ mod tests {
         assert!(matches!(snapshot.state, ServeLeaseState::Active));
         assert_eq!(snapshot.owner_id.as_deref(), Some("owner-renew"));
         assert_eq!(snapshot.expires_at_ms, Some(1_710_300_240_100));
+    }
+
+    #[test]
+    fn daemon_composes_external_trigger_supervisor_from_runtime_definitions() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-external-trigger-supervisor-composition");
+        let request = CliRequest {
+            command: CliCommand::Serve,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        };
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let runtime = request
+            .load_runtime_context()
+            .expect("runtime load should succeed for supervisor composition");
+        let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
+        let desired_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &trigger_manifests,
+        )
+        .expect("external trigger desired sessions should build");
+        let mut supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let report = supervisor.reconcile(desired_sessions, 1_710_300_300_000);
+
+        assert!(
+            report
+                .started
+                .iter()
+                .any(|trigger_id| trigger_id == "external-trigger-e2e"),
+            "daemon composition should include enabled external trigger session"
+        );
+        assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn daemon_teardown_reconciles_external_trigger_sessions_to_empty() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-external-trigger-supervisor-teardown");
+        let request = CliRequest {
+            command: CliCommand::Serve,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            observe_request: None,
+            daemon_owner_id: None,
+        };
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let runtime = request
+            .load_runtime_context()
+            .expect("runtime load should succeed for supervisor teardown coverage");
+        let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
+        let desired_sessions = build_desired_external_trigger_sessions(
+            &runtime.definitions.triggers,
+            &trigger_manifests,
+        )
+        .expect("external trigger desired sessions should build");
+        let mut supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let start_report = supervisor.reconcile(desired_sessions, 1_710_300_400_000);
+
+        assert!(
+            start_report
+                .started
+                .iter()
+                .any(|trigger_id| trigger_id == "external-trigger-e2e"),
+            "fixture should start at least one external trigger session before teardown"
+        );
+        assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
+
+        teardown_external_trigger_sessions(&mut supervisor, 1_710_300_400_250);
+        assert!(
+            supervisor.sessions().is_empty(),
+            "daemon lifecycle teardown should reconcile external sessions to empty"
+        );
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
     }
 
     fn prepare_fixture_root(case_name: &str, root_name: &str) -> PathBuf {

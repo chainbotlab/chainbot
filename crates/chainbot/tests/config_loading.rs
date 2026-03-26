@@ -217,6 +217,79 @@ fn plugin_manifest_loading_preserves_optional_richer_metadata() {
 }
 
 #[test]
+fn plugin_manifest_loading_accepts_external_trigger_wasm_runtime_metadata() {
+    let root = unique_test_root("external-trigger-wasm-runtime-metadata");
+    write_valid_fixture_with_plugin_package(&root);
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"external_plugin\"\nsource = \"quote-plugin\"\nplugin = \"quote-plugin\"\nworkflow_id = \"wf-alpha\"\nenabled = true\n",
+    )
+    .expect("external trigger fixture should be writable");
+    fs::write(
+        root.join("plugins").join("quote-plugin").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\n\n[trigger_runtime]\nlifecycle = \"wasm_daemon_persistent_session\"\npush_callback = \"host_callback\"\ndurable_ack = \"after_store_persist\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\nmodule = \"bin/trigger.wasm\"\n\n[event_schema]\nsummary = \"External trigger payload\"\nfields = [\"symbol\", \"price\"]\n",
+    )
+    .expect("external trigger plugin config should be writable");
+
+    let bundle = RootDefinitionBundle::load(&RootLayout::from_root(root))
+        .expect("external trigger wasm runtime metadata should load");
+    assert_eq!(bundle.plugins.len(), 1);
+    assert_eq!(bundle.plugins[0].kind, "external_trigger");
+}
+
+#[test]
+fn plugin_manifest_loading_rejects_external_trigger_runtime_missing_lifecycle() {
+    let root = unique_test_root("external-trigger-runtime-missing-lifecycle");
+    write_valid_fixture_with_plugin_package(&root);
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"external_plugin\"\nsource = \"quote-plugin\"\nplugin = \"quote-plugin\"\nworkflow_id = \"wf-alpha\"\nenabled = true\n",
+    )
+    .expect("external trigger fixture should be writable");
+    fs::write(
+        root.join("plugins").join("quote-plugin").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\n\n[trigger_runtime]\npush_callback = \"host_callback\"\ndurable_ack = \"after_store_persist\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\nmodule = \"bin/trigger.wasm\"\n\n[event_schema]\nsummary = \"External trigger payload\"\nfields = [\"symbol\", \"price\"]\n",
+    )
+    .expect("external trigger plugin config should be writable");
+
+    let error = RootDefinitionBundle::load(&RootLayout::from_root(root))
+        .expect_err("missing lifecycle semantics should be rejected");
+    assert!(matches!(
+        error,
+        ContractError::NodePluginInvalidField {
+            field: "plugin.trigger_runtime.lifecycle",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn plugin_manifest_loading_rejects_external_trigger_runtime_missing_contract() {
+    let root = unique_test_root("external-trigger-runtime-missing-contract");
+    write_valid_fixture_with_plugin_package(&root);
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"external_plugin\"\nsource = \"quote-plugin\"\nplugin = \"quote-plugin\"\nworkflow_id = \"wf-alpha\"\nenabled = true\n",
+    )
+    .expect("external trigger fixture should be writable");
+    fs::write(
+        root.join("plugins").join("quote-plugin").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/external_trigger.sh\"\n\n[event_schema]\nsummary = \"External trigger payload\"\nfields = [\"symbol\", \"price\"]\n",
+    )
+    .expect("external trigger plugin config should be writable");
+
+    let error = RootDefinitionBundle::load(&RootLayout::from_root(root))
+        .expect_err("missing trigger_runtime contract should be rejected");
+    assert!(matches!(
+        error,
+        ContractError::NodePluginInvalidField {
+            field: "plugin.trigger_runtime.lifecycle",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn invalid_toml_fixture_rejected() {
     let invalid_root = unique_test_root("toml-invalid-syntax");
     write_valid_fixture(&invalid_root);
