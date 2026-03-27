@@ -8,7 +8,7 @@
 //! Serves as the binary entrypoint for the `chainbot` executable.
 
 fn main() -> std::process::ExitCode {
-    match chainbot::cli::run_from_env() {
+    match chainbot::app::cli::run_from_env() {
         Ok(output) => {
             if !output.stdout().is_empty() {
                 print!("{}", output.stdout());
