@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Secret decryptors, secret references, raw node input values, and builtin secret-decrypt mode.
+//!
+//! [OUTPUT]
+//! Resolves builtin node inputs into materialized JSON values plus tracked secret values for downstream redaction.
+//!
+//! [ROLE]
+//! Owns secret-aware input materialization shared by builtin node handlers.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 

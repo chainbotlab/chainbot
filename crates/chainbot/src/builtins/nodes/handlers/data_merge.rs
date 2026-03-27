@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.merge requests containing merge candidates and merge operation metadata.
+//!
+//! [OUTPUT]
+//! Produces merged structured data outputs or usage errors for unsupported merge operations.
+//!
+//! [ROLE]
+//! Implements the builtin data.merge node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

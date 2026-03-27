@@ -11,9 +11,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
-use chainbot::state::{RunRecordSummary, RunStatus, TriggerEventRecord};
-use chainbot::state_db::RuntimeStateStore;
+use chainbot::domain::state::{RunRecordSummary, RunStatus, TriggerEventRecord};
+use chainbot::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::infrastructure::state::RuntimeStateStore;
 use rusqlite::Connection;
 
 #[test]
@@ -73,7 +73,9 @@ fn sqlite_runtime_read_queries_keep_indexed_plans() {
          LIMIT 5",
     );
     assert!(
-        run_plan.iter().any(|detail| detail.contains("idx_run_summaries_started_at")),
+        run_plan
+            .iter()
+            .any(|detail| detail.contains("idx_run_summaries_started_at")),
         "recent run summaries should use started_at index: {run_plan:?}"
     );
 
@@ -178,12 +180,15 @@ fn repeated_runtime_observation_remains_read_only() {
             store
                 .archived_history_counts()
                 .expect("archive counts should stay readable"),
-            chainbot::state_db::RuntimeHistoryArchiveCounts::default()
+            chainbot::infrastructure::state::RuntimeHistoryArchiveCounts::default()
         );
     }
 
     assert_eq!(
-        store.list_run_summaries().expect("active runs should remain intact").len(),
+        store
+            .list_run_summaries()
+            .expect("active runs should remain intact")
+            .len(),
         1
     );
     assert_eq!(

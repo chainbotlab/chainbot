@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.math requests carrying numeric operands and math operation names.
+//!
+//! [OUTPUT]
+//! Computes numeric results for supported math operations or returns usage and contract errors.
+//!
+//! [ROLE]
+//! Implements the builtin data.math node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

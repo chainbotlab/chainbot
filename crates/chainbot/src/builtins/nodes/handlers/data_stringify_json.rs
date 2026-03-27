@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.stringify_json requests carrying structured JSON values and operation metadata.
+//!
+//! [OUTPUT]
+//! Produces stringified JSON output or usage errors for unsupported operations.
+//!
+//! [ROLE]
+//! Implements the builtin data.stringify_json node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

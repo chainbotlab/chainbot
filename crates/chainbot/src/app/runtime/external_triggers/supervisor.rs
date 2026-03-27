@@ -11,17 +11,18 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::errors::ContractError;
-use crate::plugin::{PluginManifest, TriggerRuntimeLifecycle};
-use crate::state::StagedTriggerEventRecord;
-use crate::state_db::RuntimeStateStore;
-use crate::trigger::{TriggerDefinition, TriggerKind};
-use crate::trigger_wasm::{
+#[cfg(test)]
+use crate::app::runtime::external_triggers::wasmtime::push_event_with_host_callback;
+use crate::app::runtime::external_triggers::wasmtime::{
     host_push_result_from_staged_append, map_control_flow_source_to_push_outcome,
-    push_event_with_host_callback, HostPushControlFlowSource, HostPushError, HostPushErrorSource,
-    HostPushOutcome, HostPushResult, TriggerPushHost, WasmGuestTransportEnvelope,
-    WasmTriggerSession, WasmTriggerSessionConfig,
+    HostPushControlFlowSource, HostPushError, HostPushErrorSource, HostPushOutcome, HostPushResult,
+    TriggerPushHost, WasmGuestTransportEnvelope, WasmTriggerSession, WasmTriggerSessionConfig,
 };
+use crate::domain::state::StagedTriggerEventRecord;
+use crate::domain::trigger::{TriggerDefinition, TriggerKind};
+use crate::errors::ContractError;
+use crate::infrastructure::state::RuntimeStateStore;
+use crate::plugin::{PluginManifest, TriggerRuntimeLifecycle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalTriggerSupervisorBudget {
@@ -66,7 +67,6 @@ pub struct ExternalTriggerSessionSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalTriggerSessionState {
-    Starting,
     Active,
     Stopping,
 }
@@ -74,9 +74,9 @@ pub enum ExternalTriggerSessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalTriggerPushControlState {
     Ready,
+    #[cfg(test)]
     QueueSaturated,
     BudgetExhausted,
-    ShuttingDown,
     LeaseLost,
 }
 
@@ -124,16 +124,8 @@ impl ExternalTriggerSupervisor {
         }
     }
 
-    pub fn owner_id(&self) -> &str {
-        &self.owner_id
-    }
-
     pub fn sessions(&self) -> &BTreeMap<String, ExternalTriggerSession> {
         &self.sessions
-    }
-
-    pub fn settings(&self) -> ExternalTriggerSupervisorSettings {
-        self.settings
     }
 
     pub fn start_session(&mut self, spec: ExternalTriggerSessionSpec, now_ms: i64) -> bool {
@@ -177,6 +169,7 @@ impl ExternalTriggerSupervisor {
         self.sessions.remove(trigger_id).is_some()
     }
 
+    #[cfg(test)]
     pub fn record_session_turn(&mut self, trigger_id: &str, now_ms: i64) -> bool {
         if let Some(session) = self.sessions.get_mut(trigger_id) {
             if let Some(wasm_session) = session.wasm_session.as_mut() {
@@ -188,6 +181,7 @@ impl ExternalTriggerSupervisor {
         false
     }
 
+    #[cfg(test)]
     pub fn record_session_turns(&mut self, now_ms: i64) {
         for session in self.sessions.values_mut() {
             if let Some(wasm_session) = session.wasm_session.as_mut() {
@@ -324,6 +318,7 @@ impl ExternalTriggerSupervisor {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn set_push_control_state(
         &mut self,
         trigger_id: &str,
@@ -336,6 +331,7 @@ impl ExternalTriggerSupervisor {
         true
     }
 
+    #[cfg(test)]
     pub fn push_wasm_guest_event<F>(
         &mut self,
         trigger_id: &str,
@@ -466,14 +462,12 @@ fn classify_push_control_flow_source(
     };
     state_source.or_else(|| match session.push_control_state {
         ExternalTriggerPushControlState::Ready => None,
+        #[cfg(test)]
         ExternalTriggerPushControlState::QueueSaturated => {
             Some(HostPushControlFlowSource::QueueSaturated)
         }
         ExternalTriggerPushControlState::BudgetExhausted => {
             Some(HostPushControlFlowSource::BudgetExhausted)
-        }
-        ExternalTriggerPushControlState::ShuttingDown => {
-            Some(HostPushControlFlowSource::DaemonShuttingDown)
         }
         ExternalTriggerPushControlState::LeaseLost => Some(HostPushControlFlowSource::LeaseLost),
     })
@@ -501,7 +495,7 @@ fn decode_wasm_guest_event_to_staged_record(
         occurred_at_ms: envelope.occurred_at_ms,
         staged_at_ms,
         checkpoint: envelope.checkpoint,
-        payload: map_definition_input_payload(definition, &envelope.payload),
+        payload: envelope.payload,
         dedup_key: envelope.dedup_key,
         dedup_window_ms: envelope.dedup_window_ms,
         cooldown_key: envelope.cooldown_key,
@@ -509,36 +503,6 @@ fn decode_wasm_guest_event_to_staged_record(
         accepted_at_ms: None,
         last_error: None,
     })
-}
-
-fn map_definition_input_payload(
-    definition: &TriggerDefinition,
-    payload: &serde_json::Value,
-) -> serde_json::Value {
-    if definition.input_mapping.is_empty() {
-        return payload.clone();
-    }
-
-    let mut mapped = serde_json::Map::new();
-    for (target, selector) in &definition.input_mapping {
-        if let Some(value) = select_payload_value(payload, selector) {
-            mapped.insert(target.clone(), value.clone());
-        }
-    }
-    serde_json::Value::Object(mapped)
-}
-
-fn select_payload_value<'a>(payload: &'a serde_json::Value, selector: &str) -> Option<&'a serde_json::Value> {
-    if selector == "payload" {
-        return Some(payload);
-    }
-    let remainder = selector.strip_prefix("payload.")?;
-
-    let mut current = payload;
-    for segment in remainder.split('.') {
-        current = current.get(segment)?;
-    }
-    Some(current)
 }
 
 struct DurableStagedEventHost<'a, F> {
@@ -687,7 +651,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+    use crate::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig};
 
     #[test]
     fn stop_session_removes_existing_trigger_session() {
@@ -1131,48 +1095,6 @@ mod tests {
         );
 
         assert_eq!(outcome, HostPushOutcome::RetryableBackpressure);
-
-        drop(state_store);
-        let _ = fs::remove_file(sqlite_path);
-    }
-
-    #[test]
-    fn wasm_guest_push_returns_terminal_shutting_down_when_control_state_marks_shutdown() {
-        let mut supervisor = ExternalTriggerSupervisor::new("daemon-owner");
-        assert!(supervisor.start_session(
-            ExternalTriggerSessionSpec {
-                trigger_id: String::from("tr-wasm"),
-                plugin_id: String::from("plugin-wasm"),
-                runtime: ExternalTriggerSessionRuntime::Wasm,
-                wasm_component: Some(String::from("trigger_wasm_component")),
-            },
-            100,
-        ));
-        assert!(supervisor
-            .set_push_control_state("tr-wasm", ExternalTriggerPushControlState::ShuttingDown,));
-
-        let sqlite_path = unique_sqlite_path("guest-push-shutdown-control-state");
-        let storage_config = RuntimeStorageConfig {
-            backend: RuntimeStorageBackend::Local {
-                database_path: sqlite_path.clone(),
-            },
-            history_retention: None,
-            raw_debug_enabled: false,
-            raw_debug_artifacts_dir: None,
-        };
-        let mut state_store = RuntimeStateStore::open(&storage_config, 120)
-            .expect("runtime state store should open for callback outcome tests");
-
-        let outcome = supervisor.push_wasm_guest_event(
-            "tr-wasm",
-            b"transport-envelope",
-            &mut state_store,
-            |_session, _event_bytes| {
-                panic!("decode callback should not run when session is shutting down")
-            },
-        );
-
-        assert_eq!(outcome, HostPushOutcome::TerminalShuttingDown);
 
         drop(state_store);
         let _ = fs::remove_file(sqlite_path);
@@ -1723,14 +1645,15 @@ mod tests {
         let settings = ExternalTriggerSupervisorSettings {
             budget: ExternalTriggerSupervisorBudget::default(),
             wasm_session: WasmTriggerSessionConfig {
-                store_limiter: crate::trigger_wasm::WasmStoreLimiterConfig {
-                    memory_size_bytes: 512 * 1024,
-                    table_elements: 32,
-                    instances: 2,
-                    tables: 4,
-                    memories: 4,
-                    trap_on_grow_failure: true,
-                },
+                store_limiter:
+                    crate::app::runtime::external_triggers::wasmtime::WasmStoreLimiterConfig {
+                        memory_size_bytes: 512 * 1024,
+                        table_elements: 32,
+                        instances: 2,
+                        tables: 4,
+                        memories: 4,
+                        trap_on_grow_failure: true,
+                    },
             },
         };
         let mut supervisor = ExternalTriggerSupervisor::with_settings("daemon-owner", settings);

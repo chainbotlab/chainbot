@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin identity requests carrying already-resolved node inputs.
+//!
+//! [OUTPUT]
+//! Returns the request inputs unchanged as builtin node outputs.
+//!
+//! [ROLE]
+//! Implements the builtin identity node behavior.
+
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};
 use crate::errors::ContractError;
 

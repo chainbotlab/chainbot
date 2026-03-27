@@ -5,7 +5,7 @@
 //! Builds stable catalog list/show read models plus human-readable renderers for builtin and plugin discoverability.
 //!
 //! [ROLE]
-//! Owns the CLI capability-discovery surface independently from runtime registry internals.
+//! Owns the app-layer capability-discovery read model independently from runtime registry internals.
 
 use std::collections::BTreeMap;
 

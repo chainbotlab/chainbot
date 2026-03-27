@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.template requests containing template strings, input data, and operation metadata.
+//!
+//! [OUTPUT]
+//! Renders templated outputs from structured inputs or returns usage and contract errors.
+//!
+//! [ROLE]
+//! Implements the builtin data.template node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

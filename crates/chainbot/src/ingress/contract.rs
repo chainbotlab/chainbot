@@ -13,9 +13,9 @@ use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
+use crate::domain::trigger::TriggerDefinition;
 use crate::errors::ContractError;
-use crate::state_db::RuntimeStateError;
-use crate::trigger::TriggerDefinition;
+use crate::infrastructure::state::RuntimeStateError;
 
 pub const BUILTIN_TRIGGER_WEBHOOK_KIND: &str = "webhook";
 pub const BUILTIN_TRIGGER_WEBSOCKET_KIND: &str = "websocket";

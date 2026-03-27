@@ -5,7 +5,7 @@
 //! Exposes builtin node and builtin trigger module trees, plus crate-level convenience re-exports for runtime assembly.
 //!
 //! [ROLE]
-//! Defines the unified builtin namespace outside the workflow execution and trigger planes.
+//! Defines the unified builtin namespace consumed by the workflow execution and trigger planes.
 
 pub mod nodes;
 pub mod triggers;

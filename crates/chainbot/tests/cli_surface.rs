@@ -15,9 +15,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::{RuntimeStorageBackend, RuntimeStorageConfig};
-use chainbot::state::{RunRecordSummary, RunStatus, TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX};
-use chainbot::state_db::RuntimeStateStore;
+use rusqlite::{params, Connection, OptionalExtension};
+
+const SERVE_OWNER_ID_PREFIX: &str = "chainbot-serve-pid-";
 
 fn acquire_fixture_lock() -> MutexGuard<'static, ()> {
     fixture_lock()
@@ -579,46 +579,32 @@ fn observe_json_reports_recent_runtime_history() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
     let root = basic_root().to_path_buf();
-    let mut state_store =
-        RuntimeStateStore::open(&storage_config_for_root(&root), 1_710_555_000_000)
-            .expect("runtime state store should open for observe fixture");
-
-    state_store
-        .write_run_summary(&RunRecordSummary {
-            schema_version: "1.0.0".to_owned(),
-            run_id: "observe-run-1".to_owned(),
-            workflow_id: "wf-alpha".to_owned(),
-            status: RunStatus::Succeeded,
-            started_at_ms: 1_710_555_000_000,
-            finished_at_ms: Some(1_710_555_001_000),
-        })
-        .expect("run summary fixture should persist");
-    state_store
-        .append_workflow_log_entry(
-            "observe-run-1",
-            "run_finished",
-            "fixture completed",
-            1_710_555_001_000,
-        )
-        .expect("workflow log fixture should persist");
-    state_store
-        .write_trigger_record(&chainbot::state::TriggerEventRecord {
-            schema_version: "1.0.0".to_owned(),
-            run_id: "observe-run-1".to_owned(),
-            sequence: 1,
-            trigger_id: "tr-market".to_owned(),
-            workflow_id: "wf-alpha".to_owned(),
-            event_id: "event-observe-1".to_owned(),
-            checkpoint: None,
-            source: "builtin.market".to_owned(),
-            accepted_at_ms: 1_710_555_000_500,
-            payload: serde_json::json!({"price": 101}),
-            dedup_key: None,
-            dedup_expires_at_ms: None,
-            cooldown_key: None,
-            cooldown_expires_at_ms: None,
-        })
-        .expect("trigger event fixture should persist");
+    upsert_run_summary(
+        &root,
+        "observe-run-1",
+        "wf-alpha",
+        "succeeded",
+        1_710_555_000_000,
+        Some(1_710_555_001_000),
+    );
+    append_workflow_log_entry(
+        &root,
+        "observe-run-1",
+        "run_finished",
+        "fixture completed",
+        1_710_555_001_000,
+    );
+    insert_trigger_event_record(
+        &root,
+        "tr-market",
+        1,
+        "observe-run-1",
+        "wf-alpha",
+        "event-observe-1",
+        "builtin.market",
+        1_710_555_000_500,
+        serde_json::json!({"price": 101}),
+    );
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", &root)
@@ -645,20 +631,14 @@ fn repeated_status_json_reads_remain_read_only() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
     let root = basic_root().to_path_buf();
-    let mut state_store =
-        RuntimeStateStore::open(&storage_config_for_root(&root), 1_710_556_000_000)
-            .expect("runtime state store should open for status soak");
-
-    state_store
-        .write_run_summary(&RunRecordSummary {
-            schema_version: "1.0.0".to_owned(),
-            run_id: "status-soak-run-1".to_owned(),
-            workflow_id: "wf-alpha".to_owned(),
-            status: RunStatus::Succeeded,
-            started_at_ms: 1_710_556_000_000,
-            finished_at_ms: Some(1_710_556_001_000),
-        })
-        .expect("status soak run should persist");
+    upsert_run_summary(
+        &root,
+        "status-soak-run-1",
+        "wf-alpha",
+        "succeeded",
+        1_710_556_000_000,
+        Some(1_710_556_001_000),
+    );
 
     for _ in 0..64 {
         let output = Command::new(chainbot_bin())
@@ -673,20 +653,8 @@ fn repeated_status_json_reads_remain_read_only() {
         assert_eq!(payload["serve"]["state"], "idle");
     }
 
-    assert_eq!(
-        state_store
-            .list_run_summaries()
-            .expect("run summaries should remain stable after status soak")
-            .len(),
-        1
-    );
-    assert_eq!(
-        state_store
-            .list_recent_trigger_records(5, None)
-            .expect("trigger history should remain empty after status soak")
-            .len(),
-        0
-    );
+    assert_eq!(count_run_summaries(&root), 1);
+    assert_eq!(count_trigger_event_records(&root), 0);
 }
 
 #[test]
@@ -1001,12 +969,9 @@ fn status_json_reports_active_serve_lease() {
         .expect("system time should be after UNIX_EPOCH")
         .as_millis()
         .min(i64::MAX as u128) as i64;
-    let mut state_store = RuntimeStateStore::open(&storage_config_for_root(&basic_root()), now_ms)
-        .expect("runtime state store should open for status fixture");
+    ensure_runtime_db_ready(&basic_root());
     let owner_id = format!("{SERVE_OWNER_ID_PREFIX}{}", std::process::id());
-    state_store
-        .try_acquire_serve_lease(&owner_id, now_ms, 60_000)
-        .expect("serve lease should be acquired for status output");
+    upsert_serve_lease(&basic_root(), &owner_id, now_ms, now_ms + 60_000);
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -1034,19 +999,14 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
 
-    let mut state_store =
-        RuntimeStateStore::open(&storage_config_for_root(&basic_root()), 1_710_000_040_000)
-            .expect("runtime state store should initialize for status mutation test");
-    state_store
-        .write_run_summary(&RunRecordSummary {
-            schema_version: "1.0.0".to_string(),
-            run_id: "run-incomplete".to_string(),
-            workflow_id: "wf-alpha".to_string(),
-            status: RunStatus::Running,
-            started_at_ms: 1_710_000_040_000,
-            finished_at_ms: None,
-        })
-        .expect("incomplete run summary should persist");
+    upsert_run_summary(
+        &basic_root(),
+        "run-incomplete",
+        "wf-alpha",
+        "running",
+        1_710_000_040_000,
+        None,
+    );
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -1056,14 +1016,9 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
 
     assert!(output.status.success());
 
-    let summaries = state_store
-        .list_run_summaries()
-        .expect("run summaries should remain readable after status");
-    let summary = summaries
-        .into_iter()
-        .find(|summary| summary.run_id == "run-incomplete")
+    let status = read_run_status(&basic_root(), "run-incomplete")
         .expect("run summary should remain present after status");
-    assert_eq!(summary.status, RunStatus::Running);
+    assert_eq!(status, "running");
 }
 
 #[test]
@@ -1071,20 +1026,13 @@ fn status_reads_trigger_snapshot_without_record_scan_side_effects() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
 
-    let mut state_store =
-        RuntimeStateStore::open(&storage_config_for_root(&basic_root()), 1_710_000_050_000)
-            .expect("runtime state store should initialize for trigger snapshot status test");
-
-    let mut snapshot = TriggerSnapshotRecord::new("tr-market");
-    snapshot.last_event_id = Some("event-snapshot".to_string());
-    snapshot.last_accepted_at_ms = Some(1_710_000_050_000);
-    snapshot.last_sequence = 4;
-    snapshot
-        .accepted_event_ids
-        .insert("event-snapshot".to_string());
-    state_store
-        .write_trigger_snapshot(&snapshot)
-        .expect("trigger snapshot should persist for status output");
+    upsert_trigger_snapshot(
+        &basic_root(),
+        "tr-market",
+        Some("event-snapshot"),
+        Some(1_710_000_050_000),
+        4,
+    );
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -1107,20 +1055,14 @@ fn list_runs_does_not_recover_or_promote_staged_summaries() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
 
-    let mut state_store =
-        RuntimeStateStore::open(&storage_config_for_root(&basic_root()), 1_710_000_060_000)
-            .expect("runtime state store should initialize for list-runs read-only test");
-
-    state_store
-        .write_run_summary(&RunRecordSummary {
-            schema_version: "1.0.0".to_string(),
-            run_id: "run-committed".to_string(),
-            workflow_id: "wf-alpha".to_string(),
-            status: RunStatus::Running,
-            started_at_ms: 1_710_000_060_000,
-            finished_at_ms: None,
-        })
-        .expect("committed run summary should persist");
+    upsert_run_summary(
+        &basic_root(),
+        "run-committed",
+        "wf-alpha",
+        "running",
+        1_710_000_060_000,
+        None,
+    );
 
     let output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", basic_root())
@@ -1428,15 +1370,188 @@ fn ensure_basic_root_fixture() {
     .expect("plugin fixture should be writable");
 }
 
-fn storage_config_for_root(root: &Path) -> RuntimeStorageConfig {
-    RuntimeStorageConfig {
-        backend: RuntimeStorageBackend::Local {
-            database_path: root.join("state").join("runtime.sqlite3"),
-        },
-        history_retention: None,
-        raw_debug_enabled: false,
-        raw_debug_artifacts_dir: None,
-    }
+fn runtime_db_path(root: &Path) -> PathBuf {
+    root.join("state").join("runtime.sqlite3")
+}
+
+fn ensure_runtime_db_ready(root: &Path) {
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", root)
+        .args(["status", "--json"])
+        .output()
+        .expect("status --json should execute to prepare runtime DB");
+    assert!(output.status.success());
+}
+
+fn open_runtime_db(root: &Path) -> Connection {
+    ensure_runtime_db_ready(root);
+    Connection::open(runtime_db_path(root)).expect("runtime sqlite database should open")
+}
+
+fn upsert_run_summary(
+    root: &Path,
+    run_id: &str,
+    workflow_id: &str,
+    status: &str,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+) {
+    let connection = open_runtime_db(root);
+    connection
+        .execute(
+            "INSERT INTO run_summaries (schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(run_id)
+             DO UPDATE SET schema_version = excluded.schema_version,
+                           workflow_id = excluded.workflow_id,
+                           status = excluded.status,
+                           started_at_ms = excluded.started_at_ms,
+                           finished_at_ms = excluded.finished_at_ms",
+            params!["1.0.0", run_id, workflow_id, status, started_at_ms, finished_at_ms],
+        )
+        .expect("run summary should upsert");
+}
+
+fn append_workflow_log_entry(
+    root: &Path,
+    run_id: &str,
+    event: &str,
+    message: &str,
+    occurred_at_ms: i64,
+) {
+    let connection = open_runtime_db(root);
+    let sequence: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM workflow_runtime_logs WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .expect("next workflow log sequence should query");
+    connection
+        .execute(
+            "INSERT INTO workflow_runtime_logs (run_id, sequence, event, message, occurred_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![run_id, sequence, event, message, occurred_at_ms],
+        )
+        .expect("workflow log should insert");
+}
+
+fn insert_trigger_event_record(
+    root: &Path,
+    trigger_id: &str,
+    sequence: i64,
+    run_id: &str,
+    workflow_id: &str,
+    event_id: &str,
+    source: &str,
+    accepted_at_ms: i64,
+    payload: serde_json::Value,
+) {
+    let connection = open_runtime_db(root);
+    connection
+        .execute(
+            "INSERT INTO trigger_event_records (
+                trigger_id, sequence, schema_version, run_id, workflow_id, event_id,
+                checkpoint, source, accepted_at_ms, payload_json,
+                dedup_key, dedup_expires_at_ms, cooldown_key, cooldown_expires_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, NULL, NULL, NULL, NULL)",
+            params![
+                trigger_id,
+                sequence,
+                "1.0.0",
+                run_id,
+                workflow_id,
+                event_id,
+                source,
+                accepted_at_ms,
+                serde_json::to_string(&payload).expect("trigger payload should serialize")
+            ],
+        )
+        .expect("trigger event should insert");
+}
+
+fn upsert_trigger_snapshot(
+    root: &Path,
+    trigger_id: &str,
+    last_event_id: Option<&str>,
+    last_accepted_at_ms: Option<i64>,
+    last_sequence: i64,
+) {
+    let connection = open_runtime_db(root);
+    let accepted = last_event_id
+        .map(|event_id| vec![event_id.to_owned()])
+        .unwrap_or_default();
+    connection
+        .execute(
+            "INSERT INTO trigger_snapshots (
+                trigger_id, schema_version, last_event_id, last_accepted_at_ms, last_sequence,
+                accepted_event_ids_json, dedup_tokens_json, cooldown_tokens_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(trigger_id)
+             DO UPDATE SET schema_version = excluded.schema_version,
+                           last_event_id = excluded.last_event_id,
+                           last_accepted_at_ms = excluded.last_accepted_at_ms,
+                           last_sequence = excluded.last_sequence,
+                           accepted_event_ids_json = excluded.accepted_event_ids_json,
+                           dedup_tokens_json = excluded.dedup_tokens_json,
+                           cooldown_tokens_json = excluded.cooldown_tokens_json",
+            params![
+                trigger_id,
+                "1.0.0",
+                last_event_id,
+                last_accepted_at_ms,
+                last_sequence,
+                serde_json::to_string(&accepted).expect("accepted ids should serialize"),
+                "[]",
+                "[]"
+            ],
+        )
+        .expect("trigger snapshot should upsert");
+}
+
+fn upsert_serve_lease(root: &Path, owner_id: &str, acquired_at_ms: i64, expires_at_ms: i64) {
+    let connection = open_runtime_db(root);
+    connection
+        .execute(
+            "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(lease_key)
+             DO UPDATE SET owner_id = excluded.owner_id,
+                           acquired_at_ms = excluded.acquired_at_ms,
+                           expires_at_ms = excluded.expires_at_ms",
+            params!["serve", owner_id, acquired_at_ms, expires_at_ms],
+        )
+        .expect("serve lease should upsert");
+}
+
+fn count_run_summaries(root: &Path) -> usize {
+    let connection = open_runtime_db(root);
+    connection
+        .query_row("SELECT COUNT(*) FROM run_summaries", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("run summary count should query") as usize
+}
+
+fn count_trigger_event_records(root: &Path) -> usize {
+    let connection = open_runtime_db(root);
+    connection
+        .query_row("SELECT COUNT(*) FROM trigger_event_records", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("trigger event count should query") as usize
+}
+
+fn read_run_status(root: &Path, run_id: &str) -> Option<String> {
+    let connection = open_runtime_db(root);
+    connection
+        .query_row(
+            "SELECT status FROM run_summaries WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .expect("run status should query")
 }
 
 fn fixture_lock() -> &'static Mutex<()> {

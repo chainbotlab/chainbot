@@ -1,96 +1,60 @@
 //! [INPUT]
-//! Workflow definitions, normalized run requests, state persistence, secret resolution, plugin hosts, worker hosts, and builtin node handlers.
+//! Validated workflow definitions, normalized run requests, builtin registry dispatch, plugin manifests, and secret runtime inputs.
 //!
 //! [OUTPUT]
-//! Plans node execution waves, dispatches builtin and external work, and returns structured run results with scheduler state transitions.
+//! Executes scheduler waves and node orchestration for builtin/plugin/subflow nodes with deterministic run reports.
 //!
 //! [ROLE]
-//! Keeps orchestration authority in Rust for the workflow execution plane.
+//! Owns app-layer workflow execution orchestration over domain runtime contracts.
 
+// Execution Pipeline
+//
+// NormalizedRunRequest
+//     |
+//     v
+// +----------------------------------------------------------------+
+// |  execute_internal  — depth guard, cycle detection, stack push  |
+// +----------------------------------------------------------------+
+//     |
+//     v
+// +----------------------------------------------------------------+
+// |  execute_workflow_frame  — DAG evaluation, wave scheduling     |
+// |    - evaluate_dependency_decision per node (Waiting/Ready/Skip)|
+// |    - schedule_ready_nodes in waves                             |
+// +----------------------------------------------------------------+
+//     |
+//     v
+// +----------------------------------------------------------------+
+// |  execute_node  — input resolution, kind dispatch               |
+// |    - builtin: builtin_registry.dispatch (kind -> BuiltinNodeRequest)
+// |    - plugin:   ExternalNodePluginHost::execute
+// |    - subflow:  recursive execute_internal call (depth + 1)
+// +----------------------------------------------------------------+
+//     |
+//     v
+// WorkflowRunReport { run_id, workflow_id, status, node_states,
+//                     node_outputs, node_failures, runtime_namespaces, schedule_waves }
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use crate::builtins::nodes::input_resolver::resolve_node_inputs;
 use crate::builtins::nodes::SecretDecryptMode;
-pub use crate::builtins::nodes::contract::{
-    BuiltinNodeRegistry, BuiltinNodeRequest, BuiltinNodeResult,
-};
+use crate::builtins::nodes::contract::{BuiltinNodeRequest, BuiltinNodeResult};
 use crate::builtins::nodes::dispatch::builtin_dispatch_kind;
-use crate::errors::{assert_required_major, ContractError};
+pub use crate::builtins::nodes::registry_store::BuiltinNodeRegistry;
+use crate::domain::runtime::{
+    NodeDefinition, NormalizedRunRequest, ScheduledNodeState, WorkflowRunReport,
+    WorkflowRunStatus,
+};
+use crate::domain::workflow::{DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, WorkflowDefinition};
+use crate::errors::ContractError;
 use crate::plugin::{
     ExternalNodePluginHost, ExternalNodePluginRequest, PluginKind, PluginManifest,
     NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
 };
-use crate::workflow::{
-    DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, SubflowContract, VariableBinding,
-    WhenCondition, WorkflowDefinition,
-};
 
-pub const CURRENT_API_MAJOR: u64 = 2;
 pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NodeDefinition {
-    #[serde(rename = "manifest_version")]
-    pub api_version: String,
-    #[serde(rename = "id")]
-    pub node_id: String,
-    pub kind: String,
-    #[serde(rename = "plugin")]
-    pub plugin_id: String,
-    pub operation: String,
-    #[serde(default)]
-    pub depends_mode: DependsMode,
-    pub depends_on: Vec<String>,
-    #[serde(default)]
-    pub inputs: Vec<VariableBinding>,
-    #[serde(default)]
-    pub when: Option<WhenCondition>,
-    #[serde(default)]
-    pub subflow: Option<SubflowContract>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct NormalizedRunRequest {
-    pub run_id: String,
-    pub workflow_id: String,
-    pub cli_args: BTreeMap<String, serde_json::Value>,
-    pub manual_invocation_input: BTreeMap<String, serde_json::Value>,
-    pub trigger_payload_mapping: BTreeMap<String, serde_json::Value>,
-    pub subflow_input: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowRunStatus {
-    Succeeded,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScheduledNodeState {
-    Pending,
-    Blocked,
-    Ready,
-    Running,
-    Succeeded,
-    Skipped,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkflowRunReport {
-    pub run_id: String,
-    pub workflow_id: String,
-    pub status: WorkflowRunStatus,
-    pub node_states: BTreeMap<String, ScheduledNodeState>,
-    pub node_outputs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
-    pub node_failures: BTreeMap<String, String>,
-    pub runtime_namespaces: RuntimeVariableNamespaces,
-    pub schedule_waves: Vec<Vec<String>>,
-}
 
 pub struct ExecutionPlane {
     workflows: BTreeMap<String, WorkflowDefinition>,
@@ -108,64 +72,6 @@ enum DependencyDecision {
     Waiting,
     Ready,
     Skip,
-}
-
-impl NodeDefinition {
-    pub fn validate(&self) -> Result<(), ContractError> {
-        assert_required_major(
-            "node.manifest_version",
-            &self.api_version,
-            CURRENT_API_MAJOR,
-        )?;
-
-        for input in &self.inputs {
-            if !input.validate() {
-                return Err(ContractError::InvalidVariableReference {
-                    workflow_id: "<unknown>".to_owned(),
-                    node_id: self.node_id.clone(),
-                    context: "node.inputs",
-                    namespace: input.source.namespace.as_str().to_owned(),
-                    key: input.source.key.clone(),
-                });
-            }
-        }
-
-        if let Some(when) = &self.when
-            && !when.validate()
-        {
-            return Err(ContractError::InvalidVariableReference {
-                workflow_id: "<unknown>".to_owned(),
-                node_id: self.node_id.clone(),
-                context: "node.when",
-                namespace: when.source.namespace.as_str().to_owned(),
-                key: when.source.key.clone(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-impl NormalizedRunRequest {
-    pub fn new(run_id: impl Into<String>, workflow_id: impl Into<String>) -> Self {
-        Self {
-            run_id: run_id.into(),
-            workflow_id: workflow_id.into(),
-            cli_args: BTreeMap::new(),
-            manual_invocation_input: BTreeMap::new(),
-            trigger_payload_mapping: BTreeMap::new(),
-            subflow_input: BTreeMap::new(),
-        }
-    }
-}
-
-impl ScheduledNodeState {
-    fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Skipped | Self::Failed
-        )
-    }
 }
 
 impl ExecutionPlane {
@@ -222,9 +128,7 @@ impl ExecutionPlane {
             workflow.validate()?;
             let workflow_id = workflow.workflow_id.clone();
             if workflow_map.contains_key(&workflow_id) {
-                return Err(ContractError::DuplicateWorkflowId {
-                    workflow_id,
-                });
+                return Err(ContractError::DuplicateWorkflowId { workflow_id });
             }
             workflow_map.insert(workflow_id, workflow);
         }
@@ -302,7 +206,8 @@ impl ExecutionPlane {
             workflow_defaults: workflow.runtime.workflow_defaults.clone(),
             config_defaults: self.config_defaults.clone(),
         };
-        let mut runtime_namespaces = runtime_layers.resolve_namespaces(request.subflow_input.clone());
+        let mut runtime_namespaces =
+            runtime_layers.resolve_namespaces(request.subflow_input.clone());
 
         let mut node_states = BTreeMap::new();
         let mut node_index = BTreeMap::new();
@@ -329,7 +234,10 @@ impl ExecutionPlane {
                     .copied()
                     .unwrap_or(ScheduledNodeState::Pending);
                 if current_state.is_terminal()
-                    || matches!(current_state, ScheduledNodeState::Ready | ScheduledNodeState::Running)
+                    || matches!(
+                        current_state,
+                        ScheduledNodeState::Ready | ScheduledNodeState::Running
+                    )
                 {
                     continue;
                 }

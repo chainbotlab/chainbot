@@ -10,19 +10,20 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use chainbot::app::ExecutionPlane;
+use chainbot::builtins::nodes::contract::{BuiltinNodeRequest, BuiltinNodeResult};
+use chainbot::builtins::nodes::registry_store::BuiltinNodeRegistry;
 use chainbot::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
 use chainbot::builtins::{build_builtin_registry, BuiltinRuntimeContext, SecretDecryptMode};
-use chainbot::config::RootLayout;
+use chainbot::domain::runtime::{
+    NodeDefinition, NormalizedRunRequest, ScheduledNodeState, WorkflowRunStatus,
+};
+use chainbot::domain::workflow::{
+    DependsMode, RuntimeVariableLayers, RuntimeVariableNamespace, RuntimeVariableNamespaces,
+    VariableBinding, VariableReference, WhenCondition, WhenOperator, WorkflowDefinition,
+};
 use chainbot::errors::ContractError;
-use chainbot::executor::{
-    BuiltinNodeRegistry, BuiltinNodeRequest, ExecutionPlane, NodeDefinition, NormalizedRunRequest,
-    ScheduledNodeState, WorkflowRunStatus,
-};
-use chainbot::plugin::PluginManifest;
-use chainbot::workflow::{
-    DependsMode, RuntimeVariableLayers, RuntimeVariableNamespace, VariableBinding,
-    VariableReference, WhenCondition, WhenOperator, WorkflowDefinition,
-};
+use chainbot::infrastructure::config::RootLayout;
 use serde_json::json;
 
 #[test]
@@ -539,7 +540,7 @@ fn production_registry_locks_merge_template_math_and_json_semantics() {
 fn builtin_node_registry_test_handlers_extend_with_custom_registration() {
     let mut registry = BuiltinNodeRegistry::with_test_handlers();
     registry.register("builtin.capture_runtime", |request| {
-        Ok(chainbot::executor::BuiltinNodeResult {
+        Ok(BuiltinNodeResult {
             outputs: BTreeMap::from([(
                 String::from("workflow"),
                 json!(request
@@ -559,7 +560,7 @@ fn builtin_node_registry_test_handlers_extend_with_custom_registration() {
         node_id: "node-registry".to_owned(),
         operation: "run".to_owned(),
         inputs: BTreeMap::from_iter([(String::from("symbol"), json!("ETHUSDT"))]),
-        runtime_namespaces: chainbot::workflow::RuntimeVariableNamespaces {
+        runtime_namespaces: RuntimeVariableNamespaces {
             run_scoped: BTreeMap::from([(String::from("workflow"), json!("alpha"))]),
             ..Default::default()
         },

@@ -1,9 +1,18 @@
+//! [INPUT]
+//! Builtin trigger context, manual trigger definitions, and decoded manual trigger params.
+//!
+//! [OUTPUT]
+//! Validates manual trigger definitions and emits manual trigger events on demand.
+//!
+//! [ROLE]
+//! Implements the builtin manual trigger emitter.
+
 use serde::Deserialize;
 
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::{decode_builtin_trigger_params, BuiltinTriggerHandler};
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission};
 
 pub(crate) const BUILTIN_TRIGGER_MANUAL_KIND: &str = "manual";
 

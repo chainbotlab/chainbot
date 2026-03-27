@@ -7,8 +7,10 @@
 //! [ROLE]
 //! Owns the wasm trigger transport ABI surface without duplicating manifest business schema.
 
-const ROOT_TRIGGER_PLUGIN_WIT: &str = include_str!("../../../wit/trigger-plugin.wit");
-const CRATE_TRIGGER_PLUGIN_WIT: &str = include_str!("../wit/trigger-plugin.wit");
+#[cfg(test)]
+const ROOT_TRIGGER_PLUGIN_WIT: &str = include_str!("../../../../../../wit/trigger-plugin.wit");
+#[cfg(test)]
+const CRATE_TRIGGER_PLUGIN_WIT: &str = include_str!("../../../../wit/trigger-plugin.wit");
 
 #[cfg(test)]
 use std::sync::{Arc, Weak};
@@ -51,8 +53,17 @@ pub struct WasmGuestTransportEnvelope {
 #[derive(Debug)]
 pub enum WasmGuestExecutionError {
     GuestCallFailed(String),
-    InvalidGuestEnvelope(String),
 }
+
+impl std::fmt::Display for WasmGuestExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GuestCallFailed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for WasmGuestExecutionError {}
 
 #[derive(Debug)]
 struct WasmStoreState {
@@ -107,6 +118,7 @@ pub struct WasmTriggerSessionConfig {
     pub store_limiter: WasmStoreLimiterConfig,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WasmRuntimeHandles {
     pub engine_ptr: usize,
@@ -124,19 +136,26 @@ pub struct WasmGuestState {
 
 #[derive(Debug)]
 pub struct WasmTriggerSession {
+    #[cfg(test)]
     trigger_id: String,
+    #[cfg(test)]
     plugin_id: String,
     component: String,
+    #[cfg(test)]
     engine: Engine,
+    #[cfg(test)]
     module: Module,
     store: Store<WasmStoreState>,
     instance: Instance,
     guest_state: WasmGuestState,
+    #[cfg(test)]
     started_at_ms: i64,
+    #[cfg(test)]
     config: WasmTriggerSessionConfig,
 }
 
 impl WasmTriggerSession {
+    #[cfg(test)]
     pub fn new(
         trigger_id: impl Into<String>,
         plugin_id: impl Into<String>,
@@ -159,6 +178,9 @@ impl WasmTriggerSession {
         started_at_ms: i64,
         config: WasmTriggerSessionConfig,
     ) -> Self {
+        #[cfg(not(test))]
+        let _ = (trigger_id, plugin_id);
+
         let component = component.into();
         let engine = Engine::default();
         let module = load_session_module(&engine, &component);
@@ -180,10 +202,14 @@ impl WasmTriggerSession {
         let instance = instantiate_session_instance(&module, &mut store);
 
         Self {
+            #[cfg(test)]
             trigger_id: trigger_id.into(),
+            #[cfg(test)]
             plugin_id: plugin_id.into(),
             component,
+            #[cfg(test)]
             engine,
+            #[cfg(test)]
             module,
             store,
             instance,
@@ -192,15 +218,19 @@ impl WasmTriggerSession {
                 last_turn_at_ms: None,
                 last_reconciled_at_ms: started_at_ms,
             },
+            #[cfg(test)]
             started_at_ms,
+            #[cfg(test)]
             config,
         }
     }
 
+    #[cfg(test)]
     pub fn trigger_id(&self) -> &str {
         &self.trigger_id
     }
 
+    #[cfg(test)]
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
@@ -209,14 +239,17 @@ impl WasmTriggerSession {
         &self.component
     }
 
+    #[cfg(test)]
     pub fn started_at_ms(&self) -> i64 {
         self.started_at_ms
     }
 
+    #[cfg(test)]
     pub fn config(&self) -> WasmTriggerSessionConfig {
         self.config
     }
 
+    #[cfg(test)]
     pub fn runtime_handles(&self) -> WasmRuntimeHandles {
         WasmRuntimeHandles {
             engine_ptr: &self.engine as *const Engine as usize,
@@ -226,6 +259,7 @@ impl WasmTriggerSession {
         }
     }
 
+    #[cfg(test)]
     pub fn store_turn_count(&self) -> u64 {
         self.store.data().turn_count
     }
@@ -235,6 +269,7 @@ impl WasmTriggerSession {
         Arc::downgrade(&self.store.data().runtime_guard)
     }
 
+    #[cfg(test)]
     pub fn guest_state(&self) -> &WasmGuestState {
         &self.guest_state
     }
@@ -485,6 +520,7 @@ pub enum HostPushSuccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostPushError {
     Backpressure,
+    #[cfg(test)]
     LeaseLost,
     ShuttingDown,
 }
@@ -492,6 +528,7 @@ pub enum HostPushError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostPushErrorSource {
     Backpressure,
+    #[cfg(test)]
     LeaseLost,
     ShuttingDown,
 }
@@ -506,6 +543,7 @@ pub enum HostPushOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostPushControlFlowSource {
+    #[cfg(test)]
     QueueSaturated,
     BudgetExhausted,
     DaemonShuttingDown,
@@ -519,10 +557,12 @@ pub trait TriggerPushHost {
 }
 
 impl HostPushError {
+    #[cfg(test)]
     pub const fn is_retryable(self) -> bool {
         matches!(self, Self::Backpressure)
     }
 
+    #[cfg(test)]
     pub const fn is_terminal(self) -> bool {
         !self.is_retryable()
     }
@@ -532,6 +572,7 @@ impl From<HostPushErrorSource> for HostPushError {
     fn from(source: HostPushErrorSource) -> Self {
         match source {
             HostPushErrorSource::Backpressure => Self::Backpressure,
+            #[cfg(test)]
             HostPushErrorSource::LeaseLost => Self::LeaseLost,
             HostPushErrorSource::ShuttingDown => Self::ShuttingDown,
         }
@@ -542,6 +583,7 @@ pub fn classify_host_push_result(result: HostPushResult) -> HostPushOutcome {
     match result {
         Ok(HostPushSuccess::DurableAck) => HostPushOutcome::DurableAck,
         Err(HostPushError::Backpressure) => HostPushOutcome::RetryableBackpressure,
+        #[cfg(test)]
         Err(HostPushError::LeaseLost) => HostPushOutcome::TerminalLeaseLost,
         Err(HostPushError::ShuttingDown) => HostPushOutcome::TerminalShuttingDown,
     }
@@ -551,9 +593,12 @@ pub const fn map_control_flow_source_to_push_outcome(
     source: HostPushControlFlowSource,
 ) -> HostPushOutcome {
     match source {
+        #[cfg(test)]
         HostPushControlFlowSource::QueueSaturated | HostPushControlFlowSource::BudgetExhausted => {
             HostPushOutcome::RetryableBackpressure
         }
+        #[cfg(not(test))]
+        HostPushControlFlowSource::BudgetExhausted => HostPushOutcome::RetryableBackpressure,
         HostPushControlFlowSource::DaemonShuttingDown => HostPushOutcome::TerminalShuttingDown,
         HostPushControlFlowSource::LeaseLost => HostPushOutcome::TerminalLeaseLost,
     }
@@ -570,6 +615,7 @@ pub fn host_push_result_from_staged_append<E>(
     }
 }
 
+#[cfg(test)]
 pub fn push_event_with_host_callback(
     host: &mut dyn TriggerPushHost,
     event_bytes: &[u8],
@@ -577,6 +623,7 @@ pub fn push_event_with_host_callback(
     classify_host_push_result(host.push_trigger_event(event_bytes))
 }
 
+#[cfg(test)]
 pub fn trigger_plugin_wit_sources() -> (&'static str, &'static str) {
     (ROOT_TRIGGER_PLUGIN_WIT, CRATE_TRIGGER_PLUGIN_WIT)
 }
@@ -803,8 +850,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let module_path = std::env::temp_dir()
-            .join(format!("chainbot-wasm-session-guest-callback-{timestamp}.wat"));
+        let module_path = std::env::temp_dir().join(format!(
+            "chainbot-wasm-session-guest-callback-{timestamp}.wat"
+        ));
 
         let guest_envelope = serde_json::json!({
             "event_key": "guest-callback-event",
@@ -820,8 +868,8 @@ mod tests {
             "cooldown_key": "cooldown-guest-callback",
             "cooldown_ms": 5_000
         });
-        let guest_envelope_json =
-            serde_json::to_string(&guest_envelope).expect("guest callback envelope should serialize");
+        let guest_envelope_json = serde_json::to_string(&guest_envelope)
+            .expect("guest callback envelope should serialize");
         std::fs::write(
             &module_path,
             render_guest_callback_session_module_wat(&guest_envelope_json),

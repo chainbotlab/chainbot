@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Individual builtin node handler modules for flow, data, HTTP, script, and subflow-output behaviors.
+//!
+//! [OUTPUT]
+//! Exposes the builtin node handler module tree used by registry assembly.
+//!
+//! [ROLE]
+//! Defines the module boundary for builtin node handler implementations.
+
 pub mod assert;
 pub mod data_coalesce;
 pub mod data_compare;

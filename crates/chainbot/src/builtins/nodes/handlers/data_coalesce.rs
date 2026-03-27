@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.coalesce requests with candidate values and coalesce operation metadata.
+//!
+//! [OUTPUT]
+//! Produces the first non-null candidate as builtin node output or a usage error for unsupported operations.
+//!
+//! [ROLE]
+//! Implements the builtin data.coalesce node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

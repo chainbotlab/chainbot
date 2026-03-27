@@ -9,8 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::domain::trigger::{TriggerDefinition, TriggerKind};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerKind};
 
 use super::contract::{
     decode_webhook_params, decode_websocket_params, normalize_bind, normalize_method,

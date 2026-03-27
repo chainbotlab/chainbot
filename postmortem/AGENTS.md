@@ -1,10 +1,18 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
-- Position: Long-lived debugging and incident knowledge base.
-- Logic: Store durable failure analysis that should survive the immediate fix.
-- Constraints: Create postmortems only when a debugging outcome is worth preserving.
-- Constraints: Record bug symptoms, root cause, fix validation, and recurrence-prevention guidance so the same class of failure is less likely to happen again.
+## Scope
+- Position: Durable incident and debugging knowledge base for the repository.
+- Owns: Postmortem records that preserve root cause, fix validation, and recurrence-prevention guidance after a non-trivial failure.
+- Excludes: Temporary debugging notes, speculative hypotheses that were never validated, and implementation changelogs better kept in `docs/implementation/`.
+
+## Constraints
+- Write a postmortem only when the outcome is worth preserving beyond the immediate fix.
+- Name files `YYYYMMDD-bug-description-en.md`.
+- Each postmortem should retain incident metadata plus `Symptom`, `Root Cause`, `Fix Applied`, `Validation`, and `Preventive Safeguards` sections.
+- Evidence should point to concrete logs, tests, code paths, or explicit placeholders such as `Not recorded`.
 
 ## Members
-- No postmortems yet.
+- `AGENTS.md`: Folder manifest for postmortem naming, retained structure, and writing triggers.
+
+## Review Triggers
+- Add or update a postmortem when debugging takes non-trivial effort, reveals a broken assumption, or yields safeguards that should be reused.

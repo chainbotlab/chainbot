@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin HTTP requests, runtime context, secret-aware input resolution, and blocking HTTP client primitives.
+//!
+//! [OUTPUT]
+//! Executes outbound HTTP builtin node requests and returns normalized response data plus redacted diagnostics.
+//!
+//! [ROLE]
+//! Implements the builtin node that performs synchronous HTTP calls.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

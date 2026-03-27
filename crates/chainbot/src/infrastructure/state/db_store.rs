@@ -16,11 +16,13 @@ use std::time::Duration;
 use postgres::{Client, NoTls};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-use crate::config::{RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig};
-use crate::state::{
+use crate::domain::state::{
     IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
     ServeLeaseState, StagedTriggerEventRecord, TriggerCheckpointRecord, TriggerEventRecord,
     TriggerSnapshotRecord, WorkflowRuntimeLogEntry,
+};
+use crate::infrastructure::config::{
+    RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig,
 };
 
 const SERVE_LEASE_KEY: &str = "serve";

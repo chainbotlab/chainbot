@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin emit-subflow-output requests carrying resolved node inputs from a child workflow.
+//!
+//! [OUTPUT]
+//! Returns builtin node results whose subflow output mirrors the provided inputs.
+//!
+//! [ROLE]
+//! Implements the builtin node that forwards child outputs to the parent subflow boundary.
+
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};
 use crate::errors::ContractError;
 
