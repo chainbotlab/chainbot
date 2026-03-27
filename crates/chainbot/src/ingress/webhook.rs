@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Ingress listener specs, storage configuration, webhook auth contracts, HTTP request primitives, and inbox record types.
+//!
+//! [OUTPUT]
+//! Builds webhook routes that validate requests and append accepted payloads into the ingress inbox.
+//!
+//! [ROLE]
+//! Implements the HTTP webhook transport for ingress-backed builtin triggers.
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,9 +20,9 @@ use axum::response::IntoResponse;
 use axum::routing::{on, MethodFilter};
 use axum::{Extension, Router};
 
-use crate::config::RuntimeStorageConfig;
-use crate::state::IngressInboxRecord;
-use crate::state_db::RuntimeStateStore;
+use crate::domain::state::IngressInboxRecord;
+use crate::infrastructure::config::RuntimeStorageConfig;
+use crate::infrastructure::state::RuntimeStateStore;
 
 use super::contract::{IngressAuthConfig, IngressListenerSpec, IngressRuntimeError};
 

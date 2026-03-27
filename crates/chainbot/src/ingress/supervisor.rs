@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Desired ingress listener state, runtime storage configuration, Axum router primitives, and supervisor control messages.
+//!
+//! [OUTPUT]
+//! Starts, reconciles, and gracefully shuts down ingress listener workers for webhook and websocket routes.
+//!
+//! [ROLE]
+//! Owns background supervision of ingress listeners during daemon runtime.
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::mpsc;
@@ -10,7 +19,7 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::config::RuntimeStorageConfig;
+use crate::infrastructure::config::RuntimeStorageConfig;
 
 use super::contract::{DesiredIngressState, IngressListenerSpec, IngressRuntimeError};
 use super::{webhook, websocket};

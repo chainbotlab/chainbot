@@ -7,8 +7,8 @@
 //! [ROLE]
 //! Guards the crate's versioned contract compatibility boundary.
 
-use chainbot::config::ConfigRoot;
 use chainbot::errors::ContractError;
+use chainbot::infrastructure::config::ConfigRoot;
 use chainbot::plugin::PluginManifest;
 use chainbot::script_protocol::WorkerRequestEnvelope;
 use chainbot::secrets::SecretReference;

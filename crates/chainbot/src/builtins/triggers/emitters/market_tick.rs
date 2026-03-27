@@ -1,9 +1,18 @@
+//! [INPUT]
+//! Builtin trigger context, market-tick trigger definitions, and decoded symbol parameters.
+//!
+//! [OUTPUT]
+//! Validates market-tick trigger definitions and emits symbol-scoped market tick events.
+//!
+//! [ROLE]
+//! Implements the builtin market tick trigger emitter.
+
 use serde::Deserialize;
 
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::{decode_builtin_trigger_params, BuiltinTriggerHandler};
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission};
 
 pub(crate) const BUILTIN_TRIGGER_MARKET_TICK_KIND: &str = "market_tick";
 

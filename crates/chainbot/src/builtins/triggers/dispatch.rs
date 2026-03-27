@@ -1,5 +1,14 @@
+//! [INPUT]
+//! Trigger definitions from the trigger plane plus contract error semantics.
+//!
+//! [OUTPUT]
+//! Resolves builtin trigger subtype names or returns definition errors when the trigger is not a builtin source.
+//!
+//! [ROLE]
+//! Bridges trigger contracts into builtin trigger registry keys.
+
+use crate::domain::trigger::TriggerDefinition;
 use crate::errors::ContractError;
-use crate::trigger::TriggerDefinition;
 
 pub fn builtin_trigger_kind(definition: &TriggerDefinition) -> Result<&str, ContractError> {
     definition

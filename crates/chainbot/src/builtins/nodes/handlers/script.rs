@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin script requests, runtime context, secret-aware input resolution, worker process contracts, and script protocol envelopes.
+//!
+//! [OUTPUT]
+//! Executes builtin script nodes through worker runtimes and returns normalized outputs or execution failures.
+//!
+//! [ROLE]
+//! Implements the builtin node that runs script-based operations.
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;

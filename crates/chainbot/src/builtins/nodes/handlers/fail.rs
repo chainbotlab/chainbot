@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin fail requests containing failure messages and operation metadata.
+//!
+//! [OUTPUT]
+//! Returns a forced builtin node failure or usage errors for unsupported fail operations.
+//!
+//! [ROLE]
+//! Implements the builtin node that deliberately raises workflow execution failures.
+
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};
 use crate::errors::ContractError;
 

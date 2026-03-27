@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Ingress listener specs, storage configuration, websocket transport primitives, auth contracts, and inbox record types.
+//!
+//! [OUTPUT]
+//! Builds websocket routes that validate inbound messages and append accepted payloads into the ingress inbox.
+//!
+//! [ROLE]
+//! Implements the WebSocket transport for ingress-backed builtin triggers.
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,9 +21,9 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use futures_util::{SinkExt, StreamExt};
 
-use crate::config::RuntimeStorageConfig;
-use crate::state::IngressInboxRecord;
-use crate::state_db::RuntimeStateStore;
+use crate::domain::state::IngressInboxRecord;
+use crate::infrastructure::config::RuntimeStorageConfig;
+use crate::infrastructure::state::RuntimeStateStore;
 
 use super::contract::{IngressAuthConfig, IngressListenerSpec, IngressRuntimeError};
 

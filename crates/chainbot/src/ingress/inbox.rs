@@ -9,9 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::state::IngressInboxRecord;
-use crate::state_db::RuntimeStateStore;
-use crate::trigger::{TriggerDefinition, TriggerEmission, TriggerPlaneError};
+use crate::domain::state::IngressInboxRecord;
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission, TriggerPlaneError};
+use crate::infrastructure::state::RuntimeStateStore;
 
 #[derive(Debug, Default)]
 pub struct DrainedIngressBatch {

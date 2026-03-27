@@ -1,7 +1,16 @@
+//! [INPUT]
+//! Builtin runtime context, builtin handler implementations, and builtin node kind specifications.
+//!
+//! [OUTPUT]
+//! Assembles the canonical builtin node registry and exports builtin node kind constants for dispatch and catalog use.
+//!
+//! [ROLE]
+//! Owns builtin node registry construction for the execution plane.
+
 use std::sync::Arc;
 
 use crate::builtins::nodes::context::BuiltinRuntimeContext;
-use crate::builtins::nodes::contract::BuiltinNodeRegistry;
+use crate::builtins::nodes::registry_store::BuiltinNodeRegistry;
 
 use super::handlers::{
     assert::AssertHandler, data_coalesce::DataCoalesceHandler, data_compare::DataCompareHandler,
@@ -12,21 +21,7 @@ use super::handlers::{
     identity::IdentityHandler, script::ScriptHandler,
 };
 
-pub(crate) const BUILTIN_ASSERT_KIND: &str = "builtin.flow.assert";
-pub(crate) const BUILTIN_FAIL_KIND: &str = "builtin.flow.fail";
-pub(crate) const BUILTIN_DATA_PICK_KIND: &str = "builtin.data.pick";
-pub(crate) const BUILTIN_DATA_MERGE_KIND: &str = "builtin.data.merge";
-pub(crate) const BUILTIN_DATA_TEMPLATE_KIND: &str = "builtin.data.template";
-pub(crate) const BUILTIN_DATA_GET_KIND: &str = "builtin.data.get";
-pub(crate) const BUILTIN_DATA_COALESCE_KIND: &str = "builtin.data.coalesce";
-pub(crate) const BUILTIN_DATA_COMPARE_KIND: &str = "builtin.data.compare";
-pub(crate) const BUILTIN_DATA_PARSE_JSON_KIND: &str = "builtin.data.parse_json";
-pub(crate) const BUILTIN_DATA_STRINGIFY_JSON_KIND: &str = "builtin.data.stringify_json";
-pub(crate) const BUILTIN_DATA_MATH_KIND: &str = "builtin.data.math";
-pub(crate) const BUILTIN_IDENTITY_KIND: &str = "builtin.identity";
-pub(crate) const BUILTIN_EMIT_SUBFLOW_OUTPUT_KIND: &str = "builtin.emit_subflow_output";
-pub(crate) const BUILTIN_SCRIPT_KIND: &str = "builtin.script";
-pub(crate) const BUILTIN_HTTP_KIND: &str = "builtin.http";
+pub(crate) use super::spec::*;
 
 pub fn build_builtin_registry(context: BuiltinRuntimeContext) -> BuiltinNodeRegistry {
     let context = Arc::new(context);
@@ -58,16 +53,15 @@ mod tests {
 
     use crate::builtins::nodes::contract::BuiltinNodeRequest;
     use crate::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
-    use crate::executor::NodeDefinition;
+    use crate::domain::runtime::NodeDefinition;
+    use crate::infrastructure::config::RootLayout;
     use serde_json::json;
 
     use super::*;
 
     fn test_context() -> BuiltinRuntimeContext {
         BuiltinRuntimeContext {
-            root_layout: crate::config::RootLayout::from_root(PathBuf::from(
-                "/tmp/chainbot-builtins-test",
-            )),
+            root_layout: RootLayout::from_root(PathBuf::from("/tmp/chainbot-builtins-test")),
             secret_mode: crate::builtins::nodes::context::SecretDecryptMode::Plaintext,
             worker_host: WorkerHost::new(WorkerHostLimits::default()),
         }

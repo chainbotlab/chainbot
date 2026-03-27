@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.parse_json requests carrying string inputs and parse operation metadata.
+//!
+//! [OUTPUT]
+//! Decodes JSON strings into structured outputs or returns contract and usage errors.
+//!
+//! [ROLE]
+//! Implements the builtin data.parse_json node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

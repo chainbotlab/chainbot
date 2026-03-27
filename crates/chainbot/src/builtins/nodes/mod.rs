@@ -14,7 +14,9 @@ pub mod dispatch;
 pub mod handlers;
 pub mod input_resolver;
 pub mod registry;
+pub mod registry_store;
 pub mod script_worker;
+pub mod spec;
 
 pub use context::{BuiltinRuntimeContext, SecretDecryptMode};
 pub use registry::build_builtin_registry;

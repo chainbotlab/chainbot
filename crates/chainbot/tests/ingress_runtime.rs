@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use chainbot::state::TriggerEventRecord;
+use chainbot::domain::state::TriggerEventRecord;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 #[test]
@@ -331,10 +331,10 @@ where
         .block_on(future);
 }
 
-fn open_runtime_store(root: &Path, now_ms: i64) -> chainbot::state_db::RuntimeStateStore {
-    chainbot::state_db::RuntimeStateStore::open(
-        &chainbot::config::RuntimeStorageConfig {
-            backend: chainbot::config::RuntimeStorageBackend::Local {
+fn open_runtime_store(root: &Path, now_ms: i64) -> chainbot::infrastructure::state::RuntimeStateStore {
+    chainbot::infrastructure::state::RuntimeStateStore::open(
+        &chainbot::infrastructure::config::RuntimeStorageConfig {
+            backend: chainbot::infrastructure::config::RuntimeStorageBackend::Local {
                 database_path: root.join("state").join("runtime.sqlite3"),
             },
             history_retention: None,

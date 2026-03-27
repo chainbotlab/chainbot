@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin assert requests containing comparison or truthiness inputs and builtin node operation names.
+//!
+//! [OUTPUT]
+//! Returns assertion pass or fail results as builtin node outputs or `ContractError` failures.
+//!
+//! [ROLE]
+//! Implements the builtin assert node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

@@ -1,7 +1,16 @@
+//! [INPUT]
+//! Webhook trigger definitions, ingress webhook param decoders, and builtin trigger handler contracts.
+//!
+//! [OUTPUT]
+//! Validates webhook trigger definitions and delegates emission to the ingress-backed webhook runtime path.
+//!
+//! [ROLE]
+//! Implements the builtin webhook trigger adapter over ingress contracts.
+
 use crate::builtins::triggers::contract::BuiltinTriggerHandler;
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission};
 use crate::errors::ContractError;
 use crate::ingress::contract::{decode_webhook_params, BUILTIN_TRIGGER_WEBHOOK_KIND};
-use crate::trigger::{TriggerDefinition, TriggerEmission};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WebhookTriggerHandler;

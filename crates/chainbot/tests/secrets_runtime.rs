@@ -7,21 +7,18 @@
 //! [ROLE]
 //! Covers the runtime secrets boundary as an integration test.
 
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::RootLayout;
+use chainbot::domain::state::{RunRecordSummary, RunStatus, WorkflowRuntimeLogEntry};
 use chainbot::errors::UserFacingError;
+use chainbot::infrastructure::config::RootLayout;
+use chainbot::infrastructure::state::{CoordinationStore, FileBackedStateStore, StateLayout};
 use chainbot::secrets::{
     redact_json_snapshot, redact_text, SecretDecryptError, SecretDecryptor, SecretProvider,
     SecretReference, SECRET_REDACTION_TOKEN,
-};
-use chainbot::state::{
-    CoordinationStore, FileBackedStateStore, RunRecordSummary, RunStatus, StateLayout,
-    WorkflowRuntimeLogEntry,
 };
 
 #[derive(Clone)]

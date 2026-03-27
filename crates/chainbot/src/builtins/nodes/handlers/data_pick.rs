@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.pick requests containing source objects, selected fields, and operation metadata.
+//!
+//! [OUTPUT]
+//! Produces a picked subset of object fields or a usage error for unsupported operations.
+//!
+//! [ROLE]
+//! Implements the builtin data.pick node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

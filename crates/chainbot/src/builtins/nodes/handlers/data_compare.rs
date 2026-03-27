@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.compare requests carrying left or right values and comparison operation names.
+//!
+//! [OUTPUT]
+//! Produces boolean comparison results and normalized comparison metadata for builtin node execution.
+//!
+//! [ROLE]
+//! Implements the builtin data.compare node behavior.
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 

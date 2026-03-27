@@ -1,10 +1,19 @@
+//! [INPUT]
+//! Builtin trigger context, cron trigger definitions, decoded cron params, and wall-clock time helpers.
+//!
+//! [OUTPUT]
+//! Validates cron trigger definitions and emits schedule-matched trigger events.
+//!
+//! [ROLE]
+//! Implements the builtin cron trigger emitter.
+
 use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::builtins::triggers::context::BuiltinTriggerContext;
 use crate::builtins::triggers::contract::{decode_builtin_trigger_params, BuiltinTriggerHandler};
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission};
 
 const MILLIS_PER_MINUTE: i64 = 60_000;
 pub(crate) const BUILTIN_TRIGGER_CRON_KIND: &str = "cron";

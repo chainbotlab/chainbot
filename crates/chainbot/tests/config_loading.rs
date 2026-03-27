@@ -12,12 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::{
-    load_effective_root_layout, RootDefinitionBundle, RootLayout, CHAINBOT_CONFIG_DIR_ENV,
-    DEFAULT_ROOT_DIR_NAME,
-};
+use chainbot::app::definitions::load_root_definition_bundle;
 use chainbot::errors::ContractError;
-use chainbot::workflow::RuntimeVariableNamespace;
+use chainbot::infrastructure::config::{
+    load_effective_root_layout, RootLayout, CHAINBOT_CONFIG_DIR_ENV, DEFAULT_ROOT_DIR_NAME,
+};
 
 #[test]
 fn config_root_layout() {
@@ -96,7 +95,8 @@ fn toml_definition_validation() {
     let valid_root = unique_test_root("toml-valid");
     write_valid_fixture(&valid_root);
     let valid_layout = RootLayout::from_root(valid_root);
-    let bundle = RootDefinitionBundle::load(&valid_layout).expect("valid fixture root should load");
+    let bundle =
+        load_root_definition_bundle(&valid_layout).expect("valid fixture root should load");
     assert_eq!(bundle.root_config.schema_version, "2.0.0");
     assert_eq!(bundle.workflows.len(), 1);
     assert_eq!(bundle.triggers.len(), 1);
@@ -105,7 +105,7 @@ fn toml_definition_validation() {
     let missing_root = unique_test_root("toml-missing");
     let missing_layout = RootLayout::from_root(missing_root.clone());
     let missing_error =
-        RootDefinitionBundle::load(&missing_layout).expect_err("missing root must fail");
+        load_root_definition_bundle(&missing_layout).expect_err("missing root must fail");
     assert!(matches!(
         missing_error,
         ContractError::MissingDirectory { path, kind: "root" } if path == missing_root
@@ -120,7 +120,7 @@ fn toml_definition_validation() {
     .expect("invalid-version root fixture should be writable");
 
     let invalid_version_layout = RootLayout::from_root(invalid_version_root);
-    let version_error = RootDefinitionBundle::load(&invalid_version_layout)
+    let version_error = load_root_definition_bundle(&invalid_version_layout)
         .expect_err("future-major root schema must be rejected");
     assert!(matches!(
         version_error,
@@ -144,7 +144,7 @@ fn storage_mode_requires_backend_specific_fields() {
         ),
     )
     .expect("local-missing root config should be writable");
-    let local_error = RootDefinitionBundle::load(&RootLayout::from_root(local_missing_root))
+    let local_error = load_root_definition_bundle(&RootLayout::from_root(local_missing_root))
         .expect_err("local mode without storage.local.database_path should fail");
     assert!(matches!(
         local_error,
@@ -164,7 +164,7 @@ fn storage_mode_requires_backend_specific_fields() {
         ),
     )
     .expect("postgres-missing root config should be writable");
-    let postgres_error = RootDefinitionBundle::load(&RootLayout::from_root(postgres_missing_root))
+    let postgres_error = load_root_definition_bundle(&RootLayout::from_root(postgres_missing_root))
         .expect_err("postgres mode without storage.postgres.database_url should fail");
     assert!(matches!(
         postgres_error,
@@ -188,7 +188,7 @@ fn storage_retention_requires_at_least_one_window_when_enabled() {
     )
     .expect("retention root config should be writable");
 
-    let error = RootDefinitionBundle::load(&RootLayout::from_root(root))
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
         .expect_err("enabled retention without a window should fail");
     assert!(matches!(
         error,
@@ -209,7 +209,7 @@ fn plugin_manifest_loading_preserves_optional_richer_metadata() {
     )
     .expect("plugin metadata fixture should be writable");
 
-    let bundle = RootDefinitionBundle::load(&RootLayout::from_root(root))
+    let bundle = load_root_definition_bundle(&RootLayout::from_root(root))
         .expect("root with richer plugin metadata should load");
     assert_eq!(bundle.plugins.len(), 1);
     assert_eq!(bundle.plugins[0].operations.len(), 1);
@@ -231,7 +231,7 @@ fn plugin_manifest_loading_accepts_external_trigger_wasm_runtime_metadata() {
     )
     .expect("external trigger plugin config should be writable");
 
-    let bundle = RootDefinitionBundle::load(&RootLayout::from_root(root))
+    let bundle = load_root_definition_bundle(&RootLayout::from_root(root))
         .expect("external trigger wasm runtime metadata should load");
     assert_eq!(bundle.plugins.len(), 1);
     assert_eq!(bundle.plugins[0].kind, "external_trigger");
@@ -252,7 +252,7 @@ fn plugin_manifest_loading_rejects_external_trigger_runtime_missing_lifecycle() 
     )
     .expect("external trigger plugin config should be writable");
 
-    let error = RootDefinitionBundle::load(&RootLayout::from_root(root))
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
         .expect_err("missing lifecycle semantics should be rejected");
     assert!(matches!(
         error,
@@ -278,7 +278,7 @@ fn plugin_manifest_loading_rejects_external_trigger_runtime_missing_contract() {
     )
     .expect("external trigger plugin config should be writable");
 
-    let error = RootDefinitionBundle::load(&RootLayout::from_root(root))
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
         .expect_err("missing trigger_runtime contract should be rejected");
     assert!(matches!(
         error,
@@ -303,7 +303,7 @@ fn invalid_toml_fixture_rejected() {
     .expect("invalid TOML fixture should be writable");
 
     let layout = RootLayout::from_root(invalid_root.join("."));
-    let error = RootDefinitionBundle::load(&layout)
+    let error = load_root_definition_bundle(&layout)
         .expect_err("broken workflow TOML should produce structured decode error");
     assert!(matches!(error, ContractError::TomlDecode { .. }));
 }
@@ -314,7 +314,7 @@ fn root_paths_overrides_and_plugin_discovery_are_applied() {
     write_valid_fixture_with_overrides(&root);
 
     let layout = RootLayout::from_root(root);
-    let bundle = RootDefinitionBundle::load(&layout).expect("override fixture root should load");
+    let bundle = load_root_definition_bundle(&layout).expect("override fixture root should load");
 
     assert_eq!(bundle.workflows.len(), 1);
     assert_eq!(bundle.triggers.len(), 1);
@@ -339,7 +339,7 @@ fn missing_chainbot_version_is_backfilled_during_startup_load() {
         load_effective_root_layout(&layout).expect("startup load should backfill missing version");
     assert_eq!(effective_layout.root, root);
 
-    let bundle = RootDefinitionBundle::load(&layout)
+    let bundle = load_root_definition_bundle(&layout)
         .expect("root bundle should load after missing version backfill");
     assert_eq!(
         bundle.root_config.chainbot_version.as_deref(),
@@ -362,7 +362,7 @@ fn matching_chainbot_version_loads_successfully() {
     let original_root_config =
         fs::read_to_string(&root_config_path).expect("matching root config should be readable");
 
-    let bundle = RootDefinitionBundle::load(&RootLayout::from_root(root))
+    let bundle = load_root_definition_bundle(&RootLayout::from_root(root))
         .expect("matching chainbot_version should load without migration");
     assert_eq!(
         bundle.root_config.chainbot_version.as_deref(),
@@ -384,7 +384,7 @@ fn mismatched_chainbot_version_requires_migration() {
     )
     .expect("root config with mismatched chainbot_version should be writable");
 
-    let error = RootDefinitionBundle::load(&RootLayout::from_root(root.clone()))
+    let error = load_root_definition_bundle(&RootLayout::from_root(root.clone()))
         .expect_err("mismatched chainbot_version should require migration");
     assert!(matches!(
         error,
@@ -405,7 +405,8 @@ fn canonical_plugin_packages_are_discovered() {
     write_valid_fixture_with_plugin_package(&root);
 
     let layout = RootLayout::from_root(root);
-    let bundle = RootDefinitionBundle::load(&layout).expect("canonical plugin package should load");
+    let bundle =
+        load_root_definition_bundle(&layout).expect("canonical plugin package should load");
 
     assert_eq!(bundle.plugins.len(), 1);
     assert_eq!(bundle.plugins[0].plugin_id, "quote-plugin");
@@ -421,7 +422,7 @@ fn workflow_subflow_call_dsl_is_lowered_during_loading() {
     write_subflow_call_fixture(&root);
 
     let layout = RootLayout::from_root(root);
-    let bundle = RootDefinitionBundle::load(&layout).expect("subflow call fixture should load");
+    let bundle = load_root_definition_bundle(&layout).expect("subflow call fixture should load");
     let workflow = bundle
         .workflows
         .iter()
@@ -446,14 +447,14 @@ fn workflow_subflow_call_dsl_is_lowered_during_loading() {
     assert_eq!(contract.exports.len(), 2);
     assert_eq!(contract.imports[0].child_key, "dry_run");
     assert_eq!(
-        contract.imports[0].source.namespace,
-        RuntimeVariableNamespace::ManualInvocationInput
+        format!("{:?}", contract.imports[0].source.namespace),
+        "ManualInvocationInput"
     );
     assert_eq!(contract.imports[0].source.key, "dry_run");
     assert_eq!(contract.imports[1].child_key, "symbol");
     assert_eq!(
-        contract.imports[1].source.namespace,
-        RuntimeVariableNamespace::TriggerPayloadMapping
+        format!("{:?}", contract.imports[1].source.namespace),
+        "TriggerPayloadMapping"
     );
     assert_eq!(contract.imports[1].source.key, "symbol");
     assert_eq!(contract.exports[0].child_key, "decision");

@@ -10,13 +10,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use chainbot::errors::ContractError;
-use chainbot::executor::NodeDefinition;
-use chainbot::workflow::{
+use chainbot::domain::runtime::NodeDefinition;
+use chainbot::domain::workflow::{
     DependsMode, RuntimeVariableLayers, RuntimeVariableNamespace, RuntimeVariableNamespaces,
     RuntimeVariableSource, SubflowContract, SubflowExport, SubflowImport, VariableBinding,
     VariableReference, WhenCondition, WhenOperator, WorkflowDefinition,
 };
+use chainbot::errors::ContractError;
 use serde_json::json;
 
 #[test]

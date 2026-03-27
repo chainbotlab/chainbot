@@ -13,18 +13,18 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::builtins::triggers::build_builtin_trigger_emissions;
-use chainbot::config::{RootLayout, RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::domain::state::{StagedTriggerEventRecord, TriggerEventRecord};
+use chainbot::domain::trigger::{
+    TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlane, TriggerPlaneError,
+    TriggerPluginHostPolicy, TriggerStartCommand, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+};
 use chainbot::errors::ContractError;
+use chainbot::infrastructure::config::{RootLayout, RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::infrastructure::state::{RuntimeStateStore, StateLayout};
 use chainbot::plugin::{
     ExternalTriggerRuntimeContract, PluginEventSchemaDescriptor, PluginManifest,
     TriggerDurableAckSemantics, TriggerHostErrorCategory, TriggerPushCallbackSemantics,
     TriggerRuntimeLifecycle,
-};
-use chainbot::state::{StagedTriggerEventRecord, StateLayout, TriggerEventRecord};
-use chainbot::state_db::RuntimeStateStore;
-use chainbot::trigger::{
-    TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlane, TriggerPlaneError,
-    TriggerPluginHostPolicy, TriggerStartCommand, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use rusqlite::Connection;
 
@@ -995,11 +995,14 @@ fn staged_external_rows_bridge_through_trigger_plane_acceptance_path() {
         "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
     );
 
-    let definitions = vec![trigger_definition(
+    let mut definitions = vec![trigger_definition(
         "external-trigger",
         "external_plugin",
         "plugin-ready-only",
     )];
+    definitions[0]
+        .input_mapping
+        .insert(String::from("symbol"), String::from("payload.quote.symbol"));
     let manifests = vec![plugin_manifest(
         "plugin-ready-only",
         "2.0.0",
@@ -1020,7 +1023,7 @@ fn staged_external_rows_bridge_through_trigger_plane_acceptance_path() {
             occurred_at_ms: 1_710_100_090_000,
             staged_at_ms: 1_710_100_090_001,
             checkpoint: Some(String::from("cp-staged")),
-            payload: serde_json::json!({"side": "buy"}),
+            payload: serde_json::json!({"quote": {"symbol": "BTCUSDT"}}),
             dedup_key: None,
             dedup_window_ms: None,
             cooldown_key: None,
@@ -1050,6 +1053,11 @@ fn staged_external_rows_bridge_through_trigger_plane_acceptance_path() {
         .expect("staged external row should normalize through trigger acceptance path");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].event_id, "external-trigger:event-staged");
+    assert_eq!(
+        requests[0].payload,
+        serde_json::json!({"symbol": "BTCUSDT"}),
+        "staged external payload should be mapped exactly once at acceptance"
+    );
 
     let mut verify_store = open_runtime_store(&state_layout, 1_710_100_090_030);
     let pending = verify_store

@@ -13,6 +13,8 @@ pub mod contract;
 pub mod dispatch;
 pub mod emitters;
 pub mod registry;
+pub mod registry_store;
+pub mod spec;
 
 pub use registry::build_builtin_trigger_emissions;
 pub use registry::validate_builtin_trigger_definition;

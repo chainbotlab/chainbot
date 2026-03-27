@@ -14,17 +14,14 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::{
+use chainbot::domain::state::{
+    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState,
+    StagedTriggerEventRecord, TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord,
+};
+use chainbot::infrastructure::config::{
     RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig,
 };
-use chainbot::external_trigger_supervisor::{
-    ExternalTriggerSessionRuntime, ExternalTriggerSessionSpec, ExternalTriggerSupervisor,
-};
-use chainbot::state::{
-    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, StagedTriggerEventRecord,
-    TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord,
-};
-use chainbot::state_db::RuntimeStateStore;
+use chainbot::infrastructure::state::RuntimeStateStore;
 use postgres::{Client, NoTls};
 
 const TEST_POSTGRES_URL_ENV: &str = "CHAINBOT_TEST_POSTGRES_URL";
@@ -48,7 +45,7 @@ fn runtime_state_backends_share_core_semantics() {
                 .inspect_serve_lease(1_710_900_000_000)
                 .expect("lease inspection should succeed")
                 .state,
-            chainbot::state::ServeLeaseState::Idle,
+            ServeLeaseState::Idle,
             "{} lease should start idle",
             backend.name,
         );
@@ -63,10 +60,7 @@ fn runtime_state_backends_share_core_semantics() {
         let daemon_status = store
             .inspect_daemon_status(1_710_900_000_500)
             .expect("daemon status should inspect after start");
-        assert_eq!(
-            daemon_status.state,
-            chainbot::state::ServeLeaseState::Active
-        );
+        assert_eq!(daemon_status.state, ServeLeaseState::Active);
         assert_eq!(daemon_status.owner_id.as_deref(), Some("owner-a"));
         assert_eq!(daemon_status.pid, Some(321));
         let rejected = store
@@ -85,7 +79,7 @@ fn runtime_state_backends_share_core_semantics() {
         let stopped_status = store
             .inspect_daemon_status(1_710_900_001_300)
             .expect("daemon status should inspect after stop");
-        assert_eq!(stopped_status.state, chainbot::state::ServeLeaseState::Idle);
+        assert_eq!(stopped_status.state, ServeLeaseState::Idle);
         assert!(store
             .release_serve_lease("owner-a")
             .expect("lease release should succeed"));
@@ -793,49 +787,6 @@ fn runtime_state_backends_reconcile_multi_trigger_staged_rows_in_durable_order_a
 
         backend.reset();
     }
-}
-
-#[test]
-fn external_trigger_supervisor_exposes_one_lifecycle_surface_for_process_and_wasm() {
-    let mut supervisor = ExternalTriggerSupervisor::new("parity-owner");
-    assert!(supervisor.start_session(
-        ExternalTriggerSessionSpec {
-            trigger_id: String::from("tr-process"),
-            plugin_id: String::from("plugin-process"),
-            runtime: ExternalTriggerSessionRuntime::Process,
-            wasm_component: None,
-        },
-        1_710_940_000_000,
-    ));
-    assert!(supervisor.start_session(
-        ExternalTriggerSessionSpec {
-            trigger_id: String::from("tr-wasm"),
-            plugin_id: String::from("plugin-wasm"),
-            runtime: ExternalTriggerSessionRuntime::Wasm,
-            wasm_component: Some(String::from("trigger_wasm_component")),
-        },
-        1_710_940_000_000,
-    ));
-
-    supervisor.record_session_turns(1_710_940_000_100);
-
-    let process_session = supervisor
-        .sessions()
-        .get("tr-process")
-        .expect("process session should stay in shared supervisor registry");
-    assert_eq!(
-        process_session.runtime,
-        ExternalTriggerSessionRuntime::Process
-    );
-    assert!(process_session.wasm_session.is_none());
-
-    let wasm_session = supervisor
-        .sessions()
-        .get("tr-wasm")
-        .and_then(|session| session.wasm_session.as_ref())
-        .expect("wasm session should stay in shared supervisor registry");
-    assert_eq!(wasm_session.store_turn_count(), 1);
-    assert_eq!(wasm_session.guest_state().turn_count, 1);
 }
 
 struct BackendFixture {

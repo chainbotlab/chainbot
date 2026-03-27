@@ -1,7 +1,16 @@
+//! [INPUT]
+//! WebSocket trigger definitions, ingress websocket param decoders, and builtin trigger handler contracts.
+//!
+//! [OUTPUT]
+//! Validates websocket trigger definitions and delegates emission to the ingress-backed websocket runtime path.
+//!
+//! [ROLE]
+//! Implements the builtin websocket trigger adapter over ingress contracts.
+
 use crate::builtins::triggers::contract::BuiltinTriggerHandler;
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission};
 use crate::errors::ContractError;
 use crate::ingress::contract::{decode_websocket_params, BUILTIN_TRIGGER_WEBSOCKET_KIND};
-use crate::trigger::{TriggerDefinition, TriggerEmission};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WebSocketTriggerHandler;

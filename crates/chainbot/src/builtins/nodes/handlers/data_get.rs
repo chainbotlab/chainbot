@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Builtin data.get requests containing source payloads, lookup paths, and operation metadata.
+//!
+//! [OUTPUT]
+//! Extracts a value by path from structured input data or returns a usage error for invalid operations.
+//!
+//! [ROLE]
+//! Implements the builtin data.get node behavior.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::nodes::contract::{BuiltinNodeHandler, BuiltinNodeRequest, BuiltinNodeResult};

@@ -1,13 +1,22 @@
+//! [INPUT]
+//! Builtin trigger context, emitter implementations, registry storage, and trigger definition contracts.
+//!
+//! [OUTPUT]
+//! Builds builtin trigger emission maps and the default builtin trigger registry used by the trigger plane.
+//!
+//! [ROLE]
+//! Owns builtin trigger registry assembly and fan-out orchestration.
+
 use std::collections::BTreeMap;
 
 use crate::builtins::triggers::context::BuiltinTriggerContext;
-use crate::builtins::triggers::contract::BuiltinTriggerRegistry;
 use crate::builtins::triggers::emitters::{
     cron::CronTriggerHandler, manual::ManualTriggerHandler, market_tick::MarketTickTriggerHandler,
     webhook::WebhookTriggerHandler, websocket::WebSocketTriggerHandler,
 };
+use crate::builtins::triggers::registry_store::BuiltinTriggerRegistry;
+use crate::domain::trigger::{TriggerDefinition, TriggerEmission, TriggerKind};
 use crate::errors::ContractError;
-use crate::trigger::{TriggerDefinition, TriggerEmission, TriggerKind};
 
 pub fn build_builtin_trigger_emissions(
     definitions: &[TriggerDefinition],

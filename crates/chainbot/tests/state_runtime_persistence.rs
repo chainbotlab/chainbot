@@ -12,11 +12,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::config::RootLayout;
-use chainbot::state::{
-    CoordinationStore, FileBackedStateStore, FileStateError, LeaseAcquireResult, RunRecordSummary,
-    RunStatus, ServeLeaseState, StateLayout, TriggerEventRecord, TriggerSnapshotRecord,
-    WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
+use chainbot::domain::state::{
+    LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState, TriggerEventRecord,
+    TriggerSnapshotRecord, WorkflowRuntimeLogEntry, SERVE_OWNER_ID_PREFIX,
+};
+use chainbot::infrastructure::config::RootLayout;
+use chainbot::infrastructure::state::{
+    CoordinationStore, FileBackedStateStore, FileStateError, StateLayout,
 };
 use rusqlite::Connection;
 
