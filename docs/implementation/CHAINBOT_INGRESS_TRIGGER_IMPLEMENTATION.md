@@ -1,5 +1,12 @@
 # ChainBot Ingress Trigger Implementation
 
+## Current Implementation Location
+
+Ingress inbox persistence and DB API are now owned by `infrastructure::state`.
+The legacy root shim files (`src/state_db.rs`, `src/state.rs`, `src/cli.rs`) were removed in final tree cleanup.
+Current ownership is ingress runtime in `ingress/`, state persistence in `infrastructure::state`, and daemon orchestration in `app::runtime`.
+The current ownership map is documented in `crates/chainbot/src/AGENTS.md`.
+
 ## Goal
 
 为 ChainBot 新增 listener-backed builtin trigger runtime，使 `webhook` 与 `websocket` trigger 可以在 `serve` daemon 持有 lease 时按配置启动、接收外部输入，并继续复用现有 trigger-plane 的 accepted-event 语义。
@@ -19,11 +26,11 @@
 - `config.rs` 在 bundle 校验阶段接入 ingress desired-state 构建：
   - enabled ingress trigger route collision 提前失败
   - 继续保持 trigger-local 配置，而不是 root-global ingress config
-- `state.rs` / `state_db.rs` 新增 durable ingress inbox record 及 DB API：
+- `infrastructure::state` 新增 durable ingress inbox record 及 DB API（原 `src/state_db.rs`，已删除）：
   - append inbox row
   - list pending rows by trigger
   - mark processed
-- `cli.rs` 的 `serve` daemon loop 接入 ingress supervisor：
+- `app::cli` 的 `serve` daemon loop（其原 root-shim位置 `src/cli.rs` 已删除）接入 ingress supervisor：
   - config reload 后 reconcile desired listeners
   - `serve_once_with_lease()` drain ingress inbox
   - drain 后仍通过 `TriggerPlane` 归一化 accepted events
@@ -65,3 +72,8 @@
 - 增加端到端 webhook / websocket listener integration tests。
 - 补充 CLI help / design docs 中的 canonical ingress trigger examples。
 - 细化 structured ingress error logging 和 richer operator-facing diagnostics for listener failures.
+
+## 2026-03-27 Final-Wave Update
+
+- The previously referenced root shim files (`src/state_db.rs`, `src/state.rs`, `src/cli.rs`) were removed during final tree cleanup.
+- Ingress ownership remains unchanged: ingress runtime in `ingress/`, state persistence in `infrastructure::state`, and daemon orchestration in `app::runtime`.

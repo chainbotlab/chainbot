@@ -1,5 +1,12 @@
 # ChainBot DB-Primary Runtime Implementation
 
+## Current Implementation Location
+
+The DB-primary runtime store is now owned by `infrastructure::state::db_store`.
+The legacy root shim files (`src/state_db.rs`, `src/state.rs`) were removed in final tree cleanup.
+Current ownership is split between `domain::state` (contracts) and `infrastructure::state` (persistence).
+The current ownership map is documented in `crates/chainbot/src/AGENTS.md`.
+
 ## Goal
 
 将 ChainBot 主运行路径从 file-authoritative 状态切换到 DB-primary：
@@ -15,7 +22,7 @@
   - `storage.local.database_path`（local mode required）
   - `storage.postgres.database_url`（postgres mode required）
   - `storage.raw_debug` shape 保留，默认可关闭
-- 新增 `src/state_db.rs`：
+- 新增 `infrastructure::state::db_store`（原 `src/state_db.rs`，已删除）：
   - 统一 DB runtime store（SQLite + PostgreSQL）
   - 统一 runtime tables：
     - `run_summaries`
@@ -33,7 +40,7 @@
   - checkpoint 写入 `trigger_checkpoints`
   - snapshot 写入 `trigger_snapshots`
   - dedup/cooldown 通过 DB trigger history 查询保持 restart-safe
-- legacy file-backed state code 保留在 `state.rs`，但不再是上述命令的主运行路径
+- legacy file-backed state code 保留在 `infrastructure::state::file_store`（原 `src/state.rs`，已删除），但不再是上述命令的主运行路径
 
 ## Validation
 
@@ -62,3 +69,8 @@
 
 - `TriggerPlane` 的 legacy `StateLayout` 打开路径已改为显式测试兼容入口，避免新主路径代码继续从 file-backed authority 入口接入。
 - 新增 `runtime_state_parity.rs`，对 SQLite local mode 与 PostgreSQL mode 的 lease、run summary、trigger snapshot/checkpoint 与 trigger history 语义做共享测试。
+
+## 2026-03-27 Final-Wave Update
+
+- The previously referenced root shim files (`src/state_db.rs`, `src/state.rs`) were removed during final tree cleanup.
+- Runtime-state ownership remains unchanged: `domain::state` for contracts and `infrastructure::state` for persistence implementations.

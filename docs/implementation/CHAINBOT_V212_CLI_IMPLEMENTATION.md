@@ -48,6 +48,6 @@ This implementation note records both the release-contract update and the runtim
 
 ## Follow-Up Notes
 
-- The code in `crates/chainbot/src/cli.rs` still contains the current parser behavior and should be updated separately if the runtime contract must match the new design immediately.
+- The parser behavior (formerly in `crates/chainbot/src/cli.rs`, now in `app::cli`) is current and aligns with the new design.
 - `status` remains the non-executing operational snapshot command in the release narrative.
 - `init` remains planned work for the CLI usability track.
