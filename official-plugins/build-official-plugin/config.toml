@@ -1,0 +1,28 @@
+manifest_version = "2.0.0"
+plugin_id = "build-official-plugin"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/generated.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize payload"
+input_schema = ["symbol"]
+output_schema = ["decision"]
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/generated.sh"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["sh", "build.sh"]
+workdir = "."
+
+[[source.build.outputs]]
+from = "dist/generated.sh"
+to = "bin/generated.sh"

@@ -1,0 +1,11 @@
+manifest_version = "1.0.0"
+
+[[plugins]]
+plugin_id = "echo-official-plugin"
+path = "official-plugins/echo-official-plugin"
+summary = "Direct-install official plugin"
+
+[[plugins]]
+plugin_id = "build-official-plugin"
+path = "official-plugins/build-official-plugin"
+summary = "Build-required official plugin"
