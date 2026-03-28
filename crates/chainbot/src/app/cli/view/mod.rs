@@ -9,4 +9,5 @@
 
 pub(crate) mod catalog;
 pub(crate) mod observe;
+pub(crate) mod plugin_source;
 pub(crate) mod status;

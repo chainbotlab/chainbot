@@ -9,6 +9,7 @@
 
 mod contract;
 mod host;
+pub(crate) mod source;
 
 pub use contract::{
     ExternalNodePluginRequest, ExternalNodePluginResponse, ExternalTriggerRuntimeContract,
