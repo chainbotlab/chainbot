@@ -46,11 +46,37 @@ fn help_lists_expected_commands() {
     assert!(stdout.contains("status"));
     assert!(stdout.contains("observe"));
     assert!(stdout.contains("catalog"));
+    assert!(stdout.contains("plugin"));
     assert!(stdout.contains("stop"));
     assert!(stdout.contains("trigger"));
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("list-runs"));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn help_plugin_includes_source_install_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let output = Command::new(chainbot_bin())
+        .args(["help", "plugin"])
+        .output()
+        .expect("chainbot help plugin should execute");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+
+    assert!(stdout.contains("chainbot plugin source list github <owner>/<repo>"));
+    assert!(stdout.contains("chainbot plugin install <github|git> <target>"));
+    assert!(stdout.contains("--ref"));
+    assert!(stdout.contains("--plugin"));
+    assert!(stdout.contains("--force"));
+    assert!(stdout.contains("github"));
+    assert!(stdout.contains("git"));
     assert!(stderr.is_empty());
 }
 
