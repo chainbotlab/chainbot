@@ -34,8 +34,11 @@ assert.match(heroSource, /content\.install\.title/, "hero stage should render in
 assert.match(heroSource, /href=\{docsUrl\}/, "hero documentation link should navigate directly to docs URL");
 assert.match(heroSource, /data-copy-text=\{content\.install\.primaryCommand\}/, "hero copy button should expose copy text");
 assert.match(footerCtaSource, /data-copy-text=\{content\.cta\.command\}/, "footer copy button should expose copy text");
-assert.match(tickerSource, /<BrandMarquee items=\{items\} \/>/, "integrations section should render the shared brand marquee");
-assert.match(brandMarqueeSource, /aria-label="Agent tooling brand logos"/, "brand marquee should expose an accessibility label");
+assert.match(landingSource, /data-copy-status/, "landing page should expose a live region for copy feedback");
+assert.match(tickerSource, /<BrandMarquee ariaLabel=\{content\.ariaLabel\} items=\{content\.items\} \/>/, "integrations section should render the shared brand marquee from localized content");
+assert.match(brandMarqueeSource, /role="group"/, "brand marquee should expose a semantic group wrapper");
+assert.match(contentSource, /eyebrow: "Built for AI-native operators"/, "integrations content should be localized from centralized data");
+assert.match(contentSource, /eyebrow: "面向 AI 原生操作员"/, "Chinese integrations content should be localized");
 assert.match(brandMarqueeSource, /motion-reduce:flex/, "brand marquee should expose a reduced-motion fallback");
 assert.match(brandMarqueeSource, /pauseOnHover/, "brand marquee should pause on hover for readability");
 assert.match(marqueeSource, /aria-hidden=\{i > 0 \? true : undefined\}/, "repeated marquee tracks should be hidden from assistive technology");
