@@ -11,9 +11,13 @@ use std::ffi::OsString;
 
 use crate::app::cli::view::catalog::{CatalogFilterKind, CatalogReference};
 use crate::errors::UserFacingError;
+use crate::plugin::source::PluginSourceLocator;
 
 use super::help::general_help_text;
-use super::{CatalogRequest, CliCommand, CliRequest, HelpTopic, ObserveRequest, TriggerOperation};
+use super::{
+    CatalogRequest, CliCommand, CliRequest, HelpTopic, ObserveRequest, PluginCommand,
+    PluginInstallRequest, PluginSourceRequest, TriggerOperation,
+};
 
 impl CliRequest {
     pub fn from_env() -> Result<Self, UserFacingError> {
@@ -38,6 +42,7 @@ impl CliRequest {
                 json_output: false,
                 trigger_operation: None,
                 catalog_request: None,
+                plugin_command: None,
                 observe_request: None,
                 daemon_owner_id: None,
             }),
@@ -46,6 +51,7 @@ impl CliRequest {
                 json_output: false,
                 trigger_operation: None,
                 catalog_request: None,
+                plugin_command: None,
                 observe_request: None,
                 daemon_owner_id: None,
             }),
@@ -55,6 +61,7 @@ impl CliRequest {
             "status" => Self::parse_command_args(CliCommand::Status, args),
             "observe" => Self::parse_observe_args(args),
             "catalog" => Self::parse_catalog_args(args),
+            "plugin" => Self::parse_plugin_args(args),
             "stop" => Self::parse_command_args(CliCommand::Stop, args),
             "trigger" => Self::parse_trigger_args(args),
             "validate" => Self::parse_command_args(CliCommand::Validate, args),
@@ -90,6 +97,7 @@ impl CliRequest {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -111,6 +119,7 @@ impl CliRequest {
                         json_output: false,
                         trigger_operation: None,
                         catalog_request: None,
+                        plugin_command: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -147,6 +156,7 @@ impl CliRequest {
             json_output,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         })
@@ -203,6 +213,7 @@ impl CliRequest {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: Some(daemon_owner_id),
         })
@@ -224,6 +235,7 @@ impl CliRequest {
                 json_output: false,
                 trigger_operation: None,
                 catalog_request: None,
+                plugin_command: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -282,6 +294,7 @@ impl CliRequest {
                     json_output,
                     trigger_operation: None,
                     catalog_request: Some(CatalogRequest::List { filter }),
+                    plugin_command: None,
                     observe_request: None,
                     daemon_owner_id: None,
                 })
@@ -332,6 +345,7 @@ impl CliRequest {
                     json_output,
                     trigger_operation: None,
                     catalog_request: Some(CatalogRequest::Show { reference }),
+                    plugin_command: None,
                     observe_request: None,
                     daemon_owner_id: None,
                 })
@@ -362,6 +376,7 @@ impl CliRequest {
                         json_output: false,
                         trigger_operation: None,
                         catalog_request: None,
+                        plugin_command: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -436,6 +451,7 @@ impl CliRequest {
             json_output,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: Some(ObserveRequest {
                 limit,
                 trigger_id,
@@ -461,6 +477,7 @@ impl CliRequest {
                 json_output: false,
                 trigger_operation: None,
                 catalog_request: None,
+                plugin_command: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -501,6 +518,7 @@ impl CliRequest {
                 json_output,
                 trigger_operation: Some(TriggerOperation::List),
                 catalog_request: None,
+                plugin_command: None,
                 observe_request: None,
                 daemon_owner_id: None,
             });
@@ -528,6 +546,7 @@ impl CliRequest {
                         json_output: false,
                         trigger_operation: None,
                         catalog_request: None,
+                        plugin_command: None,
                         observe_request: None,
                         daemon_owner_id: None,
                     });
@@ -561,10 +580,217 @@ impl CliRequest {
                 TriggerOperation::Disable { trigger_id }
             }),
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         })
     }
+
+    fn parse_plugin_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let Some(action) = args.next() else {
+            return Err(UserFacingError::usage(
+                "`chainbot plugin` requires `source` or `install`. Run `chainbot help plugin`.",
+            ));
+        };
+        let action = action.to_string_lossy().into_owned();
+        if matches!(action.as_str(), "-h" | "--help") {
+            return Ok(Self {
+                command: CliCommand::Help(HelpTopic::Plugin),
+                json_output: false,
+                trigger_operation: None,
+                catalog_request: None,
+                plugin_command: None,
+                observe_request: None,
+                daemon_owner_id: None,
+            });
+        }
+
+        match action.as_str() {
+            "source" => Self::parse_plugin_source_args(args),
+            "install" => Self::parse_plugin_install_args(args),
+            other => Err(UserFacingError::usage(format!(
+                "Unsupported action after `chainbot plugin`: `{other}`. Run `chainbot help plugin`."
+            ))),
+        }
+    }
+
+    fn parse_plugin_source_args<I>(mut args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let Some(action) = args.next() else {
+            return Err(UserFacingError::usage(
+                "`chainbot plugin source` requires `list` or `show`. Run `chainbot help plugin`.",
+            ));
+        };
+        match action.to_string_lossy().as_ref() {
+            "list" => {
+                let (locator, json_output, plugin_id, _force) =
+                    parse_plugin_locator_flags_with_force(args)?;
+                if plugin_id.is_some() {
+                    return Err(UserFacingError::usage(
+                        "`chainbot plugin source list` does not accept `--plugin`. Run `chainbot help plugin`.",
+                    ));
+                }
+                Ok(Self {
+                    command: CliCommand::Plugin,
+                    json_output,
+                    trigger_operation: None,
+                    catalog_request: None,
+                    plugin_command: Some(PluginCommand::Source(PluginSourceRequest::List {
+                        locator,
+                    })),
+                    observe_request: None,
+                    daemon_owner_id: None,
+                })
+            }
+            "show" => {
+                let (locator, json_output, plugin_id, _force) =
+                    parse_plugin_locator_flags_with_force(args)?;
+                Ok(Self {
+                    command: CliCommand::Plugin,
+                    json_output,
+                    trigger_operation: None,
+                    catalog_request: None,
+                    plugin_command: Some(PluginCommand::Source(PluginSourceRequest::Show {
+                        locator,
+                        plugin_id,
+                    })),
+                    observe_request: None,
+                    daemon_owner_id: None,
+                })
+            }
+            other => Err(UserFacingError::usage(format!(
+                "Unsupported action after `chainbot plugin source`: `{other}`. Use `list` or `show`."
+            ))),
+        }
+    }
+
+    fn parse_plugin_install_args<I>(args: I) -> Result<Self, UserFacingError>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        let (locator, _json_output, plugin_id, force) = parse_plugin_locator_flags_with_force(args)?;
+        Ok(Self {
+            command: CliCommand::Plugin,
+            json_output: false,
+            trigger_operation: None,
+            catalog_request: None,
+            plugin_command: Some(PluginCommand::Install(PluginInstallRequest {
+                locator,
+                plugin_id,
+                force,
+            })),
+            observe_request: None,
+            daemon_owner_id: None,
+        })
+    }
+}
+
+fn parse_plugin_locator_flags_with_force<I>(
+    mut args: I,
+) -> Result<(PluginSourceLocator, bool, Option<String>, bool), UserFacingError>
+where
+    I: Iterator<Item = OsString>,
+{
+    let Some(source_kind) = args.next() else {
+        return Err(UserFacingError::usage(
+            "plugin commands require a source kind: `github` or `git`.",
+        ));
+    };
+    let source_kind = source_kind.to_string_lossy().into_owned();
+    let Some(target) = args.next() else {
+        return Err(UserFacingError::usage(format!(
+            "`chainbot plugin ... {source_kind}` requires a source target."
+        )));
+    };
+    let target = target.to_string_lossy().into_owned();
+    let mut git_ref = None;
+    let mut plugin_id = None;
+    let mut json_output = false;
+    let mut force = false;
+    while let Some(arg) = args.next() {
+        let raw = arg.to_string_lossy().into_owned();
+        match raw.as_str() {
+            "--json" => json_output = true,
+            "--force" => force = true,
+            "--ref" => {
+                let Some(value) = args.next() else {
+                    return Err(UserFacingError::usage(
+                        "`--ref` requires `<git-ref>`. Run `chainbot help plugin`.",
+                    ));
+                };
+                git_ref = Some(value.to_string_lossy().into_owned());
+            }
+            "--plugin" => {
+                let Some(value) = args.next() else {
+                    return Err(UserFacingError::usage(
+                        "`--plugin` requires `<plugin_id>`. Run `chainbot help plugin`.",
+                    ));
+                };
+                plugin_id = Some(value.to_string_lossy().into_owned());
+            }
+            _ => {
+                if let Some((flag, value)) = raw.split_once('=') {
+                    match flag {
+                        "--ref" => git_ref = Some(value.to_owned()),
+                        "--plugin" => plugin_id = Some(value.to_owned()),
+                        "--json" => {
+                            json_output = parse_bool_flag_value(
+                                "--json",
+                                value,
+                                0,
+                                "chainbot plugin",
+                            )?
+                        }
+                        "--force" => {
+                            force = parse_bool_flag_value(
+                                "--force",
+                                value,
+                                0,
+                                "chainbot plugin",
+                            )?
+                        }
+                        _ => {
+                            return Err(UserFacingError::usage(format!(
+                                "Unexpected plugin argument: `{raw}`. Run `chainbot help plugin`."
+                            )))
+                        }
+                    }
+                    continue;
+                }
+                return Err(UserFacingError::usage(format!(
+                    "Unexpected plugin argument: `{raw}`. Run `chainbot help plugin`."
+                )));
+            }
+        }
+    }
+
+    let locator = match source_kind.as_str() {
+        "github" => {
+            let (owner, repo) = target.split_once('/').ok_or_else(|| {
+                UserFacingError::usage(
+                    "`chainbot plugin ... github` requires `<owner>/<repo>` as the target.",
+                )
+            })?;
+            PluginSourceLocator::GitHub {
+                owner: owner.to_owned(),
+                repo: repo.to_owned(),
+                git_ref,
+            }
+        }
+        "git" => PluginSourceLocator::Git { remote: target, git_ref },
+        other => {
+            return Err(UserFacingError::usage(format!(
+                "Unsupported plugin source kind `{other}`. Use `github` or `git`."
+            )))
+        }
+    };
+
+    Ok((locator, json_output, plugin_id, force))
 }
 
 fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
@@ -574,6 +800,7 @@ fn parse_help_topic(value: &str) -> Result<HelpTopic, UserFacingError> {
         "status" => Ok(HelpTopic::Status),
         "observe" => Ok(HelpTopic::Observe),
         "catalog" => Ok(HelpTopic::Catalog),
+        "plugin" => Ok(HelpTopic::Plugin),
         "stop" => Ok(HelpTopic::Stop),
         "trigger" => Ok(HelpTopic::Trigger),
         "validate" => Ok(HelpTopic::Validate),
@@ -594,6 +821,7 @@ fn help_topic_for(command: CliCommand) -> HelpTopic {
         CliCommand::Status => HelpTopic::Status,
         CliCommand::Observe => HelpTopic::Observe,
         CliCommand::Catalog => HelpTopic::Catalog,
+        CliCommand::Plugin => HelpTopic::Plugin,
         CliCommand::Stop => HelpTopic::Stop,
         CliCommand::Trigger => HelpTopic::Trigger,
         CliCommand::Validate => HelpTopic::Validate,
@@ -612,6 +840,7 @@ fn command_name(command: CliCommand) -> &'static str {
         CliCommand::Status => "status",
         CliCommand::Observe => "observe",
         CliCommand::Catalog => "catalog",
+        CliCommand::Plugin => "plugin",
         CliCommand::Stop => "stop",
         CliCommand::Trigger => "trigger",
         CliCommand::Validate => "validate",
@@ -687,6 +916,7 @@ fn suggest_command(value: &str) -> Option<&'static str> {
         "version",
         "status",
         "observe",
+        "plugin",
         "init",
         "trigger",
         "validate",

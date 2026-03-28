@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net",
 toml = "1.0.7"
 tower = { version = "0.5", features = ["util"] }
 wasmtime = "38.0.3"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.28"
