@@ -442,6 +442,7 @@ executable = "bin/market_feed.sh"
 - canonical entrypoint 是 `plugins/<plugin_id>/config.toml`
 - plugin package 目录名必须与 `plugin_id` 完全一致
 - plugin manifest 与 workflow / trigger 分离维护
+- `config.toml` may include install-only `[source]` metadata for remote source discovery and install
 - `executable` 必须相对 manifest 文件自身解析
 - external trigger plugin 必须声明 `trigger.listen.event`
 - plugin package 内所有相对路径都相对 plugin package root 解析
