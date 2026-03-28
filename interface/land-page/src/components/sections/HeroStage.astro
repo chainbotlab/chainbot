@@ -10,8 +10,8 @@ const { content, docsUrl } = Astro.props;
 ---
 
 <section class="relative z-10 mx-auto grid w-full max-w-7xl grid-cols-1 items-start gap-16 px-6 pb-24 pt-16 lg:grid-cols-12 lg:gap-8">
-  <div class="flex flex-col items-start pr-8 lg:col-span-7">
-    <div class="mb-8 inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.24em] text-primary-strong">
+  <div class="flex min-w-0 flex-col items-start lg:col-span-7 lg:pr-8">
+    <div class="type-eyebrow mb-8 inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-3 py-1.5 text-primary-strong">
       <svg aria-hidden="true" class="size-3 opacity-70" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <path d="M22 11.08V12A10 10 0 1 1 12.07 2.86"></path>
         <path d="m22 4-10 10.01-3-3"></path>
@@ -19,49 +19,30 @@ const { content, docsUrl } = Astro.props;
       {content.hero.badge}
     </div>
 
-    <h1 class="max-w-4xl text-balance font-display text-[4rem] leading-[1.04] tracking-tight text-foreground sm:text-[4.5rem]">
+    <h1 class="max-w-4xl text-balance font-display text-[clamp(3rem,8vw,4.5rem)] leading-[1.04] tracking-tight text-foreground">
       {content.hero.title}
     </h1>
 
-    <p class="mb-10 mt-6 max-w-xl text-pretty text-xl font-light leading-relaxed text-muted-foreground">
+    <p class="mb-10 mt-6 max-w-[35rem] text-pretty text-[1.125rem] font-normal leading-[1.72] text-muted-foreground">
       {content.hero.description}
     </p>
 
-    <div class="mb-12 flex flex-wrap gap-3">
-      {content.hero.chips.map((chip, index) => (
-        <span class="inline-flex items-center gap-2 rounded-full border border-border bg-white/70 px-5 py-2.5 text-sm font-medium text-foreground shadow-sm">
-          <span class:list={[
-            "inline-flex size-4 items-center justify-center rounded-full text-[10px] font-bold",
-            index === 0 && "bg-secondary text-secondary-foreground",
-            index === 1 && "bg-primary/12 text-primary-strong",
-            index === 2 && "bg-foreground text-white",
-          ]}>
-            {index === 0 ? "⚡" : index === 1 ? "✓" : "◌"}
-          </span>
-          {chip}
-        </span>
-      ))}
-    </div>
   </div>
 
   <div class="relative mt-8 lg:col-span-5 lg:mt-0">
-    <div aria-hidden="true" class="absolute -inset-4 -z-10 rounded-[3rem] bg-foreground/15 blur-2xl"></div>
-
-    <div class="relative overflow-hidden rounded-[2rem] border border-white/10 bg-foreground p-8 shadow-[0_36px_90px_rgba(17,19,21,0.28)]">
-      <div aria-hidden="true" class="absolute inset-x-0 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.2),transparent)]"></div>
-
+    <div class="relative rounded-[2rem] border border-white/10 bg-foreground p-6 shadow-[0_18px_48px_rgba(17,19,21,0.18)] sm:p-8">
       <div class="mb-8 text-center">
-        <div class="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-white/45">{content.install.eyebrow}</div>
-        <h2 class="font-display text-3xl tracking-wide text-white">{content.install.title}</h2>
-        <p class="mt-2 text-sm text-white/55">{content.install.description}</p>
+        <div class="type-eyebrow mb-3 text-white/65">{content.install.eyebrow}</div>
+        <h2 class="font-display text-[2rem] tracking-[-0.02em] text-white">{content.install.title}</h2>
+        <p class="type-caption mt-2 text-white/70">{content.install.description}</p>
       </div>
 
-      <div class="group flex cursor-pointer items-center justify-between rounded-xl border border-white/10 bg-black/60 p-4 transition-colors hover:border-primary/50">
-        <div class="flex items-center gap-3">
-          <span class="font-mono text-sm text-primary">$</span>
-          <code class="font-mono text-sm text-white/90">{content.install.primaryCommand}</code>
+      <div class="group flex flex-col gap-4 rounded-xl border border-white/10 bg-black/60 p-4 transition-colors hover:border-primary/50 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex min-w-0 items-start gap-3">
+          <span class="type-command text-primary">$</span>
+          <code class="type-command command-scroll min-w-0 whitespace-nowrap text-white/90">{content.install.primaryCommand}</code>
         </div>
-        <button aria-label={content.install.copyLabel} class="text-white/35 transition-colors group-hover:text-white" data-copy-text={content.install.primaryCommand} type="button">
+        <button aria-label={content.install.copyLabel} class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center self-end rounded-lg text-white/65 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 sm:self-auto" data-copy-text={content.install.primaryCommand} type="button">
           <svg aria-hidden="true" class="size-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <rect height="13" rx="2" ry="2" width="13" x="9" y="9"></rect>
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
@@ -70,20 +51,20 @@ const { content, docsUrl } = Astro.props;
       </div>
 
       <div class="mt-10">
-        <div class="mb-4 pl-2 text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">{content.install.nextStepsLabel}</div>
+        <div class="type-eyebrow mb-4 pl-2 text-white/65">{content.install.nextStepsLabel}</div>
         <div class="space-y-1">
           {content.install.nextSteps.map((step) => (
-            <div class="group flex cursor-pointer items-center gap-4 rounded-lg px-3 py-2 transition-colors hover:bg-white/5">
+            <div class="group flex min-w-0 flex-col gap-2 rounded-lg px-3 py-2 transition-colors hover:bg-white/5 sm:flex-row sm:items-center sm:gap-4">
               <span class="size-1.5 rounded-full bg-white/25 transition-colors group-hover:bg-primary"></span>
-              <code class="flex-1 font-mono text-sm text-white/80">{step.command}</code>
-              <span class="text-xs text-white/35">{step.description}</span>
+              <code class="type-command command-scroll min-w-0 flex-1 whitespace-nowrap text-white/80">{step.command}</code>
+              <span class="type-caption text-white/65 sm:text-right">{step.description}</span>
             </div>
           ))}
         </div>
       </div>
 
       <div class="mt-8 border-t border-white/10 pt-6 text-center">
-        <a class="inline-flex items-center justify-center gap-2 text-sm text-white/55 transition-colors hover:text-white" href={docsUrl} rel="noreferrer" target="_blank">
+        <a class="inline-flex min-h-11 items-center justify-center gap-2 text-[0.9375rem] font-medium tracking-[0.01em] text-white/70 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50" href={docsUrl} rel="noreferrer" target="_blank">
           {content.install.docsLabel}
           <svg aria-hidden="true" class="size-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" viewBox="0 0 24 24">
             <path d="M5 12h14"></path>

@@ -9,23 +9,25 @@ interface Props {
 const { content, docsUrl } = Astro.props;
 ---
 
-<section id="cta" class="relative z-10 mx-auto w-full max-w-4xl px-6 py-24 text-center">
-  <h2 class="mb-6 font-display text-5xl text-foreground">{content.cta.title}</h2>
-  <p class="mx-auto mb-10 max-w-2xl text-lg text-muted-foreground">{content.cta.description}</p>
+<section id="cta" class="section-deferred relative z-10 mx-auto w-full max-w-4xl px-6 py-24 text-center">
+  <h2 class="type-section-title mb-6 text-balance text-foreground">{content.cta.title}</h2>
+  <p class="type-section-body mx-auto mb-10 max-w-[34rem] text-muted-foreground">{content.cta.description}</p>
 
-  <div class="inline-flex w-full flex-col items-center gap-4 rounded-[1.4rem] border border-border bg-white p-2 shadow-sm sm:w-auto sm:flex-row">
-    <div class="flex w-full items-center gap-4 rounded-xl border border-border bg-neutral-50 px-6 py-3 sm:w-auto">
-      <span class="font-mono text-muted-foreground">$</span>
-      <code class="font-mono text-sm text-foreground">{content.cta.command}</code>
-      <button aria-label={content.install.copyLabel} class="ml-4 text-muted-foreground transition-colors hover:text-foreground" data-copy-text={content.cta.command} type="button">
-        <svg aria-hidden="true" class="size-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <rect height="13" rx="2" ry="2" width="13" x="9" y="9"></rect>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-        </svg>
-      </button>
+  <div class="w-full overflow-x-auto px-1 [scrollbar-width:none] [-ms-overflow-style:none] lg:overflow-visible">
+    <div class="grid min-w-[41rem] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-[1.4rem] border border-border/90 bg-surface/95 p-2 shadow-[0_18px_42px_rgba(17,19,21,0.08)] lg:min-w-0">
+      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4 rounded-[1rem] bg-background px-4 py-3 ring-1 ring-inset ring-border/80 sm:px-6">
+        <span class="type-command text-muted-foreground">$</span>
+        <code class="type-command command-scroll block min-w-0 whitespace-nowrap text-left text-foreground">{content.cta.command}</code>
+        <button aria-label={content.install.copyLabel} class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40" data-copy-text={content.cta.command} type="button">
+          <svg aria-hidden="true" class="size-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <rect height="13" rx="2" ry="2" width="13" x="9" y="9"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+        </button>
+      </div>
+      <a class="inline-flex min-h-11 shrink-0 items-center justify-center whitespace-nowrap rounded-[1rem] bg-primary-strong px-5 py-3 text-[0.9375rem] font-semibold tracking-[0.01em] text-white shadow-sm transition-colors hover:bg-primary-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:px-8" href={docsUrl}>
+        {content.cta.docsLabel}
+      </a>
     </div>
-    <a class="inline-flex w-full items-center justify-center rounded-xl bg-foreground px-8 py-3 font-medium text-white shadow-md transition-colors hover:bg-neutral-900 sm:w-auto" href={docsUrl}>
-      {content.cta.docsLabel}
-    </a>
   </div>
 </section>
