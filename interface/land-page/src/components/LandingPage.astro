@@ -30,10 +30,6 @@ const content = getSiteContent(locale);
     data-copy-error-label={content.install.copyFailedLabel}
     data-copy-success-label={content.install.copiedLabel}
   >
-    <div aria-hidden="true" class="noise-overlay"></div>
-    <div aria-hidden="true" class="pointer-events-none absolute right-[-10%] top-[-16%] h-[48rem] w-[48rem] rounded-full bg-primary-soft blur-[140px]"></div>
-    <div aria-hidden="true" class="pointer-events-none absolute bottom-[-18%] left-[-8%] h-[36rem] w-[36rem] rounded-full bg-primary-faint blur-[120px]"></div>
-
     <LandingHeader
       brand={content.brand}
       currentLocale={locale}
@@ -50,7 +46,7 @@ const content = getSiteContent(locale);
     <main id="top">
       <HeroStage content={content} docsUrl={docsUrl} />
       <ArchitectureShowcase content={content} />
-      <IntegrationsTicker items={content.integrations.items} />
+      <IntegrationsTicker content={content.integrations} />
       <FooterCta content={content} docsUrl={docsUrl} />
     </main>
 
@@ -58,22 +54,23 @@ const content = getSiteContent(locale);
       <div class="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-8 md:flex-row md:items-center md:justify-between">
         <BrandMark compact eyebrow={content.brand.eyebrow} homeHref={homepageUrl} name={content.brand.footerName} />
         <div class="text-center text-sm text-muted-foreground md:text-right">
-          <p class="max-w-2xl text-pretty">{content.footer.summary}</p>
-          <div class="mt-2 flex items-center justify-center gap-6 md:justify-end">
-            <a class="font-medium text-foreground transition-colors hover:text-primary-strong" href={docsUrl}>{content.footer.docsLabel}</a>
-            <span aria-hidden="true" class="text-border">/</span>
-            <a class="transition-colors hover:text-foreground" href={homepageUrl}>chainbot.dev</a>
-            <span aria-hidden="true" class="text-border">/</span>
-            <a class="transition-colors hover:text-foreground" href={githubUrl}>{content.footer.githubLabel}</a>
+          <p class="mx-auto max-w-[38rem] text-pretty leading-6 md:ml-auto">{content.footer.summary}</p>
+          <div class="mt-3 flex flex-wrap items-center justify-center gap-2 md:justify-end">
+            <a class="inline-flex min-h-10 items-center rounded-full px-3 py-2 font-medium text-foreground transition-colors hover:bg-white/70 hover:text-primary-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40" href={docsUrl}>{content.footer.docsLabel}</a>
+            <a class="inline-flex min-h-10 items-center rounded-full px-3 py-2 transition-colors hover:bg-white/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40" href={homepageUrl}>chainbot.dev</a>
+            <a class="inline-flex min-h-10 items-center rounded-full px-3 py-2 transition-colors hover:bg-white/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40" href={githubUrl}>{content.footer.githubLabel}</a>
           </div>
-          <p class="mt-2 text-xs uppercase tracking-[0.2em] text-muted-foreground/80">{content.brand.footerCopyright}</p>
+          <p class="mt-3 text-xs uppercase tracking-[0.2em] text-muted-foreground/80">{content.brand.footerCopyright}</p>
         </div>
       </div>
     </footer>
 
+    <p aria-live="polite" class="sr-only" data-copy-status role="status"></p>
+
     <script is:inline>
       const copyButtons = Array.from(document.querySelectorAll("[data-copy-text]"));
       const root = document.querySelector("[data-copy-success-label]");
+      const statusNode = document.querySelector("[data-copy-status]");
       const copiedLabel = root?.getAttribute("data-copy-success-label") ?? "Copied";
       const copyFailedLabel = root?.getAttribute("data-copy-error-label") ?? "Copy failed";
 
@@ -90,12 +87,18 @@ const content = getSiteContent(locale);
             await navigator.clipboard.writeText(copyText);
             button.setAttribute("aria-label", copiedLabel);
             button.dataset.copied = "true";
+            if (statusNode instanceof HTMLElement) {
+              statusNode.textContent = copiedLabel;
+            }
             window.setTimeout(() => {
               button.setAttribute("aria-label", originalLabel);
               delete button.dataset.copied;
             }, 1600);
           } catch {
             button.setAttribute("aria-label", copyFailedLabel);
+            if (statusNode instanceof HTMLElement) {
+              statusNode.textContent = copyFailedLabel;
+            }
             window.setTimeout(() => {
               button.setAttribute("aria-label", originalLabel);
             }, 1600);

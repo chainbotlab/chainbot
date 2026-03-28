@@ -38,6 +38,14 @@ export type IntegrationItem = {
   description: string;
 };
 
+export type IntegrationsContent = {
+  eyebrow: string;
+  title: string;
+  description: string;
+  ariaLabel: string;
+  items: IntegrationItem[];
+};
+
 export type SiteContent = {
   meta: {
     title: string;
@@ -81,6 +89,10 @@ export type SiteContent = {
     steps: ArchitectureStep[];
   };
   integrations: {
+    eyebrow: string;
+    title: string;
+    description: string;
+    ariaLabel: string;
     items: IntegrationItem[];
   };
   cta: {
@@ -177,6 +189,11 @@ const siteContent: Record<Locale, SiteContent> = {
       ],
     },
     integrations: {
+      eyebrow: "Built for AI-native operators",
+      title: "Moves with the agent tooling you already trust.",
+      description:
+        "ChainBot fits naturally into modern CLI-first workflows, from coding copilots to orchestration surfaces and open agent runtimes.",
+      ariaLabel: "Agent tooling brand logos",
       items: integrations,
     },
     cta: {
@@ -262,6 +279,11 @@ const siteContent: Record<Locale, SiteContent> = {
       ],
     },
     integrations: {
+      eyebrow: "面向 AI 原生操作员",
+      title: "与你已经信任的 agent 工具链自然协同。",
+      description:
+        "ChainBot 能顺滑接入现代 CLI-first 工作流，从 coding copilot 到 orchestration surface 与开放 agent runtime。",
+      ariaLabel: "Agent tooling brand logos",
       items: integrations,
     },
     cta: {
@@ -348,6 +370,11 @@ const siteContent: Record<Locale, SiteContent> = {
       ],
     },
     integrations: {
+      eyebrow: "Concu pour les opérateurs natifs IA",
+      title: "S'intègre aux outils agent que vous utilisez deja.",
+      description:
+        "ChainBot s'intègre naturellement aux workflows modernes centres sur le CLI, des copilotes de code aux surfaces d'orchestration et runtimes d'agents ouverts.",
+      ariaLabel: "Logos des outils agent",
       items: integrations,
     },
     cta: {

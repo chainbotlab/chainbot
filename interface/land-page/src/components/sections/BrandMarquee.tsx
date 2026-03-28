@@ -37,6 +37,7 @@ const brandDefinitions: Record<string, BrandDefinition> = {
 };
 
 interface BrandMarqueeProps {
+  ariaLabel: string;
   items: IntegrationItem[];
 }
 
@@ -47,7 +48,7 @@ function BrandLogo({ item }: { item: IntegrationItem }) {
   return (
     <article
       className={cn(
-        "flex min-w-[18rem] items-center gap-4 rounded-[1.75rem] border border-border/80 bg-surface/88 px-5 py-4 text-foreground shadow-[0_18px_48px_rgba(17,19,21,0.08)] backdrop-blur-sm transition-transform duration-300 hover:-translate-y-0.5",
+        "flex min-w-[18rem] items-center gap-4 rounded-[1.75rem] border border-border/80 bg-surface px-5 py-4 text-foreground shadow-[0_10px_24px_rgba(17,19,21,0.05)]",
       )}
     >
       <div
@@ -64,16 +65,16 @@ function BrandLogo({ item }: { item: IntegrationItem }) {
       </div>
 
       <div className="flex min-w-0 flex-col gap-1">
-        <p className="truncate text-sm font-semibold tracking-[0.08em] uppercase">{item.label}</p>
-        <p className="text-sm text-current/70">{item.description}</p>
+        <p className="truncate text-[0.875rem] font-semibold tracking-[0.06em] uppercase">{item.label}</p>
+        <p className="text-[0.8125rem] leading-5 text-current/70">{item.description}</p>
       </div>
     </article>
   );
 }
 
-export function BrandMarquee({ items }: BrandMarqueeProps) {
+export function BrandMarquee({ ariaLabel, items }: BrandMarqueeProps) {
   return (
-    <div aria-label="Agent tooling brand logos" className="relative mt-12">
+    <div aria-label={ariaLabel} className="relative mt-12" role="group">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-y-0 left-0 z-10 hidden w-24 bg-[linear-gradient(90deg,#f4f3ec,transparent)] lg:block"
@@ -90,7 +91,7 @@ export function BrandMarquee({ items }: BrandMarqueeProps) {
       </div>
 
       <div className="motion-reduce:hidden">
-        <Marquee className="brand-marquee-mask [--duration:34s]" pauseOnHover repeat={3}>
+        <Marquee className="brand-marquee-mask [--duration:34s]" pauseOnHover repeat={2}>
           {items.map((item) => (
             <BrandLogo key={item.id} item={item} />
           ))}
