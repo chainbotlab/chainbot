@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Package-relative paths, filesystem roots, and temporary directory prefixes.
+//!
+//! [OUTPUT]
+//! Provides path-safety checks and filesystem helpers for source discovery, prepare, and install flows.
+//!
+//! [ROLE]
+//! Centralizes low-level filesystem safety rules for the plugin source subsystem.
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5,13 +14,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::errors::ContractError;
 
 pub(crate) fn create_temp_dir(prefix: &str) -> Result<PathBuf, ContractError> {
+    create_temp_dir_in(&std::env::temp_dir(), prefix)
+}
+
+pub(crate) fn create_temp_dir_in(root: &Path, prefix: &str) -> Result<PathBuf, ContractError> {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| ContractError::CliUsage {
             message: format!("failed to compute temp dir timestamp: {error}"),
         })?
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("chainbot-{prefix}-{suffix}"));
+    let path = root.join(format!("chainbot-{prefix}-{suffix}"));
     fs::create_dir_all(&path).map_err(|source| ContractError::Io {
         path: path.clone(),
         operation: "create temp directory",

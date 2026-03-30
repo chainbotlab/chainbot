@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Materialized source repositories, plugin package paths, source metadata, and plugin manifests.
+//!
+//! [OUTPUT]
+//! Produces source repository read models and validated discovered plugin packages for source list/show/install flows.
+//!
+//! [ROLE]
+//! Owns plugin package discovery and source-facing metadata projection inside the source-install subsystem.
+
 use std::path::Path;
 
 use crate::errors::ContractError;
@@ -6,10 +15,10 @@ use crate::plugin::PluginManifest;
 
 use super::fs::{ensure_safe_relative_path, resolve_within_root};
 use super::manifest::{
-    load_plugin_definition_and_source, PluginSourceBuildDetail,
-    PluginSourceBuildOutputDetail, PluginSourceDescriptor, PluginSourceDetail,
-    PluginSourceListOutput, PluginSourceShowOutput, PluginSourceSummary, SourceIndexManifest,
-    SourceInstallManifest, LEGACY_SOURCE_INSTALL_FILE_NAME, SOURCE_INDEX_FILE_NAME,
+    load_plugin_definition_and_source, PluginSourceBuildDetail, PluginSourceBuildOutputDetail,
+    PluginSourceDescriptor, PluginSourceDetail, PluginSourceListOutput, PluginSourceShowOutput,
+    PluginSourceSummary, SourceIndexManifest, SourceInstallManifest, SourceInstallMode,
+    LEGACY_SOURCE_INSTALL_FILE_NAME, SOURCE_INDEX_FILE_NAME,
 };
 use super::transport::MaterializedSource;
 
@@ -123,24 +132,30 @@ pub(crate) fn build_show_output(
             entrypoint: plugin.manifest.entrypoint.clone(),
             capabilities: plugin.manifest.capabilities.clone(),
             entry_artifact: plugin.source_manifest.entry_artifact.clone(),
-            build: plugin.source_manifest.build.as_ref().map(|build| PluginSourceBuildDetail {
-                kind: build.kind.as_str().to_owned(),
-                command: build.command.clone(),
-                workdir: build.workdir.clone(),
-                outputs: build
-                    .outputs
-                    .iter()
-                    .map(|output| PluginSourceBuildOutputDetail {
-                        from: output.from.clone(),
-                        to: output.to.clone(),
-                    })
-                    .collect(),
-            }),
+            build: plugin
+                .source_manifest
+                .build
+                .as_ref()
+                .map(|build| PluginSourceBuildDetail {
+                    kind: build.kind.as_str().to_owned(),
+                    command: build.command.clone(),
+                    workdir: build.workdir.clone(),
+                    outputs: build
+                        .outputs
+                        .iter()
+                        .map(|output| PluginSourceBuildOutputDetail {
+                            from: output.from.clone(),
+                            to: output.to.clone(),
+                        })
+                        .collect(),
+                }),
         },
     }
 }
 
-fn discover_single_plugin_repository(source: &MaterializedSource) -> Result<DiscoveredPlugin, ContractError> {
+fn discover_single_plugin_repository(
+    source: &MaterializedSource,
+) -> Result<DiscoveredPlugin, ContractError> {
     load_plugin_package(source, &source.repo_root, String::from("."), None)
 }
 
@@ -151,7 +166,8 @@ fn discover_multi_plugin_repository(
     let index = SourceIndexManifest::load(index_path)?;
     let mut plugins = Vec::with_capacity(index.plugins.len());
     for entry in index.plugins {
-        let relative = ensure_safe_relative_path(&entry.path, "chainbot-plugin-index.plugins.path")?;
+        let relative =
+            ensure_safe_relative_path(&entry.path, "chainbot-plugin-index.plugins.path")?;
         let package_root = resolve_within_root(
             &source.repo_root,
             &relative,
@@ -189,10 +205,14 @@ fn load_plugin_package(
     manifest.manifest_path = manifest_path;
     manifest.validate()?;
     validate_manifest_alignment(&manifest, &source_manifest)?;
+    validate_source_entry_artifact_anchor(package_root, &manifest, &source_manifest)?;
 
     if !package_root.starts_with(&source.repo_root) {
         return Err(ContractError::CliUsage {
-            message: format!("plugin package path escapes repo root: {}", package_root.display()),
+            message: format!(
+                "plugin package path escapes repo root: {}",
+                package_root.display()
+            ),
         });
     }
 
@@ -209,15 +229,23 @@ fn validate_manifest_alignment(
     manifest: &PluginManifest,
     source_manifest: &SourceInstallManifest,
 ) -> Result<(), ContractError> {
+    if manifest.is_streamable_http_mcp_entrypoint() {
+        return Ok(());
+    }
+
     match source_manifest.runtime.as_str() {
         "python" | "node" | "bin" => {
-            let executable = manifest.executable.as_deref().ok_or_else(|| ContractError::CliUsage {
-                message: format!(
-                    "plugin {} runtime {} requires plugin.executable in config.toml",
-                    manifest.plugin_id,
-                    source_manifest.runtime.as_str()
-                ),
-            })?;
+            let executable =
+                manifest
+                    .executable
+                    .as_deref()
+                    .ok_or_else(|| ContractError::CliUsage {
+                        message: format!(
+                            "plugin {} runtime {} requires plugin.executable in config.toml",
+                            manifest.plugin_id,
+                            source_manifest.runtime.as_str()
+                        ),
+                    })?;
             if executable != source_manifest.entry_artifact {
                 return Err(ContractError::CliUsage {
                     message: format!(
@@ -249,5 +277,37 @@ fn validate_manifest_alignment(
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn validate_source_entry_artifact_anchor(
+    package_root: &Path,
+    manifest: &PluginManifest,
+    source_manifest: &SourceInstallManifest,
+) -> Result<(), ContractError> {
+    let should_require_anchor = manifest.is_streamable_http_mcp_entrypoint()
+        || matches!(source_manifest.install_mode, SourceInstallMode::Direct);
+    if !should_require_anchor {
+        return Ok(());
+    }
+
+    let artifact_path = source_manifest.entry_artifact_path(package_root)?;
+    let metadata = std::fs::metadata(&artifact_path).map_err(|source| ContractError::CliUsage {
+        message: format!(
+            "entry artifact missing for plugin {} at {}: {source}",
+            manifest.plugin_id,
+            artifact_path.display()
+        ),
+    })?;
+    if !metadata.is_file() {
+        return Err(ContractError::CliUsage {
+            message: format!(
+                "entry artifact must be a file for plugin {}: {}",
+                manifest.plugin_id,
+                artifact_path.display()
+            ),
+        });
+    }
+
     Ok(())
 }

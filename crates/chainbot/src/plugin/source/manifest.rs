@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Plugin package config documents, source metadata blocks, and source index manifests.
+//!
+//! [OUTPUT]
+//! Defines source-manifest contracts and CLI-facing read models for plugin source discovery and install.
+//!
+//! [ROLE]
+//! Owns repository-local source metadata decoding and validation for plugin packages.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +15,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::errors::ContractError;
 use crate::plugin::PluginManifest;
 
-use super::fs::{ensure_safe_relative_path, resolve_within_root, resolve_within_root_allow_parents};
+use super::fs::{
+    ensure_safe_relative_path, resolve_within_root, resolve_within_root_allow_parents,
+};
 
 pub(crate) const SOURCE_MANIFEST_VERSION: &str = "1.0.0";
 pub(crate) const SOURCE_INDEX_FILE_NAME: &str = "chainbot-plugin-index.toml";
@@ -180,13 +191,19 @@ impl SourceIndexManifest {
             }
             if !seen.insert(entry.plugin_id.clone()) {
                 return Err(ContractError::CliUsage {
-                    message: format!("duplicate plugin_id in plugin source index: {}", entry.plugin_id),
+                    message: format!(
+                        "duplicate plugin_id in plugin source index: {}",
+                        entry.plugin_id
+                    ),
                 });
             }
             let _ = ensure_safe_relative_path(&entry.path, "chainbot-plugin-index.plugins.path")?;
             if entry.summary.trim().is_empty() {
                 return Err(ContractError::CliUsage {
-                    message: format!("plugin source index summary must not be empty for {}", entry.plugin_id),
+                    message: format!(
+                        "plugin source index summary must not be empty for {}",
+                        entry.plugin_id
+                    ),
                 });
             }
         }
@@ -204,6 +221,7 @@ impl SourceInstallManifest {
                 ),
             });
         }
+        ensure_no_raw_server_reference(&self.entry_artifact, "source.entry_artifact")?;
         let _ = ensure_safe_relative_path(&self.entry_artifact, "source.entry_artifact")?;
         match self.install_mode {
             SourceInstallMode::Direct => {
@@ -246,7 +264,10 @@ impl SourceInstallManifest {
         Ok(())
     }
 
-    pub(crate) fn entry_artifact_path(&self, package_root: &Path) -> Result<PathBuf, ContractError> {
+    pub(crate) fn entry_artifact_path(
+        &self,
+        package_root: &Path,
+    ) -> Result<PathBuf, ContractError> {
         let relative = ensure_safe_relative_path(&self.entry_artifact, "source.entry_artifact")?;
         resolve_within_root(package_root, &relative, "source.entry_artifact")
     }
@@ -264,14 +285,18 @@ impl SourceInstallManifest {
             Path::new(&build.workdir),
             "source.build.workdir",
         )?;
-        let canonical_repo_root = std::fs::canonicalize(repo_root).map_err(|source| ContractError::Io {
-            path: repo_root.to_path_buf(),
-            operation: "canonicalize repo root",
-            source,
-        })?;
+        let canonical_repo_root =
+            std::fs::canonicalize(repo_root).map_err(|source| ContractError::Io {
+                path: repo_root.to_path_buf(),
+                operation: "canonicalize repo root",
+                source,
+            })?;
         if !workdir.starts_with(&canonical_repo_root) {
             return Err(ContractError::CliUsage {
-                message: format!("source.build.workdir escapes repo root: {}", workdir.display()),
+                message: format!(
+                    "source.build.workdir escapes repo root: {}",
+                    workdir.display()
+                ),
             });
         }
         Ok(Some(workdir))
@@ -297,14 +322,18 @@ impl SourceInstallManifest {
                 Path::new(&output.from),
                 "source.build.outputs.from",
             )?;
-            let canonical_repo_root = std::fs::canonicalize(repo_root).map_err(|source| ContractError::Io {
-                path: repo_root.to_path_buf(),
-                operation: "canonicalize repo root",
-                source,
-            })?;
+            let canonical_repo_root =
+                std::fs::canonicalize(repo_root).map_err(|source| ContractError::Io {
+                    path: repo_root.to_path_buf(),
+                    operation: "canonicalize repo root",
+                    source,
+                })?;
             if !from.starts_with(&canonical_repo_root) {
                 return Err(ContractError::CliUsage {
-                    message: format!("source.build.outputs.from escapes repo root: {}", from.display()),
+                    message: format!(
+                        "source.build.outputs.from escapes repo root: {}",
+                        from.display()
+                    ),
                 });
             }
             let to = resolve_within_root(
@@ -316,6 +345,17 @@ impl SourceInstallManifest {
         }
         Ok(outputs)
     }
+}
+
+fn ensure_no_raw_server_reference(value: &str, field: &'static str) -> Result<(), ContractError> {
+    if value.contains("://") {
+        return Err(ContractError::CliUsage {
+            message: format!(
+                "{field} must reference a package-relative artifact path; raw server URLs are not allowed: {value}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn load_plugin_definition_and_source(

@@ -1,3 +1,12 @@
+//! [INPUT]
+//! Raw CLI source-kind arguments and optional git ref selectors.
+//!
+//! [OUTPUT]
+//! Defines parsed plugin source locator types and display helpers for github and git sources.
+//!
+//! [ROLE]
+//! Owns source locator parsing primitives for plugin source list/show/install commands.
+
 use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,9 +51,11 @@ impl PluginSourceLocator {
 
     pub(crate) fn display_label(&self) -> String {
         match self {
-            Self::GitHub { owner, repo, git_ref } => {
-                render_locator("github", &format!("{owner}/{repo}"), git_ref.as_deref())
-            }
+            Self::GitHub {
+                owner,
+                repo,
+                git_ref,
+            } => render_locator("github", &format!("{owner}/{repo}"), git_ref.as_deref()),
             Self::Git { remote, git_ref } => render_locator("git", remote, git_ref.as_deref()),
         }
     }

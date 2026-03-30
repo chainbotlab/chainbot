@@ -1,9 +1,18 @@
+//! [INPUT]
+//! Prepared plugin package trees, plugin target directories, and transactional install requests.
+//!
+//! [OUTPUT]
+//! Swaps prepared plugin packages into the root with rollback support and reports the install result.
+//!
+//! [ROLE]
+//! Owns transactional plugin-package replacement for source-based installs.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::errors::ContractError;
 
-use super::fs::{copy_tree_strict, create_temp_dir, remove_path_if_exists};
+use super::fs::{copy_tree_strict, create_temp_dir_in, remove_path_if_exists};
 use super::prepare::PreparedPlugin;
 
 #[derive(Debug)]
@@ -52,7 +61,7 @@ impl InstallTransaction {
                 ),
             });
         }
-        let staging_root = create_temp_dir("plugin-stage")?;
+        let staging_root = create_temp_dir_in(&transaction_dir, "plugin-stage")?;
         let staged_dir = staging_root.join(&prepared.plugin_id);
         copy_tree_strict(&prepared.package_root, &staged_dir)?;
         let backup_dir = if target_dir.exists() {
@@ -108,7 +117,6 @@ impl InstallTransaction {
         self.finalized = true;
         Ok(())
     }
-
 }
 
 impl Drop for InstallTransaction {
