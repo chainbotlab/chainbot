@@ -2,7 +2,7 @@
 //! Process arguments, environment-resolved ChainBot roots, and runtime services from config, state, trigger, executor, worker, and secrets modules.
 //!
 //! [OUTPUT]
-//! Parses commands, executes help, init, status, observe, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
+//! Parses commands, executes help, plugin/source/install, init, status, observe, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
 //!
 //! [ROLE]
 //! Owns the user-facing command boundary for the `chainbot` binary.
@@ -248,7 +248,8 @@ impl CliRequest {
                     PluginSourceRequest::List { locator }
                     | PluginSourceRequest::Show { locator, .. } => locator,
                 };
-                let materialized = materialize_source(locator).map_err(UserFacingError::from_contract)?;
+                let materialized =
+                    materialize_source(locator).map_err(UserFacingError::from_contract)?;
                 let descriptor = PluginSourceDescriptor {
                     source_kind: locator.kind().as_str().to_owned(),
                     target: locator.target(),
@@ -261,11 +262,12 @@ impl CliRequest {
                     PluginSourceRequest::List { .. } => {
                         let payload = build_list_output(&repository);
                         if self.json_output {
-                            let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
-                                UserFacingError::state(format!(
-                                    "Failed to serialize plugin source list payload: {source}"
-                                ))
-                            })?;
+                            let stdout =
+                                serde_json::to_string_pretty(&payload).map_err(|source| {
+                                    UserFacingError::state(format!(
+                                        "Failed to serialize plugin source list payload: {source}"
+                                    ))
+                                })?;
                             return Ok(CliOutput::text(stdout));
                         }
                         Ok(CliOutput::text(render_plugin_source_list(&payload)))
@@ -279,11 +281,12 @@ impl CliRequest {
                         .map_err(UserFacingError::from_contract)?;
                         let payload = build_show_output(&repository, plugin);
                         if self.json_output {
-                            let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
-                                UserFacingError::state(format!(
-                                    "Failed to serialize plugin source show payload: {source}"
-                                ))
-                            })?;
+                            let stdout =
+                                serde_json::to_string_pretty(&payload).map_err(|source| {
+                                    UserFacingError::state(format!(
+                                        "Failed to serialize plugin source show payload: {source}"
+                                    ))
+                                })?;
                             return Ok(CliOutput::text(stdout));
                         }
                         Ok(CliOutput::text(render_plugin_source_show(&payload)))
@@ -292,8 +295,8 @@ impl CliRequest {
             }
             PluginCommand::Install(request) => {
                 let root_layout = self.load_definition_root()?;
-                let materialized = materialize_source(&request.locator)
-                    .map_err(UserFacingError::from_contract)?;
+                let materialized =
+                    materialize_source(&request.locator).map_err(UserFacingError::from_contract)?;
                 let descriptor = PluginSourceDescriptor {
                     source_kind: request.locator.kind().as_str().to_owned(),
                     target: request.locator.target(),
@@ -310,15 +313,14 @@ impl CliRequest {
                 .map_err(UserFacingError::from_contract)?;
                 let prepared = prepare_installable_plugin(&materialized, plugin)
                     .map_err(UserFacingError::from_contract)?;
-                let (transaction, result) = InstallTransaction::begin(
-                    &root_layout.plugins_dir,
-                    &prepared,
-                    request.force,
-                )
-                .map_err(UserFacingError::from_contract)?;
+                let (transaction, result) =
+                    InstallTransaction::begin(&root_layout.plugins_dir, &prepared, request.force)
+                        .map_err(UserFacingError::from_contract)?;
                 match load_root_definition_bundle(&root_layout) {
                     Ok(_) => {
-                        transaction.finalize().map_err(UserFacingError::from_contract)?;
+                        transaction
+                            .finalize()
+                            .map_err(UserFacingError::from_contract)?;
                     }
                     Err(error) => {
                         let rollback_result = transaction.rollback();

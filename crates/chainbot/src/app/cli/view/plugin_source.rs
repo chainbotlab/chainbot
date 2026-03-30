@@ -94,7 +94,11 @@ pub(crate) fn render_plugin_install_success(
         result.plugin_id,
         result.target_dir.display(),
         locator_label,
-        if result.replaced_existing { "yes" } else { "no" }
+        if result.replaced_existing {
+            "yes"
+        } else {
+            "no"
+        }
     )];
     if let Some(value) = resolved_ref {
         lines.push(format!("resolved_ref={value}"));
