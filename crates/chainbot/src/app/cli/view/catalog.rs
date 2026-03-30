@@ -14,7 +14,8 @@ use serde::Serialize;
 use crate::builtins::nodes::catalog as node_catalog;
 use crate::builtins::triggers::catalog as trigger_catalog;
 use crate::plugin::{
-    PluginEventSchemaDescriptor, PluginKind, PluginManifest, PluginOperationDescriptor,
+    McpTransportKind, PluginEventSchemaDescriptor, PluginKind, PluginManifest,
+    PluginOperationDescriptor, EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,10 @@ pub struct PluginSummary {
     pub plugin_id: String,
     pub kind: String,
     pub entrypoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     pub capabilities: Vec<String>,
 }
 
@@ -148,6 +153,10 @@ pub struct PluginDetail {
     pub plugin_id: String,
     pub plugin_kind: String,
     pub entrypoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     pub capabilities: Vec<String>,
     pub schema_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +177,12 @@ pub struct PluginDetail {
 pub struct PluginProtocolDetail {
     pub start_message: Vec<String>,
     pub event_message: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginRuntimeSurface {
+    transport: String,
+    runtime: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -210,12 +225,21 @@ pub fn build_catalog_list(
         plugins: if matches!(filter, None | Some(CatalogFilterKind::Plugin)) {
             plugins
                 .iter()
-                .map(|manifest| PluginSummary {
-                    reference: format!("plugin:{}", manifest.plugin_id),
-                    plugin_id: manifest.plugin_id.clone(),
-                    kind: manifest.kind.clone(),
-                    entrypoint: manifest.entrypoint.clone(),
-                    capabilities: manifest.capabilities.clone(),
+                .map(|manifest| {
+                    let runtime_surface = plugin_runtime_surface(manifest);
+                    PluginSummary {
+                        reference: format!("plugin:{}", manifest.plugin_id),
+                        plugin_id: manifest.plugin_id.clone(),
+                        kind: manifest.kind.clone(),
+                        entrypoint: manifest.entrypoint.clone(),
+                        transport: runtime_surface
+                            .as_ref()
+                            .map(|detail| detail.transport.clone()),
+                        runtime: runtime_surface
+                            .as_ref()
+                            .map(|detail| detail.runtime.clone()),
+                        capabilities: manifest.capabilities.clone(),
+                    }
                 })
                 .collect()
         } else {
@@ -314,11 +338,14 @@ pub fn build_status_plugin_summary(plugins: &[PluginManifest]) -> StatusPluginSu
 
 fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String> {
     let plugin_kind = manifest.kind().map_err(|error| error.to_string())?;
+    let runtime_surface = plugin_runtime_surface(manifest);
     match plugin_kind {
         PluginKind::Builtin => Ok(PluginDetail {
             plugin_id: manifest.plugin_id.clone(),
             plugin_kind: manifest.kind.clone(),
             entrypoint: manifest.entrypoint.clone(),
+            transport: None,
+            runtime: None,
             capabilities: manifest.capabilities.clone(),
             schema_status: String::from("manifest_only"),
             lifecycle: None,
@@ -332,6 +359,12 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
             plugin_id: manifest.plugin_id.clone(),
             plugin_kind: manifest.kind.clone(),
             entrypoint: manifest.entrypoint.clone(),
+            transport: runtime_surface
+                .as_ref()
+                .map(|detail| detail.transport.clone()),
+            runtime: runtime_surface
+                .as_ref()
+                .map(|detail| detail.runtime.clone()),
             capabilities: manifest.capabilities.clone(),
             schema_status: String::from("declared"),
             lifecycle: None,
@@ -383,6 +416,8 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
                 plugin_id: manifest.plugin_id.clone(),
                 plugin_kind: manifest.kind.clone(),
                 entrypoint: manifest.entrypoint.clone(),
+                transport: None,
+                runtime: None,
                 capabilities: manifest.capabilities.clone(),
                 schema_status: String::from("declared"),
                 lifecycle,
@@ -394,6 +429,26 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
             })
         }
     }
+}
+
+fn plugin_runtime_surface(manifest: &PluginManifest) -> Option<PluginRuntimeSurface> {
+    if manifest.entrypoint != EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1 {
+        return None;
+    }
+
+    let mcp = manifest.mcp.as_ref()?;
+    let (transport, runtime) = match mcp.transport {
+        McpTransportKind::Stdio => (
+            String::from("stdio"),
+            String::from("per_invocation_stdio_session"),
+        ),
+        McpTransportKind::StreamableHttp => (
+            String::from("streamable_http"),
+            String::from("per_invocation_streamable_http_session"),
+        ),
+    };
+
+    Some(PluginRuntimeSurface { transport, runtime })
 }
 
 pub fn render_catalog_list(
@@ -436,10 +491,17 @@ pub fn render_catalog_list(
             lines.push(String::from("  none"));
         } else {
             for entry in &output.plugins {
-                lines.push(format!(
+                let mut line = format!(
                     "  {:<32} {:<16} entrypoint={}",
                     entry.reference, entry.kind, entry.entrypoint
-                ));
+                );
+                if let Some(transport) = entry.transport.as_deref() {
+                    line.push_str(&format!(" transport={transport}"));
+                }
+                if let Some(runtime) = entry.runtime.as_deref() {
+                    line.push_str(&format!(" runtime={runtime}"));
+                }
+                lines.push(line);
             }
         }
     }
@@ -508,6 +570,21 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
             lines.push(format!("  plugin_id: {}", detail.plugin_id));
             lines.push(format!("  plugin_kind: {}", detail.plugin_kind));
             lines.push(format!("  entrypoint: {}", detail.entrypoint));
+            if let Some(transport) = detail.transport.as_deref() {
+                lines.push(format!("  transport: {transport}"));
+            }
+            if let Some(runtime) = detail.runtime.as_deref() {
+                lines.push(format!("  runtime: {runtime}"));
+                if runtime == "per_invocation_stdio_session" {
+                    lines.push(String::from(
+                        "    MCP tool adapter: starts a stdio client session for each invocation",
+                    ));
+                } else if runtime == "per_invocation_streamable_http_session" {
+                    lines.push(String::from(
+                        "    MCP tool adapter: opens a Streamable HTTP client session for each invocation",
+                    ));
+                }
+            }
             lines.push(format!("  schema_status: {}", detail.schema_status));
             if let Some(ref lifecycle) = detail.lifecycle {
                 lines.push(format!("  lifecycle: {}", lifecycle));

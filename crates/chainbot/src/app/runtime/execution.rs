@@ -27,7 +27,7 @@
 // +----------------------------------------------------------------+
 // |  execute_node  — input resolution, kind dispatch               |
 // |    - builtin: builtin_registry.dispatch (kind -> BuiltinNodeRequest)
-// |    - plugin:   ExternalNodePluginHost::execute
+// |    - plugin:   ExternalNodePluginHost::execute_node_invocation
 // |    - subflow:  recursive execute_internal call (depth + 1)
 // +----------------------------------------------------------------+
 //     |
@@ -50,7 +50,7 @@ use crate::domain::runtime::{
 use crate::domain::workflow::{DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, WorkflowDefinition};
 use crate::errors::ContractError;
 use crate::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginKind, PluginManifest,
+    ExternalNodePluginHost, ExternalNodePluginRequest, PluginHostSecretMode, PluginKind, PluginManifest,
     NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
 };
 
@@ -432,8 +432,16 @@ impl ExecutionPlane {
         }
 
         let resolved = resolve_node_inputs(&self.secrets_dir, self.secret_mode, &inputs)?;
-        let host = ExternalNodePluginHost::new(self.plugins_root.clone());
-        let response = host.execute(
+        let secret_mode = match self.secret_mode {
+            SecretDecryptMode::Gpg => PluginHostSecretMode::Gpg,
+            SecretDecryptMode::Plaintext => PluginHostSecretMode::Plaintext,
+        };
+        let host = ExternalNodePluginHost::with_secret_runtime(
+            self.plugins_root.clone(),
+            self.secrets_dir.clone(),
+            secret_mode,
+        );
+        let response = host.execute_node_invocation(
             manifest,
             &ExternalNodePluginRequest {
                 contract_version: NODE_PLUGIN_CONTRACT_VERSION.to_owned(),

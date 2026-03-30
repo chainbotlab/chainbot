@@ -10,7 +10,6 @@
 - `implementation/`: Execution notes, validation expectations, and bootstrapping details.
 - `research/`: Exploration notes and discarded options when they become necessary.
 - `interfaces/`: Contracts with upstreams, adapters, or external surfaces.
-- `user/`: User-visible behavior and API-facing semantics.
 - `archive/`: Retired docs and tombstones.
 
 ## Conventions

@@ -2,7 +2,7 @@
 //! Process arguments, environment-resolved ChainBot roots, and runtime services from config, state, trigger, executor, worker, and secrets modules.
 //!
 //! [OUTPUT]
-//! Parses commands, executes help, init, status, observe, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
+//! Parses commands, executes help, plugin/source/install, init, status, observe, trigger, validate, run, serve, and list-runs flows, and maps failures to stable CLI output and exit codes.
 //!
 //! [ROLE]
 //! Owns the user-facing command boundary for the `chainbot` binary.
@@ -13,12 +13,18 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::help::{help_text, render_version_output};
-use super::{CatalogRequest, CliCommand, CliOutput, CliRequest, TriggerOperation};
+use super::{
+    CatalogRequest, CliCommand, CliOutput, CliRequest, PluginCommand, PluginSourceRequest,
+    TriggerOperation,
+};
 use crate::app::cli::view::catalog::{
     build_catalog_list, build_catalog_show, render_catalog_list, render_catalog_show,
     CatalogFilterKind, CatalogReference,
 };
 use crate::app::cli::view::observe::{build_observe_output, render_observe_output};
+use crate::app::cli::view::plugin_source::{
+    render_plugin_install_success, render_plugin_source_list, render_plugin_source_show,
+};
 use crate::app::cli::view::status::{build_status_output, render_status_output};
 use crate::app::definitions::load_root_definition_bundle;
 use crate::app::runtime::daemon;
@@ -47,6 +53,11 @@ use crate::infrastructure::config::{
 };
 use crate::infrastructure::state::{sanitize_path_component, RuntimeStateError, RuntimeStateStore};
 use crate::ingress::IngressRuntimeError;
+use crate::plugin::source::{
+    build_list_output, build_show_output, discover_source_repository, materialize_source,
+    prepare_installable_plugin, resolve_plugin_selection, InstallTransaction,
+    PluginSourceDescriptor,
+};
 use crate::plugin::{PluginKind, PluginManifest};
 
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
@@ -87,6 +98,7 @@ impl CliRequest {
             CliCommand::Status => self.execute_status(),
             CliCommand::Observe => self.execute_observe(),
             CliCommand::Catalog => self.execute_catalog(),
+            CliCommand::Plugin => self.execute_plugin(),
             CliCommand::Stop => self.execute_stop(),
             CliCommand::Trigger => self.execute_trigger(),
             CliCommand::Validate => self.execute_validate(),
@@ -222,6 +234,111 @@ impl CliRequest {
                     return Ok(CliOutput::text(stdout));
                 }
                 Ok(CliOutput::text(render_catalog_show(&payload)))
+            }
+        }
+    }
+
+    pub(crate) fn execute_plugin(&self) -> Result<CliOutput, UserFacingError> {
+        let plugin_command = self.plugin_command.as_ref().ok_or_else(|| {
+            UserFacingError::usage("Missing plugin command. Run `chainbot help plugin`.")
+        })?;
+        match plugin_command {
+            PluginCommand::Source(request) => {
+                let locator = match request {
+                    PluginSourceRequest::List { locator }
+                    | PluginSourceRequest::Show { locator, .. } => locator,
+                };
+                let materialized =
+                    materialize_source(locator).map_err(UserFacingError::from_contract)?;
+                let descriptor = PluginSourceDescriptor {
+                    source_kind: locator.kind().as_str().to_owned(),
+                    target: locator.target(),
+                    git_ref: locator.requested_ref().map(str::to_owned),
+                    resolved_ref: materialized.resolved_ref.clone(),
+                };
+                let repository = discover_source_repository(&materialized, descriptor)
+                    .map_err(UserFacingError::from_contract)?;
+                match request {
+                    PluginSourceRequest::List { .. } => {
+                        let payload = build_list_output(&repository);
+                        if self.json_output {
+                            let stdout =
+                                serde_json::to_string_pretty(&payload).map_err(|source| {
+                                    UserFacingError::state(format!(
+                                        "Failed to serialize plugin source list payload: {source}"
+                                    ))
+                                })?;
+                            return Ok(CliOutput::text(stdout));
+                        }
+                        Ok(CliOutput::text(render_plugin_source_list(&payload)))
+                    }
+                    PluginSourceRequest::Show { plugin_id, .. } => {
+                        let plugin = resolve_plugin_selection(
+                            &repository,
+                            plugin_id.as_deref(),
+                            "chainbot plugin source show",
+                        )
+                        .map_err(UserFacingError::from_contract)?;
+                        let payload = build_show_output(&repository, plugin);
+                        if self.json_output {
+                            let stdout =
+                                serde_json::to_string_pretty(&payload).map_err(|source| {
+                                    UserFacingError::state(format!(
+                                        "Failed to serialize plugin source show payload: {source}"
+                                    ))
+                                })?;
+                            return Ok(CliOutput::text(stdout));
+                        }
+                        Ok(CliOutput::text(render_plugin_source_show(&payload)))
+                    }
+                }
+            }
+            PluginCommand::Install(request) => {
+                let root_layout = self.load_definition_root()?;
+                let materialized =
+                    materialize_source(&request.locator).map_err(UserFacingError::from_contract)?;
+                let descriptor = PluginSourceDescriptor {
+                    source_kind: request.locator.kind().as_str().to_owned(),
+                    target: request.locator.target(),
+                    git_ref: request.locator.requested_ref().map(str::to_owned),
+                    resolved_ref: materialized.resolved_ref.clone(),
+                };
+                let repository = discover_source_repository(&materialized, descriptor)
+                    .map_err(UserFacingError::from_contract)?;
+                let plugin = resolve_plugin_selection(
+                    &repository,
+                    request.plugin_id.as_deref(),
+                    "chainbot plugin install",
+                )
+                .map_err(UserFacingError::from_contract)?;
+                let prepared = prepare_installable_plugin(&materialized, plugin)
+                    .map_err(UserFacingError::from_contract)?;
+                let (transaction, result) =
+                    InstallTransaction::begin(&root_layout.plugins_dir, &prepared, request.force)
+                        .map_err(UserFacingError::from_contract)?;
+                match load_root_definition_bundle(&root_layout) {
+                    Ok(_) => {
+                        transaction
+                            .finalize()
+                            .map_err(UserFacingError::from_contract)?;
+                    }
+                    Err(error) => {
+                        let rollback_result = transaction.rollback();
+                        if let Err(rollback_error) = rollback_result {
+                            return Err(UserFacingError::state(format!(
+                                "Plugin install validation failed and rollback also failed: validation error: {error}; rollback error: {rollback_error}"
+                            )));
+                        }
+                        return Err(UserFacingError::validation(format!(
+                            "Plugin install was rolled back because the root no longer validated: {error}"
+                        )));
+                    }
+                }
+                Ok(CliOutput::text(render_plugin_install_success(
+                    &request.locator.display_label(),
+                    &result,
+                    materialized.resolved_ref.as_deref(),
+                )))
             }
         }
     }
@@ -1052,6 +1169,7 @@ mod tests {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -1133,6 +1251,7 @@ mod tests {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -1200,6 +1319,7 @@ mod tests {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -1327,6 +1447,7 @@ mod tests {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         };
@@ -1375,6 +1496,7 @@ mod tests {
             json_output: false,
             trigger_operation: None,
             catalog_request: None,
+            plugin_command: None,
             observe_request: None,
             daemon_owner_id: None,
         };

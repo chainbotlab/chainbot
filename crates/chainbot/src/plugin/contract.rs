@@ -22,6 +22,8 @@ pub const PLUGIN_KIND_BUILTIN: &str = "builtin";
 pub const PLUGIN_KIND_EXTERNAL_NODE: &str = "external_node";
 pub const PLUGIN_KIND_EXTERNAL_TRIGGER: &str = "external_trigger";
 pub const NODE_PLUGIN_EXECUTE_CAPABILITY: &str = "node:execute";
+pub const EXTERNAL_NODE_ENTRYPOINT_EXEC_V1: &str = "node.exec.v1";
+pub const EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1: &str = "mcp.tool.v1";
 
 const REQUIRED_TRIGGER_HOST_ERROR_CATEGORIES: &[TriggerHostErrorCategory] = &[
     TriggerHostErrorCategory::Transport,
@@ -98,6 +100,44 @@ pub struct ExternalTriggerRuntimeContract {
     pub module: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransportKind {
+    Stdio,
+    StreamableHttp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpStdioTransportConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpStreamableHttpTransportConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpAuthConfig {
+    #[serde(default)]
+    pub header_name: Option<String>,
+    #[serde(default)]
+    pub token_secret_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpPluginContract {
+    pub transport: McpTransportKind,
+    #[serde(default)]
+    pub stdio: Option<McpStdioTransportConfig>,
+    #[serde(default)]
+    pub streamable_http: Option<McpStreamableHttpTransportConfig>,
+    #[serde(default)]
+    pub auth: Option<McpAuthConfig>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginManifest {
     #[serde(rename = "manifest_version")]
@@ -118,6 +158,8 @@ pub struct PluginManifest {
     pub operations: Vec<PluginOperationDescriptor>,
     #[serde(default)]
     pub event_schema: Option<PluginEventSchemaDescriptor>,
+    #[serde(default)]
+    pub mcp: Option<McpPluginContract>,
     #[serde(skip)]
     pub manifest_path: PathBuf,
 }
@@ -142,42 +184,49 @@ impl PluginManifest {
                 ensure_trigger_runtime_absent(&self.plugin_id, self.trigger_runtime.as_ref())?;
                 ensure_operations_absent(&self.plugin_id, &self.operations)?;
                 ensure_event_schema_absent(&self.plugin_id, self.event_schema.as_ref())?;
+                ensure_mcp_absent(&self.plugin_id, self.mcp.as_ref())?;
             }
             PluginKind::ExternalNode => {
-                validate_non_empty(
-                    self.executable.as_deref().unwrap_or_default(),
-                    "plugin.executable",
-                    &self.plugin_id,
-                )?;
                 ensure_list_empty(&self.input_schema, "plugin.input_schema", &self.plugin_id)?;
                 ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
                 ensure_trigger_runtime_absent(&self.plugin_id, self.trigger_runtime.as_ref())?;
                 ensure_event_schema_absent(&self.plugin_id, self.event_schema.as_ref())?;
-                validate_operations(&self.plugin_id, &self.operations)?;
-                if self.operations.is_empty() {
-                    return Err(ContractError::NodePluginInvalidField {
-                        plugin_id: self.plugin_id.clone(),
-                        field: "plugin.operations",
-                        detail: "external_node plugins must declare at least one operation"
-                            .to_owned(),
-                    });
-                }
+                if self.entrypoint == EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1 {
+                    validate_external_node_mcp_contract(self)?;
+                } else {
+                    validate_non_empty(
+                        self.executable.as_deref().unwrap_or_default(),
+                        "plugin.executable",
+                        &self.plugin_id,
+                    )?;
+                    validate_operations(&self.plugin_id, &self.operations)?;
+                    ensure_mcp_absent(&self.plugin_id, self.mcp.as_ref())?;
+                    if self.operations.is_empty() {
+                        return Err(ContractError::NodePluginInvalidField {
+                            plugin_id: self.plugin_id.clone(),
+                            field: "plugin.operations",
+                            detail: "external_node plugins must declare at least one operation"
+                                .to_owned(),
+                        });
+                    }
 
-                if !self
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == NODE_PLUGIN_EXECUTE_CAPABILITY)
-                {
-                    return Err(ContractError::NodePluginCapabilityNotDeclared {
-                        plugin_id: self.plugin_id.clone(),
-                        capability: NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned(),
-                    });
+                    if !self
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == NODE_PLUGIN_EXECUTE_CAPABILITY)
+                    {
+                        return Err(ContractError::NodePluginCapabilityNotDeclared {
+                            plugin_id: self.plugin_id.clone(),
+                            capability: NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned(),
+                        });
+                    }
                 }
             }
             PluginKind::ExternalTrigger => {
                 ensure_list_empty(&self.input_schema, "plugin.input_schema", &self.plugin_id)?;
                 ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
                 ensure_operations_absent(&self.plugin_id, &self.operations)?;
+                ensure_mcp_absent(&self.plugin_id, self.mcp.as_ref())?;
                 validate_external_trigger_runtime_contract(
                     &self.plugin_id,
                     self.executable.as_deref(),
@@ -234,6 +283,14 @@ impl PluginManifest {
                 detail: format!("unknown operation `{operation_name}`"),
             })?;
         Ok(operation)
+    }
+
+    pub fn is_streamable_http_mcp_entrypoint(&self) -> bool {
+        self.entrypoint == EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1
+            && matches!(
+                self.mcp.as_ref().map(|mcp| mcp.transport),
+                Some(McpTransportKind::StreamableHttp)
+            )
     }
 
     pub fn trigger_event_schema(&self) -> Result<&PluginEventSchemaDescriptor, ContractError> {
@@ -613,6 +670,133 @@ fn ensure_event_schema_absent(
     })
 }
 
+fn ensure_mcp_absent(
+    plugin_id: &str,
+    mcp: Option<&McpPluginContract>,
+) -> Result<(), ContractError> {
+    if mcp.is_none() {
+        return Ok(());
+    }
+    Err(ContractError::NodePluginInvalidField {
+        plugin_id: plugin_id.to_owned(),
+        field: "plugin.mcp",
+        detail: "field is not allowed for this plugin entrypoint or kind".to_owned(),
+    })
+}
+
+fn validate_external_node_mcp_contract(manifest: &PluginManifest) -> Result<(), ContractError> {
+    validate_operations(&manifest.plugin_id, &manifest.operations)?;
+    if manifest.operations.is_empty() {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: manifest.plugin_id.clone(),
+            field: "plugin.operations",
+            detail: "external_node plugins must declare at least one operation".to_owned(),
+        });
+    }
+
+    if !manifest
+        .capabilities
+        .iter()
+        .any(|capability| capability == NODE_PLUGIN_EXECUTE_CAPABILITY)
+    {
+        return Err(ContractError::NodePluginCapabilityNotDeclared {
+            plugin_id: manifest.plugin_id.clone(),
+            capability: NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned(),
+        });
+    }
+
+    if let Some(executable) = manifest
+        .executable
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: manifest.plugin_id.clone(),
+            field: "plugin.executable",
+            detail: format!(
+                "entrypoint={} does not allow plugin.executable: {executable}",
+                EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1
+            ),
+        });
+    }
+
+    let Some(mcp) = manifest.mcp.as_ref() else {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: manifest.plugin_id.clone(),
+            field: "plugin.mcp.transport",
+            detail: "field is required when plugin.entrypoint=mcp.tool.v1".to_owned(),
+        });
+    };
+
+    validate_mcp_contract(&manifest.plugin_id, mcp)
+}
+
+fn validate_mcp_contract(plugin_id: &str, mcp: &McpPluginContract) -> Result<(), ContractError> {
+    if let Some(auth) = mcp.auth.as_ref() {
+        validate_non_empty(
+            auth.header_name.as_deref().unwrap_or_default(),
+            "plugin.mcp.auth.header_name",
+            plugin_id,
+        )?;
+        validate_non_empty(
+            auth.token_secret_ref.as_deref().unwrap_or_default(),
+            "plugin.mcp.auth.token_secret_ref",
+            plugin_id,
+        )?;
+    }
+
+    match mcp.transport {
+        McpTransportKind::Stdio => {
+            if mcp.streamable_http.is_some() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.mcp.streamable_http",
+                    detail: "transport=stdio does not allow mcp.streamable_http".to_owned(),
+                });
+            }
+
+            let Some(stdio) = mcp.stdio.as_ref() else {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.mcp.stdio.command",
+                    detail: "field is required when plugin.mcp.transport=stdio".to_owned(),
+                });
+            };
+
+            validate_non_empty(&stdio.command, "plugin.mcp.stdio.command", plugin_id)?;
+            for arg in &stdio.args {
+                validate_non_empty(arg, "plugin.mcp.stdio.args", plugin_id)?;
+            }
+        }
+        McpTransportKind::StreamableHttp => {
+            if mcp.stdio.is_some() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.mcp.stdio",
+                    detail: "transport=streamable_http does not allow mcp.stdio".to_owned(),
+                });
+            }
+
+            let Some(streamable_http) = mcp.streamable_http.as_ref() else {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.mcp.streamable_http.url",
+                    detail: "field is required when plugin.mcp.transport=streamable_http"
+                        .to_owned(),
+                });
+            };
+
+            validate_non_empty(
+                &streamable_http.url,
+                "plugin.mcp.streamable_http.url",
+                plugin_id,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_operations(
     plugin_id: &str,
     operations: &[PluginOperationDescriptor],
@@ -670,7 +854,7 @@ mod tests {
             api_version: "2.0.0".to_owned(),
             plugin_id: "quote-node-plugin".to_owned(),
             kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
-            entrypoint: "node.exec.v1".to_owned(),
+            entrypoint: EXTERNAL_NODE_ENTRYPOINT_EXEC_V1.to_owned(),
             capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
             executable: Some("bin/external_node.sh".to_owned()),
             input_schema: Vec::new(),
@@ -678,7 +862,20 @@ mod tests {
             trigger_runtime: None,
             operations: Vec::new(),
             event_schema: None,
+            mcp: None,
             manifest_path: PathBuf::new(),
+        }
+    }
+
+    fn mcp_stdio_contract() -> McpPluginContract {
+        McpPluginContract {
+            transport: McpTransportKind::Stdio,
+            stdio: Some(McpStdioTransportConfig {
+                command: "node".to_owned(),
+                args: vec!["server.js".to_owned()],
+            }),
+            streamable_http: None,
+            auth: None,
         }
     }
 
@@ -898,6 +1095,60 @@ mod tests {
             manifest.validate(),
             Err(ContractError::NodePluginInvalidField {
                 field: "plugin.trigger_runtime.lifecycle",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn mcp_manifest_validation() {
+        let mut manifest = base_manifest();
+        manifest.entrypoint = EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1.to_owned();
+        manifest.executable = None;
+        manifest.operations = vec![PluginOperationDescriptor {
+            name: "echo".to_owned(),
+            summary: Some("Echo tool".to_owned()),
+            input_schema: vec!["message".to_owned()],
+            output_schema: vec!["message".to_owned()],
+        }];
+        manifest.mcp = Some(mcp_stdio_contract());
+
+        manifest
+            .validate()
+            .expect("mcp.tool.v1 manifest should validate");
+        assert_eq!(manifest.operations[0].name, "echo");
+    }
+
+    #[test]
+    fn mcp_manifest_rejects_mixed_transport_fields() {
+        let mut manifest = base_manifest();
+        manifest.entrypoint = EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1.to_owned();
+        manifest.executable = None;
+        manifest.operations = vec![PluginOperationDescriptor {
+            name: "echo".to_owned(),
+            summary: None,
+            input_schema: vec!["message".to_owned()],
+            output_schema: vec!["message".to_owned()],
+        }];
+        manifest.mcp = Some(McpPluginContract {
+            transport: McpTransportKind::Stdio,
+            stdio: Some(McpStdioTransportConfig {
+                command: "node".to_owned(),
+                args: vec!["server.js".to_owned()],
+            }),
+            streamable_http: Some(McpStreamableHttpTransportConfig {
+                url: "https://example.test/mcp".to_owned(),
+            }),
+            auth: Some(McpAuthConfig {
+                header_name: Some("Authorization".to_owned()),
+                token_secret_ref: Some("secret://mcp/http#token".to_owned()),
+            }),
+        });
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.mcp.streamable_http",
                 ..
             })
         ));

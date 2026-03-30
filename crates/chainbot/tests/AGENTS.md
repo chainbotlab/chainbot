@@ -15,6 +15,7 @@
 - `state_runtime_persistence.rs`: Verifies legacy file-backed runtime persistence plus SQLite coordination behavior that remains available outside the DB-primary main runtime path.
 - `workflow_dag_semantics.rs`: Verifies DAG cycle/dependency validation, deterministic runtime variable precedence, and explicit subflow import/export boundary enforcement.
 - `execution_scheduler.rs`: Verifies Rust-owned scheduler wave planning, `depends_mode`/`when` behavior, and builtin node registry typed dispatch failures.
+- `mcp_plugin_host.rs`: Verifies stdio-backed MCP host startup, tool invocation success, and deterministic fail-closed transport errors at the plugin boundary.
 - `node_plugin_host.rs`: Verifies external node plugin manifest guards, stdin/stdout roundtrip contract, and capability/version rejection before spawn.
 - `trigger_plane.rs`: Verifies trigger package manifest policy checks, builtin/external run-request normalization, workflow binding, dedup/cooldown persistence, and DB-backed trigger records.
 - `secrets_runtime.rs`: Verifies pass-style secret resolution, decryption-failure redaction, and non-persistence guarantees for secret material.

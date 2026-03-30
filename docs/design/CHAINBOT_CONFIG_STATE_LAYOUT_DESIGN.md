@@ -96,6 +96,7 @@ Builtin implementation selection must be modeled through execution identity such
 Each plugin package may contain:
 
 - `config.toml`
+- optional install-only `[source]` metadata inside `config.toml` for source-repo authoring
 - `bin/`
 - `assets/`
 

@@ -1,119 +1,109 @@
-{"packages":[{"name":"chainbot","version":"2.0.0","id":"path+file:///Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot#2.0.0","license":null,"license_file":null,"description":null,"source":null,"dependencies":[{"name":"petgraph","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^0.6","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null},{"name":"rusqlite","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^0.31","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":["bundled"],"target":null,"registry":null},{"name":"serde","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":["derive"],"target":null,"registry":null},{"name":"serde_json","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^1","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null},{"name":"toml","source":"registry+https://github.com/rust-lang/crates.io-index","req":"^0.8","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"registry":null}],"targets":[{"kind":["lib"],"crate_types":["lib"],"name":"chainbot","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},{"kind":["bin"],"crate_types":["bin"],"name":"chainbot","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/src/main.rs","edition":"2024","doc":true,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"cli_surface","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/cli_surface.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"config_loading","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/config_loading.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"contract_versions","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/contract_versions.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"end_to_end_vertical_slice","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/end_to_end_vertical_slice.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"execution_scheduler","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/execution_scheduler.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"node_plugin_host","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/node_plugin_host.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"secrets_runtime","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/secrets_runtime.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"state_runtime_persistence","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/state_runtime_persistence.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"trigger_plane","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/trigger_plane.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"worker_host","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/worker_host.rs","edition":"2024","doc":false,"doctest":false,"test":true},{"kind":["test"],"crate_types":["bin"],"name":"workflow_dag_semantics","src_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/tests/workflow_dag_semantics.rs","edition":"2024","doc":false,"doctest":false,"test":true}],"features":{},"manifest_path":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot/Cargo.toml","metadata":null,"publish":null,"authors":[],"categories":[],"keywords":[],"readme":null,"repository":null,"homepage":null,"documentation":null,"edition":"2024","links":null,"default_run":null,"rust_version":null}],"workspace_members":["path+file:///Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot#2.0.0"],"workspace_default_members":["path+file:///Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/crates/chainbot#2.0.0"],"resolve":null,"target_directory":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/target","build_directory":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp/target","version":1,"workspace_root":"/Users/cyouguang/.local/share/opencode/worktree/f71b8b2425c539bbd9f138979eae2aa0f3d262e4/feature-mvp","metadata":null}
+# F3 Real Manual QA
 
-running 2 tests
-test cli::tests::serve_drains_all_requests_from_snapshot ... ok
-test cli::tests::config_reload_requires_restart ... ok
+All commands run against the current workspace at `seville-v1`.
+Exit code 0 unless noted.
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.89s
+## Build
 
+```
+cargo build -p chainbot
+```
+Exit 0. Binary produced at `target/debug/chainbot`.
 
-running 0 tests
+## MCP Plugin Host Integration Tests
 
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+### stdio happy path
 
+```
+cargo test -p chainbot --test mcp_plugin_host stdio_tool_call_happy_path -- --exact
+```
+Exit 0. One MCP initialize, one tool call, one teardown per invocation. No session reuse.
 
-running 5 tests
-test invalid_root_returns_stable_user_facing_error ... ok
-test help_lists_expected_commands ... ok
-test validate_accepts_basic_root ... ok
-test run_and_serve_have_bounded_runtime_outcomes ... ok
-test list_runs_prints_empty_list_for_basic_root ... ok
+### HTTP happy path
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+```
+cargo test -p chainbot --test mcp_plugin_host http_tool_call_happy_path -- --exact
+```
+Exit 0. Streamable HTTP transport with static auth header, initialize, tool call, and teardown succeed.
 
+### HTTP 401 maps to plugin error
 
-running 3 tests
-test config_root_layout ... ok
-test invalid_toml_fixture_rejected ... ok
-test toml_definition_validation ... ok
+```
+cargo test -p chainbot --test mcp_plugin_host http_401_maps_to_plugin_error -- --exact
+```
+Exit 0. 401 response normalized to a deterministic plugin execution error with no credential leakage in the error message.
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+### HTTP stale session recovers or fails deterministically
 
+```
+cargo test -p chainbot --test mcp_plugin_host http_stale_session_recovers_or_fails_deterministically -- --exact
+```
+Exit 0. Stale `Mcp-Session-Id` triggers transparent reinitialization; if recovery fails, a deterministic error is returned (no panic, no zombie state).
 
-running 2 tests
-test invalid_contract_fixtures_are_rejected ... ok
-test contract_versions ... ok
+### HTTP non-MCP endpoint rejected
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+cargo test -p chainbot --test mcp_plugin_host http_non_mcp_endpoint_rejected -- --exact
+```
+Exit 0. Non-MCP response body is rejected with a deterministic plugin error before any tool execution.
 
+## Runtime Execution Integration
 
-running 5 tests
-test duplicate_trigger_after_restart ... ok
-test end_to_end_vertical_slice ... ok
-test end_to_end_vertical_slice_failure_modes ... ok
-test end_to_end_vertical_slice_failure_modes_redact_plugin_error_details ... ok
-test serve_restart_recovery ... ok
+### MCP tool entrypoint routing
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.09s
+```
+cargo test -p chainbot runtime_execution_routes_mcp_tool_entrypoint -- --exact
+```
+Exit 0. Workflow node with `entrypoint = "mcp.tool.v1"` routes through the MCP invoker path. No legacy `executable` field required.
 
+### Legacy external node dispatch preserved
 
-running 3 tests
-test builtin_node_registry_dispatch ... ok
-test scheduler_parallel_ready_nodes ... ok
-test scheduler_when_and_depends_mode ... ok
+```
+cargo test -p chainbot runtime_execution_preserves_legacy_external_node_dispatch -- --exact
+```
+Exit 0. `node.exec.v1` plugins continue through the legacy subprocess path; workflow report semantics (`status`, `schedule_waves`, `node_states`, `node_outputs`, `runtime_namespaces.run_scoped`) are unchanged.
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+## Catalog and CLI Surface Tests
 
+```
+cargo test -p chainbot --test catalog_surface
+```
+Exit 0. All catalog surface tests pass.
 
-running 4 tests
-test node_plugin_capability_restrictions ... ok
-test external_node_plugin_roundtrip ... ok
-test node_plugin_manifest_validation ... ok
-test node_plugin_host_uses_default_deny_environment ... ok
+```
+cargo test -p chainbot --test cli_surface
+```
+Exit 0. All CLI surface tests pass.
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.17s
+## CLI Operator Checks
 
+### catalog list --kind plugin
 
-running 3 tests
-test secret_decryption_failure_redaction ... ok
-test secret_reference_resolution ... ok
-test secret_values_never_persisted ... ok
+```
+cargo run -p chainbot -- catalog list --kind plugin
+```
+Exit 0. Installed MCP plugins appear in output with transport detail. Non-MCP plugins remain unchanged.
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+### catalog show plugin:mcp-http-plugin
 
+```
+cargo run -p chainbot -- catalog show plugin:mcp-http-plugin
+```
+Exit 0. Output includes MCP transport type, declared operations, and package metadata. No direct-connect commands surfaced.
 
-running 5 tests
-test file_backed_run_summary_recovery ... ok
-test sqlite_coordination_migrations ... ok
-test file_log_recovery_and_rotation_policy ... ok
-test file_backed_runtime_logs ... ok
-test serve_single_owner_lease ... ok
+### help plugin
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+```
+cargo run -p chainbot -- help plugin
+```
+Exit 0. Help output preserves package-centric model; no raw server connection commands exposed. MCP details are additive and scoped to installed plugin descriptions.
 
+## Full Test Suite
 
-running 7 tests
-test trigger_records_are_file_backed ... ok
-test builtin_trigger_kind_aliases_are_accepted ... ok
-test trigger_coordination_rebuilds_from_file_records_after_restart ... ok
-test trigger_plugin_manifest_validation ... ok
-test trigger_dedup_and_cooldown ... ok
-test trigger_plugin_host_uses_default_deny_environment ... ok
-test builtin_and_external_trigger_emit_run_requests ... ok
-
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
-
-
-running 4 tests
-test worker_protocol_version_negotiation ... ok
-test worker_failure_channels_are_typed_errors ... ok
-test python_and_javascript_worker_roundtrip ... ok
-test worker_timeout_and_oversized_output ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
-
-
-running 4 tests
-test runtime_variable_precedence ... ok
-test dag_cycle_validation ... ok
-test invalid_dag_and_variable_fixtures_rejected ... ok
-test subflow_contract_boundaries ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-validated root: target/test-roots/e2e
+```
+cargo test -p chainbot --test mcp_plugin_host
+cargo test -p chainbot --test node_plugin_host
+cargo test -p chainbot --test catalog_surface
+cargo test -p chainbot --test cli_surface
+```
+All exit 0. No regressions in non-MCP surfaces.

@@ -417,6 +417,19 @@ fn canonical_plugin_packages_are_discovered() {
 }
 
 #[test]
+fn plugin_packages_allow_embedded_source_metadata_without_affecting_root_loading() {
+    let root = unique_test_root("plugin-packages-with-embedded-source-metadata");
+    write_valid_fixture_with_plugin_package_source_metadata(&root);
+
+    let layout = RootLayout::from_root(root);
+    let bundle = load_root_definition_bundle(&layout)
+        .expect("plugin package with embedded source metadata should load");
+
+    assert_eq!(bundle.plugins.len(), 1);
+    assert_eq!(bundle.plugins[0].plugin_id, "quote-plugin");
+}
+
+#[test]
 fn workflow_subflow_call_dsl_is_lowered_during_loading() {
     let root = unique_test_root("workflow-subflow-call-dsl");
     write_subflow_call_fixture(&root);
@@ -618,6 +631,27 @@ fn write_subflow_call_fixture(root: &Path) {
         "manifest_version = \"2.0.0\"\nplugin_id = \"quote-plugin\"\nkind = \"builtin\"\nentrypoint = \"plugins.quote\"\ncapabilities = [\"normalize\"]\n",
     )
     .expect("plugin fixture should be writable");
+}
+
+fn write_valid_fixture_with_plugin_package_source_metadata(root: &Path) {
+    write_valid_fixture_with_plugin_package(root);
+    fs::write(
+        root.join("plugins").join("quote-plugin").join("config.toml"),
+        r#"manifest_version = "2.0.0"
+plugin_id = "quote-plugin"
+kind = "builtin"
+entrypoint = "plugins.quote"
+capabilities = ["normalize"]
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "direct"
+runtime = "bin"
+entry_artifact = "bin/plugin.sh"
+release_version = "0.1.0"
+"#,
+    )
+    .expect("plugin package fixture with embedded source metadata should be writable");
 }
 
 fn write_valid_fixture_with_plugin_package(root: &Path) {

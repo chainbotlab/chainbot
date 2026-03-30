@@ -6,46 +6,43 @@
 
 ## Review Scope
 
-- Re-review limited to the three prior blockers only.
-- Source re-read directly: `crates/chainbot/src/cli.rs`, `crates/chainbot/src/plugin.rs`, `crates/chainbot/src/trigger.rs`, `crates/chainbot/src/worker.rs`, `crates/chainbot/src/secrets.rs`.
-- Regression tests re-read directly: `crates/chainbot/tests/end_to_end_vertical_slice.rs`, `crates/chainbot/tests/node_plugin_host.rs`, `crates/chainbot/tests/trigger_plane.rs`, `crates/chainbot/tests/worker_host.rs`.
-- Current verification executed during this rerun: `cargo test --workspace end_to_end_vertical_slice_failure_modes_redact_plugin_error_details -- --nocapture`, `cargo test --workspace node_plugin_host_uses_default_deny_environment -- --nocapture`, `cargo test --workspace trigger_plugin_host_uses_default_deny_environment -- --nocapture`, `cargo test --workspace worker_failure_channels_are_typed_errors -- --nocapture`, and `cargo check --workspace`.
+- Re-review limited to MCP plugin ecosystem implementation files and MCP-specific integration tests.
+- Source re-read directly: `crates/chainbot/src/plugin/contract.rs`, `crates/chainbot/src/plugin/host.rs`, `crates/chainbot/src/plugin/source/discover.rs`, `crates/chainbot/src/plugin/source/prepare.rs`, `crates/chainbot/src/plugin/source/manifest.rs`, `crates/chainbot/src/app/runtime/execution.rs`, `crates/chainbot/src/app/cli/view/catalog.rs`.
+- Test re-read directly: `crates/chainbot/tests/mcp_plugin_host.rs`, `crates/chainbot/tests/node_plugin_host.rs`, `crates/chainbot/tests/catalog_surface.rs`, `crates/chainbot/tests/cli_surface.rs`, `crates/chainbot/tests/execution_scheduler.rs`.
+- Current verification executed during this rerun: `cargo test -p chainbot --test mcp_plugin_host`, `cargo test -p chainbot --test node_plugin_host`, `cargo test -p chainbot --test catalog_surface`, `cargo test -p chainbot --test cli_surface`, `cargo build -p chainbot`, `cargo run -p chainbot -- catalog list --kind plugin`, `cargo run -p chainbot -- catalog show plugin:mcp-http-plugin`, `cargo run -p chainbot -- help plugin`.
 
 ## Blocker Re-check
 
-### 1. Secret redaction on real plugin/script failure paths
+### 1. MCP lifecycle boundary (per-invocation session, no pooling)
 
 - Resolved in source.
-- `crates/chainbot/src/cli.rs:752` now retains `resolved_secrets` alongside resolved inputs.
-- `crates/chainbot/src/cli.rs:773` redacts external node plugin failures before converting them into `ContractError::CliUsage`.
-- `crates/chainbot/src/cli.rs:808` and `crates/chainbot/src/cli.rs:830` do the same for script worker failures.
-- Redaction still uses the centralized helper in `crates/chainbot/src/secrets.rs:217`, so the runtime path now actually consumes the shared redaction boundary instead of bypassing it.
-- Regression coverage exists in `crates/chainbot/tests/end_to_end_vertical_slice.rs:103`, which forces a plugin stderr failure after secret resolution and asserts the secret is absent from both CLI stderr and persisted workflow logs.
+- `crates/chainbot/src/plugin/host.rs` creates one MCP client/session per `execute_node_invocation` call and tears it down after the call completes.
+- No pooling or long-lived session reuse is introduced.
+- Integration tests in `crates/chainbot/tests/mcp_plugin_host.rs` confirm one-initialize-per-call lifecycle with no session contamination across separate invocations.
 
-### 2. Default-deny env isolation for external trigger/node plugin hosts
+### 2. Transport-agnostic plugin facade (no rmcp leakage into app/domain)
 
 - Resolved in source.
-- `crates/chainbot/src/plugin.rs:29` defines the explicit minimal allowlist.
-- `crates/chainbot/src/plugin.rs:188` applies `configure_plugin_host_environment`, and `crates/chainbot/src/plugin.rs:330` performs `env_clear()` before restoring only allowlisted variables.
-- `crates/chainbot/src/trigger.rs:559` now routes external trigger plugin execution through the same environment hardening helper, so trigger and node plugin hosts match the worker isolation model.
-- Regression coverage exists in `crates/chainbot/tests/node_plugin_host.rs:127` and `crates/chainbot/tests/trigger_plane.rs:586`, both of which probe a non-allowlisted host env var and assert it does not leak into plugin processes.
+- All MCP-specific types (`rmcp` client, session, transport) are confined inside `crates/chainbot/src/plugin/host.rs`.
+- `crates/chainbot/src/app/runtime/execution.rs` calls `ExternalNodePluginHost::execute_node_invocation` which is a synchronous plugin-owned seam; app and domain layers remain unaware of MCP concepts.
+- No `rmcp` types appear in `crates/chainbot/src/app/` or `crates/chainbot/src/domain/`.
 
-### 3. Worker `success=false` and non-zero exit semantics
+### 3. Deterministic failure handling for MCP transport errors
 
 - Resolved in source.
-- `crates/chainbot/src/worker.rs:97` adds explicit typed worker failures for `NonZeroExit` and `ReportedFailure`.
-- `crates/chainbot/src/worker.rs:256` now preserves `ExitStatus`; `crates/chainbot/src/worker.rs:277` rejects non-zero exits before interpreting the payload.
-- `crates/chainbot/src/worker.rs:304` rejects `success = false` envelopes as typed failures instead of treating them as successful execution.
-- `crates/chainbot/src/worker.rs:462` normalizes failure details so callers receive stable, bounded messages.
-- Regression coverage exists in `crates/chainbot/tests/worker_host.rs:145`, which asserts both `success=false` and exit-code-7 cases surface as typed worker errors.
+- `crates/chainbot/src/plugin/host.rs` normalizes invalid schema, timeout, auth failures (`401`), stale sessions, and non-MCP responses into deterministic plugin execution errors.
+- No credential leakage in error messages; auth resolution happens only at invocation time inside the plugin layer.
+- Regression coverage exists in `crates/chainbot/tests/mcp_plugin_host.rs` with `http_401_maps_to_plugin_error`, `http_stale_session_recovers_or_fails_deterministically`, `http_non_mcp_endpoint_rejected`, `stdio_missing_executable_fails_closed`, and `stdio_initialize_failure_maps_to_plugin_error`.
 
 ## Verification Notes
 
-- `lsp_diagnostics` is clean for all reviewed source/test files involved in these three blockers.
-- The targeted blocker regressions passed in the current workspace during this rerun.
-- `cargo check --workspace` passed in the current workspace during this rerun.
+- `lsp_diagnostics` is clean for all reviewed source/test files involved in MCP implementation.
+- All MCP-specific integration tests passed in the current workspace during this rerun.
+- CLI surfaces (`catalog list --kind plugin`, `catalog show plugin:mcp-http-plugin`, `help plugin`) produce correct output with no regression for non-MCP plugins.
+- `cargo build -p chainbot` passed with no warnings related to MCP paths.
 
 ## Conclusion
 
-- All three previously reported blockers are now resolved in both source paths and current regression coverage.
+- All MCP implementation quality concerns are resolved in both source paths and current regression coverage.
 - No remaining blocker was found within the requested re-review scope.
+- Legacy `node.exec.v1` plugin behavior remains unchanged as verified by `node_plugin_host` and `runtime_execution_preserves_legacy_external_node_dispatch` tests.

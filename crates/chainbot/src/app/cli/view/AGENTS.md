@@ -10,3 +10,4 @@
 - `status.rs`: Status-oriented CLI output shaping.
 - `observe.rs`: Observation stream and run-progress output shaping.
 - `catalog.rs`: Builtin capability catalog output shaping.
+- `plugin_source.rs`: Remote plugin source list/show/install output shaping.

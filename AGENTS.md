@@ -18,6 +18,7 @@ docs/
 - `crates/`: Cargo workspace members and crate-local manifests.
 - `docs/`: Long-lived design, implementation, research, interface, user, and archive knowledge.
 - `examples/`: Copyable workspace roots aligned with the stable ChainBot contract.
+- `official-plugins/`: Repository-local official remote plugin source catalog used for discoverability and install contract fixtures.
 - `postmortem/`: Durable incident records and debugging learnings worth preserving.
 
 ## Local Maps
@@ -29,6 +30,10 @@ docs/
 
 ## Crates
 - `crates/chainbot/`: Primary CLI, runtime, builtin, ingress, and plugin host crate.
+
+## Source Catalog
+- `chainbot-plugin-index.toml`: Repository-local official remote plugin source index.
+- `official-plugins/`: Official remote plugin source packages used as first-party catalog examples.
 
 ## Global Constraints
 - Required pre-read checks: root `AGENTS.md`, then nearest local `AGENTS.md`, then referenced docs in `docs/`.

@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chainbot::errors::ContractError;
 use chainbot::plugin::{
     ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PluginOperationDescriptor,
-    PLUGIN_KIND_EXTERNAL_NODE,
+    EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, NODE_PLUGIN_EXECUTE_CAPABILITY, PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
 
@@ -154,7 +154,7 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
         api_version: "2.0.0".to_owned(),
         plugin_id: plugin_id.to_owned(),
         kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
-        entrypoint: "node.exec.v1".to_owned(),
+        entrypoint: EXTERNAL_NODE_ENTRYPOINT_EXEC_V1.to_owned(),
         capabilities: vec!["node:execute".to_owned()],
         executable: Some(executable.to_owned()),
         trigger_runtime: None,
@@ -167,6 +167,7 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
             output_schema: vec!["decision".to_owned()],
         }],
         event_schema: None,
+        mcp: None,
         manifest_path: PathBuf::new(),
     }
 }

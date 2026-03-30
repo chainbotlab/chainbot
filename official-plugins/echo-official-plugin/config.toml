@@ -1,0 +1,19 @@
+manifest_version = "2.0.0"
+plugin_id = "echo-official-plugin"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/plugin.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize payload"
+input_schema = ["symbol"]
+output_schema = ["decision"]
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "direct"
+runtime = "bin"
+entry_artifact = "bin/plugin.sh"
+release_version = "0.1.0"

@@ -198,6 +198,7 @@ pub(super) fn general_help_text() -> String {
             "chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]",
             "chainbot catalog list [--json] [--kind <builtin_node|builtin_trigger|plugin>]",
             "chainbot catalog show <reference> [--json]",
+            "chainbot plugin <source|install> ...",
             "chainbot stop",
             "chainbot trigger list [--json]",
             "chainbot trigger <enable|disable> <trigger-id>",
@@ -225,6 +226,7 @@ pub(super) fn general_help_text() -> String {
             "status     Inspect runtime state without executing workflows.",
             "observe    Inspect persisted trigger events, workflow logs, and runs.",
             "catalog    Discover builtin capabilities and installed plugin contracts.",
+            "plugin     Discover and install remote plugins from github/git sources.",
             "stop       Request graceful daemon shutdown.",
             "trigger    Inspect or persist trigger package state.",
             "validate   Validate config and package contracts.",
@@ -242,6 +244,7 @@ pub(super) fn general_help_text() -> String {
             "prefer `chainbot status --json` and `chainbot trigger list --json` for machine-readable snapshots",
             "use `chainbot catalog list --json` when an agent needs a capability inventory",
             "use `chainbot catalog show <reference> --json` for one capability contract",
+            "use `chainbot plugin source list --json` to inspect remote installable plugins before writing to the current root",
             "use `chainbot observe --json` when an agent needs recent persisted events or logs",
         ],
     );
@@ -418,7 +421,54 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
                 "chainbot catalog list --json --kind plugin",
                 "chainbot catalog show plugin:quote-node-plugin",
             ],
-            &["help", "status", "validate"],
+            &["help", "plugin", "status", "validate"],
+        ),
+        HelpTopic::Plugin => render_help_card(
+            "plugin",
+            "Discover and install remote plugins from github/git sources",
+            &[
+                "chainbot plugin source list github <owner>/<repo> [--ref <git-ref>] [--json]",
+                "chainbot plugin source list git <remote> [--ref <git-ref>] [--json]",
+                "chainbot plugin source show <github|git> <target> --plugin <plugin_id> [--ref <git-ref>] [--json]",
+                "chainbot plugin install <github|git> <target> [--ref <git-ref>] [--plugin <plugin_id>] [--force]",
+            ],
+            &[
+                "you want to inspect remote installable plugins before writing anything into the current root",
+                "you want one operator-facing CLI surface for github and git plugin sources",
+                "you need `--force` guarded replacement and rollback-aware plugin installation",
+            ],
+            &[
+                "remote source repositories materialized into temporary workspaces",
+                "current root config and plugin directory for install",
+            ],
+            &[
+                "<root>/plugins/<plugin_id> when install succeeds",
+                "temporary staging and backup directories during install",
+            ],
+            &[
+                "remote plugin source inspection does not modify the current root",
+                "catalog remains the installed-capability surface for the current root",
+            ],
+            &[
+                "prints remote plugin summaries or details for source list/show",
+                "prints installed target path, source, and replacement state for install",
+            ],
+            &[
+                "source list/show do not resolve the current root",
+                "install resolves the current root and re-validates it after swapping the plugin package",
+            ],
+            &[],
+            &[
+                "multi-plugin repositories require `--plugin <plugin_id>` for show/install",
+                "existing installed plugins are preserved unless `--force` is supplied",
+                "install failures report whether rollback completed successfully",
+            ],
+            &[
+                "chainbot plugin source list github openai/example-plugins --json",
+                "chainbot plugin source show git ../plugin-repo --plugin quote-node-plugin",
+                "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot plugin install git ../plugin-repo --plugin quote-node-plugin --force",
+            ],
+            &["catalog", "validate", "status"],
         ),
         HelpTopic::Stop => render_help_card(
             "stop",

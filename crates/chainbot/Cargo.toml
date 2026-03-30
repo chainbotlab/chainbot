@@ -1,13 +1,15 @@
 [package]
 name = "chainbot"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2024"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
+libc = "0.2"
 petgraph = "0.8.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rmcp = { version = "1.3.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 postgres = "0.19"
 serde = { version = "1", features = ["derive"] }
@@ -17,6 +19,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net",
 toml = "1.0.7"
 tower = { version = "0.5", features = ["util"] }
 wasmtime = "38.0.3"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.28"

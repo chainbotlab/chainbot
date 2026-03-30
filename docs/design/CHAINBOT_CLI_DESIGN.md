@@ -71,6 +71,13 @@ chainbot serve
 - 输出当前 archived history 计数，便于 operator/agent 判断 retention 是否已经搬迁旧数据。
 - 不触发 runtime recovery，不回放 trigger，不修改 active/archived history。
 
+### `plugin`
+
+- 提供远端 source repo 的只读 discoverability 与插件安装能力。
+- `plugin source list/show` 是只读命令，不写当前 root。
+- `plugin install` 是唯一会把远端 source package 安装进当前 root 的 operator-facing 入口。
+- `catalog` 与 `plugin source` 保持分离：前者看已安装能力，后者看远端可安装内容。
+
 ### `trigger`
 
 - 提供 trigger package 的 operator 级查看与开关操作。

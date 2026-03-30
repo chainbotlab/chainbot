@@ -22,7 +22,7 @@ use crate::domain::trigger::{
 };
 use crate::errors::ContractError;
 use crate::plugin::{
-    configure_plugin_host_environment, PluginKind, PluginManifest, TriggerRuntimeLifecycle,
+    configure_plugin_subprocess_environment, PluginKind, PluginManifest, TriggerRuntimeLifecycle,
 };
 
 #[derive(Debug, Clone)]
@@ -336,7 +336,7 @@ impl ExternalTriggerPlugin {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure_plugin_host_environment(&mut command);
+        configure_plugin_subprocess_environment(&mut command);
 
         let mut child =
             command
