@@ -255,6 +255,7 @@ fn trigger_plugin_manifest_validation() {
             summary: Some("External trigger payload".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
         }),
+        mcp: None,
         manifest_path: plugin_root.join("plugin-ok").join("config.toml"),
     };
     TriggerPlane::open_legacy_state_layout_for_tests(
@@ -1566,6 +1567,7 @@ fn plugin_manifest(
             summary: Some("External trigger payload".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
         }),
+        mcp: None,
         manifest_path: PathBuf::new(),
     }
 }

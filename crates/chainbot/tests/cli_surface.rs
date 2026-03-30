@@ -81,6 +81,46 @@ fn help_plugin_includes_source_install_guidance() {
 }
 
 #[test]
+fn help_plugin_and_catalog_keep_package_centric_mcp_guidance() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+
+    let plugin_output = Command::new(chainbot_bin())
+        .args(["help", "plugin"])
+        .output()
+        .expect("chainbot help plugin should execute");
+
+    assert!(plugin_output.status.success());
+    let plugin_stdout = String::from_utf8(plugin_output.stdout).expect("stdout should be UTF-8");
+    let plugin_stderr = String::from_utf8(plugin_output.stderr).expect("stderr should be UTF-8");
+    assert!(plugin_stdout
+        .contains("catalog remains the installed-capability surface for the current root"));
+    assert!(plugin_stdout.contains("chainbot plugin source list"));
+    assert!(plugin_stdout.contains("chainbot plugin install"));
+    assert!(!plugin_stdout.contains("direct-connect"));
+    assert!(!plugin_stdout.contains("server add"));
+    assert!(!plugin_stdout.contains("server list"));
+    assert!(!plugin_stdout.contains("server remove"));
+    assert!(plugin_stderr.is_empty());
+
+    let catalog_output = Command::new(chainbot_bin())
+        .args(["help", "catalog"])
+        .output()
+        .expect("chainbot help catalog should execute");
+
+    assert!(catalog_output.status.success());
+    let catalog_stdout = String::from_utf8(catalog_output.stdout).expect("stdout should be UTF-8");
+    let catalog_stderr = String::from_utf8(catalog_output.stderr).expect("stderr should be UTF-8");
+    assert!(catalog_stdout.contains("installed plugin manifests when a root is available"));
+    assert!(catalog_stdout.contains("chainbot catalog list"));
+    assert!(!catalog_stdout.contains("direct-connect"));
+    assert!(!catalog_stdout.contains("server add"));
+    assert!(!catalog_stdout.contains("server list"));
+    assert!(!catalog_stdout.contains("server remove"));
+    assert!(catalog_stderr.is_empty());
+}
+
+#[test]
 fn help_catalog_includes_discovery_guidance() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();

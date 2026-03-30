@@ -104,7 +104,9 @@ fn plugin_source_list_requires_embedded_source_metadata() {
     let repo = unique_root("plugin-source-missing-source");
     create_multi_plugin_repo(&repo);
     fs::write(
-        repo.join("official-plugins").join("alpha-plugin").join("config.toml"),
+        repo.join("official-plugins")
+            .join("alpha-plugin")
+            .join("config.toml"),
         r#"manifest_version = "2.0.0"
 plugin_id = "alpha-plugin"
 kind = "external_node"
@@ -120,6 +122,8 @@ output_schema = ["decision"]
 "#,
     )
     .expect("plugin config without source metadata should be writable");
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "remove source metadata"]);
 
     let output = Command::new(chainbot_bin())
         .args([
@@ -143,7 +147,9 @@ fn plugin_source_list_rejects_legacy_source_toml() {
     let repo = unique_root("plugin-source-legacy-source-toml");
     create_multi_plugin_repo(&repo);
     fs::write(
-        repo.join("official-plugins").join("alpha-plugin").join("source.toml"),
+        repo.join("official-plugins")
+            .join("alpha-plugin")
+            .join("source.toml"),
         r#"manifest_version = "1.0.0"
 install_mode = "direct"
 runtime = "bin"
@@ -152,6 +158,8 @@ release_version = "0.1.0"
 "#,
     )
     .expect("legacy source manifest should be writable");
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "add legacy source manifest"]);
 
     let output = Command::new(chainbot_bin())
         .args([
@@ -169,19 +177,79 @@ release_version = "0.1.0"
     assert!(stderr.contains("legacy source.toml is no longer supported"));
 }
 
+#[test]
+fn plugin_source_list_rejects_raw_server_reference_in_source_entry_artifact() {
+    let _lock = acquire_fixture_lock();
+    let repo = unique_root("plugin-source-raw-server-reference");
+    create_mcp_http_repo_with_raw_source_entry_artifact(&repo);
+
+    let output = Command::new(chainbot_bin())
+        .args([
+            "plugin",
+            "source",
+            "list",
+            "git",
+            repo.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("plugin source list should execute");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains(
+        "source.entry_artifact must reference a package-relative artifact path; raw server URLs are not allowed"
+    ));
+}
+
+#[test]
+fn plugin_source_list_rejects_mcp_http_missing_anchor_file() {
+    let _lock = acquire_fixture_lock();
+    let repo = unique_root("plugin-source-mcp-http-missing-anchor");
+    create_mcp_http_repo_with_missing_anchor(&repo);
+
+    let output = Command::new(chainbot_bin())
+        .args([
+            "plugin",
+            "source",
+            "list",
+            "git",
+            repo.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("plugin source list should execute");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("entry artifact missing"));
+}
+
 fn create_multi_plugin_repo(root: &Path) {
     let _ = fs::remove_dir_all(root);
-    fs::create_dir_all(root.join("official-plugins").join("alpha-plugin").join("bin"))
-        .expect("alpha plugin directory should be creatable");
-    fs::create_dir_all(root.join("official-plugins").join("beta-plugin").join("bin"))
-        .expect("beta plugin directory should be creatable");
+    fs::create_dir_all(
+        root.join("official-plugins")
+            .join("alpha-plugin")
+            .join("bin"),
+    )
+    .expect("alpha plugin directory should be creatable");
+    fs::create_dir_all(
+        root.join("official-plugins")
+            .join("beta-plugin")
+            .join("bin"),
+    )
+    .expect("beta plugin directory should be creatable");
     fs::write(
         root.join("chainbot-plugin-index.toml"),
         "manifest_version = \"1.0.0\"\n\n[[plugins]]\nplugin_id = \"alpha-plugin\"\npath = \"official-plugins/alpha-plugin\"\nsummary = \"Alpha plugin\"\n\n[[plugins]]\nplugin_id = \"beta-plugin\"\npath = \"official-plugins/beta-plugin\"\nsummary = \"Beta plugin\"\n",
     )
     .expect("source index should be writable");
-    write_external_node_plugin(root.join("official-plugins").join("alpha-plugin"), "alpha-plugin");
-    write_external_node_plugin(root.join("official-plugins").join("beta-plugin"), "beta-plugin");
+    write_external_node_plugin(
+        root.join("official-plugins").join("alpha-plugin"),
+        "alpha-plugin",
+    );
+    write_external_node_plugin(
+        root.join("official-plugins").join("beta-plugin"),
+        "beta-plugin",
+    );
     init_git_repo(root);
 }
 
@@ -193,12 +261,31 @@ fn write_external_node_plugin(root: PathBuf, plugin_id: &str) {
         ),
     )
     .expect("plugin config should be writable");
-    fs::write(
-        root.join("bin").join("plugin.sh"),
-        "#!/bin/sh\necho '{}'\n",
-    )
-    .expect("plugin executable should be writable");
+    fs::write(root.join("bin").join("plugin.sh"), "#!/bin/sh\necho '{}'\n")
+        .expect("plugin executable should be writable");
     set_executable(&root.join("bin").join("plugin.sh"));
+}
+
+fn create_mcp_http_repo_with_raw_source_entry_artifact(root: &Path) {
+    let _ = fs::remove_dir_all(root);
+    fs::create_dir_all(root).expect("repo root should be creatable");
+    fs::write(
+        root.join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"mcp-http-raw-source-plugin\"\nkind = \"external_node\"\nentrypoint = \"mcp.tool.v1\"\ncapabilities = [\"node:execute\"]\n\n[[operations]]\nname = \"echo\"\nsummary = \"Echo tool\"\ninput_schema = [\"message\"]\noutput_schema = [\"message\"]\n\n[mcp]\ntransport = \"streamable_http\"\n\n[mcp.streamable_http]\nurl = \"https://example.test/mcp\"\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"https://example.test/direct-server\"\nrelease_version = \"0.1.0\"\n",
+    )
+    .expect("mcp plugin config should be writable");
+    init_git_repo(root);
+}
+
+fn create_mcp_http_repo_with_missing_anchor(root: &Path) {
+    let _ = fs::remove_dir_all(root);
+    fs::create_dir_all(root).expect("repo root should be creatable");
+    fs::write(
+        root.join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"mcp-http-missing-anchor\"\nkind = \"external_node\"\nentrypoint = \"mcp.tool.v1\"\ncapabilities = [\"node:execute\"]\n\n[[operations]]\nname = \"echo\"\nsummary = \"Echo tool\"\ninput_schema = [\"message\"]\noutput_schema = [\"message\"]\n\n[mcp]\ntransport = \"streamable_http\"\n\n[mcp.streamable_http]\nurl = \"https://example.test/mcp\"\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"artifacts/anchor.txt\"\nrelease_version = \"0.1.0\"\n",
+    )
+    .expect("mcp plugin config should be writable");
+    init_git_repo(root);
 }
 
 fn init_git_repo(root: &Path) {
@@ -215,7 +302,12 @@ fn run_git(root: &Path, args: &[&str]) {
         .args(args)
         .output()
         .expect("git command should execute");
-    assert!(output.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn set_executable(path: &Path) {

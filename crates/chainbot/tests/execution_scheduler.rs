@@ -8,7 +8,10 @@
 //! Covers the execution scheduler boundary as an integration test.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::app::ExecutionPlane;
 use chainbot::builtins::nodes::contract::{BuiltinNodeRequest, BuiltinNodeResult};
@@ -24,7 +27,108 @@ use chainbot::domain::workflow::{
 };
 use chainbot::errors::ContractError;
 use chainbot::infrastructure::config::RootLayout;
+use chainbot::plugin::{
+    McpPluginContract, McpStdioTransportConfig, McpTransportKind, PluginManifest,
+    PluginOperationDescriptor, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
+    EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1, NODE_PLUGIN_EXECUTE_CAPABILITY,
+    PLUGIN_KIND_EXTERNAL_NODE,
+};
 use serde_json::json;
+
+const MCP_RUNTIME_STDIO_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def read_message():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+
+def send_message(message):
+    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def send_initialize_response(message):
+    protocol_version = message.get("params", {}).get("protocolVersion", "2025-11-25")
+    send_message(
+        {
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "chainbot-runtime-fixture", "version": "1.0.0"},
+            },
+        }
+    )
+
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+
+    method = message.get("method")
+
+    if method == "initialize":
+        send_initialize_response(message)
+        continue
+
+    if method == "notifications/initialized":
+        continue
+
+    if method == "tools/list":
+        send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "description": "Echo tool",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {"type": "string"}
+                                },
+                                "required": ["message"],
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        continue
+
+    if method == "tools/call":
+        arguments = message.get("params", {}).get("arguments", {})
+        send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {
+                    "content": [],
+                    "structuredContent": {"message": arguments.get("message")},
+                    "isError": False,
+                },
+            }
+        )
+        continue
+
+    if message.get("id") is not None:
+        send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {"code": -32601, "message": "unsupported method"},
+            }
+        )
+"#;
 
 #[test]
 fn scheduler_parallel_ready_nodes() {
@@ -1091,6 +1195,205 @@ fn production_registry_executes_third_wave_data_glue_builtins() {
     );
 }
 
+#[test]
+fn runtime_execution_routes_mcp_tool_entrypoint() {
+    let root = unique_test_root("runtime-mcp-entrypoint");
+    let plugins_root = root.join("plugins");
+    let plugin_root = plugins_root.join("mcp-echo");
+    let stdio_script = plugin_root.join("bin").join("mcp_runtime_fixture.py");
+    write_executable_script_contents(&stdio_script, MCP_RUNTIME_STDIO_FIXTURE_SCRIPT);
+
+    let workflow = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-runtime-mcp".to_owned(),
+        name: "runtime-mcp".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![NodeDefinition {
+            api_version: "2.0.0".to_owned(),
+            node_id: "mcp-echo".to_owned(),
+            kind: "plugin".to_owned(),
+            plugin_id: "mcp-echo".to_owned(),
+            operation: "echo".to_owned(),
+            depends_mode: DependsMode::All,
+            depends_on: Vec::new(),
+            inputs: vec![VariableBinding {
+                target: "message".to_owned(),
+                source: VariableReference {
+                    namespace: RuntimeVariableNamespace::ManualInvocationInput,
+                    key: "message".to_owned(),
+                },
+            }],
+            when: None,
+            subflow: None,
+        }],
+        package_root: PathBuf::new(),
+    };
+
+    let manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "mcp-echo".to_owned(),
+        kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
+        entrypoint: EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1.to_owned(),
+        capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+        executable: None,
+        trigger_runtime: None,
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        operations: vec![PluginOperationDescriptor {
+            name: "echo".to_owned(),
+            summary: Some("Echo message payload".to_owned()),
+            input_schema: vec!["message".to_owned()],
+            output_schema: vec!["message".to_owned()],
+        }],
+        event_schema: None,
+        mcp: Some(McpPluginContract {
+            transport: McpTransportKind::Stdio,
+            stdio: Some(McpStdioTransportConfig {
+                command: "bin/mcp_runtime_fixture.py".to_owned(),
+                args: Vec::new(),
+            }),
+            streamable_http: None,
+            auth: None,
+        }),
+        manifest_path: plugin_root.join("config.toml"),
+    };
+
+    let execution_plane = ExecutionPlane::with_plugin_runtime(
+        vec![workflow],
+        BTreeMap::new(),
+        BuiltinNodeRegistry::with_test_handlers(),
+        vec![manifest],
+        plugins_root,
+        root.join("secrets"),
+        SecretDecryptMode::Plaintext,
+    )
+    .expect("runtime execution plane with MCP plugin should be constructible");
+
+    let mut request = NormalizedRunRequest::new("run-runtime-mcp", "wf-runtime-mcp");
+    request
+        .manual_invocation_input
+        .insert("message".to_owned(), json!("hello-mcp"));
+
+    let report = execution_plane
+        .execute(&request)
+        .expect("runtime should route mcp.tool.v1 plugins through MCP host path");
+
+    assert_eq!(report.status, WorkflowRunStatus::Succeeded);
+    assert_eq!(report.schedule_waves, vec![vec!["mcp-echo".to_owned()]]);
+    assert_eq!(
+        report.node_states.get("mcp-echo"),
+        Some(&ScheduledNodeState::Succeeded)
+    );
+    assert_eq!(
+        report
+            .node_outputs
+            .get("mcp-echo")
+            .and_then(|outputs| outputs.get("message")),
+        Some(&json!("hello-mcp"))
+    );
+    assert_eq!(
+        report.runtime_namespaces.run_scoped.get("message"),
+        Some(&json!("hello-mcp"))
+    );
+}
+
+#[test]
+fn runtime_execution_preserves_legacy_external_node_dispatch() {
+    let root = unique_test_root("runtime-legacy-entrypoint");
+    let plugins_root = root.join("plugins");
+    let plugin_root = plugins_root.join("legacy-quote");
+    let executable = plugin_root.join("bin").join("legacy_node.sh");
+    write_executable_script_contents(
+        &executable,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"contract_version\":\"1.0.0\",\"success\":true,\"output\":{\"decision\":\"buy\"}}'\n",
+    );
+
+    let workflow = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-runtime-legacy".to_owned(),
+        name: "runtime-legacy".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![NodeDefinition {
+            api_version: "2.0.0".to_owned(),
+            node_id: "legacy-node".to_owned(),
+            kind: "plugin".to_owned(),
+            plugin_id: "legacy-quote".to_owned(),
+            operation: "normalize".to_owned(),
+            depends_mode: DependsMode::All,
+            depends_on: Vec::new(),
+            inputs: vec![VariableBinding {
+                target: "symbol".to_owned(),
+                source: VariableReference {
+                    namespace: RuntimeVariableNamespace::ManualInvocationInput,
+                    key: "symbol".to_owned(),
+                },
+            }],
+            when: None,
+            subflow: None,
+        }],
+        package_root: PathBuf::new(),
+    };
+
+    let manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "legacy-quote".to_owned(),
+        kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
+        entrypoint: EXTERNAL_NODE_ENTRYPOINT_EXEC_V1.to_owned(),
+        capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+        executable: Some("bin/legacy_node.sh".to_owned()),
+        trigger_runtime: None,
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        operations: vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: Some("Normalize quote payload".to_owned()),
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+        }],
+        event_schema: None,
+        mcp: None,
+        manifest_path: plugin_root.join("config.toml"),
+    };
+
+    let execution_plane = ExecutionPlane::with_plugin_runtime(
+        vec![workflow],
+        BTreeMap::new(),
+        BuiltinNodeRegistry::with_test_handlers(),
+        vec![manifest],
+        plugins_root,
+        root.join("secrets"),
+        SecretDecryptMode::Plaintext,
+    )
+    .expect("runtime execution plane with legacy plugin should be constructible");
+
+    let mut request = NormalizedRunRequest::new("run-runtime-legacy", "wf-runtime-legacy");
+    request
+        .manual_invocation_input
+        .insert("symbol".to_owned(), json!("BTCUSDT"));
+
+    let report = execution_plane
+        .execute(&request)
+        .expect("runtime should preserve legacy node.exec.v1 dispatch path");
+
+    assert_eq!(report.status, WorkflowRunStatus::Succeeded);
+    assert_eq!(report.schedule_waves, vec![vec!["legacy-node".to_owned()]]);
+    assert_eq!(
+        report.node_states.get("legacy-node"),
+        Some(&ScheduledNodeState::Succeeded)
+    );
+    assert_eq!(
+        report
+            .node_outputs
+            .get("legacy-node")
+            .and_then(|outputs| outputs.get("decision")),
+        Some(&json!("buy"))
+    );
+    assert_eq!(
+        report.runtime_namespaces.run_scoped.get("decision"),
+        Some(&json!("buy"))
+    );
+}
+
 fn test_runtime_context() -> BuiltinRuntimeContext {
     BuiltinRuntimeContext {
         root_layout: RootLayout::from_root(PathBuf::from("/tmp/chainbot-builtins-test")),
@@ -1117,4 +1420,42 @@ fn builtin_node(
         when: None,
         subflow: None,
     }
+}
+
+fn write_executable_script_contents(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("fixture script parent directory should be creatable");
+    }
+    fs::write(path, contents).expect("fixture script should be writable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("fixture script metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("fixture script should be marked executable");
+    }
+}
+
+fn unique_test_root(prefix: &str) -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after UNIX_EPOCH")
+        .as_nanos();
+    workspace_root()
+        .join("target")
+        .join("test-roots")
+        .join(format!("{prefix}-{now}"))
+}
+
+fn workspace_root() -> PathBuf {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    crate_root
+        .parent()
+        .expect("crates directory should exist")
+        .parent()
+        .expect("workspace root should exist")
+        .to_path_buf()
 }

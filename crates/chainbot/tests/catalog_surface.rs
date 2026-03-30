@@ -71,6 +71,104 @@ fn catalog_list_text_filter_only_renders_requested_section() {
 }
 
 #[test]
+fn catalog_list_reports_installed_mcp_plugins_under_installed_plugins() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("catalog-installed-mcp-plugins");
+    let _ = fs::remove_dir_all(&root);
+    write_catalog_root(
+        &root,
+        &[
+            (
+                "mcp-stdio-plugin",
+                r#"manifest_version = "2.0.0"
+plugin_id = "mcp-stdio-plugin"
+kind = "external_node"
+entrypoint = "mcp.tool.v1"
+capabilities = ["node:execute"]
+
+[[operations]]
+name = "echo"
+summary = "Echo tool"
+input_schema = ["message"]
+output_schema = ["message"]
+
+[mcp]
+transport = "stdio"
+
+[mcp.stdio]
+command = "bin/mcp_stdio_fixture.py"
+args = ["--mode", "echo"]
+"#,
+            ),
+            (
+                "mcp-http-plugin",
+                r#"manifest_version = "2.0.0"
+plugin_id = "mcp-http-plugin"
+kind = "external_node"
+entrypoint = "mcp.tool.v1"
+capabilities = ["node:execute"]
+
+[[operations]]
+name = "echo"
+summary = "Echo tool"
+input_schema = ["message"]
+output_schema = ["message"]
+
+[mcp]
+transport = "streamable_http"
+
+[mcp.streamable_http]
+url = "https://example.test/mcp"
+"#,
+            ),
+        ],
+    );
+
+    let text_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "list", "--kind", "plugin"])
+        .output()
+        .expect("catalog list with installed MCP plugins should execute");
+
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8(text_output.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("Installed plugins"));
+    assert!(stdout.contains("plugin:mcp-stdio-plugin"));
+    assert!(stdout.contains("plugin:mcp-http-plugin"));
+    assert!(stdout.contains("transport=stdio runtime=per_invocation_stdio_session"));
+    assert!(
+        stdout.contains("transport=streamable_http runtime=per_invocation_streamable_http_session")
+    );
+    assert!(!stdout.contains("MCP plugins"));
+
+    let json_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "list", "--kind", "plugin", "--json"])
+        .output()
+        .expect("catalog list json with installed MCP plugins should execute");
+
+    assert!(json_output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&json_output.stdout)
+        .expect("catalog list json should decode");
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(2));
+    assert_eq!(payload["plugins"][0]["kind"], "external_node");
+    assert!(payload["plugins"]
+        .as_array()
+        .is_some_and(|plugins| plugins
+            .iter()
+            .any(|plugin| plugin["plugin_id"] == "mcp-stdio-plugin"
+                && plugin["transport"] == "stdio"
+                && plugin["runtime"] == "per_invocation_stdio_session")));
+    assert!(payload["plugins"]
+        .as_array()
+        .is_some_and(|plugins| plugins
+            .iter()
+            .any(|plugin| plugin["plugin_id"] == "mcp-http-plugin"
+                && plugin["transport"] == "streamable_http"
+                && plugin["runtime"] == "per_invocation_streamable_http_session")));
+}
+
+#[test]
 fn catalog_show_reports_external_node_operations() {
     let _lock = acquire_fixture_lock();
 
@@ -87,6 +185,116 @@ fn catalog_show_reports_external_node_operations() {
     assert_eq!(payload["detail"]["plugin_kind"], "external_node");
     assert_eq!(payload["detail"]["schema_status"], "declared");
     assert_eq!(payload["detail"]["operations"][0]["name"], "normalize");
+}
+
+#[test]
+fn catalog_show_reports_mcp_transport_runtime_in_json_and_text() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("catalog-show-mcp-runtime");
+    let _ = fs::remove_dir_all(&root);
+    write_catalog_root(
+        &root,
+        &[
+            (
+                "mcp-stdio-plugin",
+                r#"manifest_version = "2.0.0"
+plugin_id = "mcp-stdio-plugin"
+kind = "external_node"
+entrypoint = "mcp.tool.v1"
+capabilities = ["node:execute"]
+
+[[operations]]
+name = "echo"
+summary = "Echo tool"
+input_schema = ["message"]
+output_schema = ["message"]
+
+[mcp]
+transport = "stdio"
+
+[mcp.stdio]
+command = "bin/mcp_stdio_fixture.py"
+"#,
+            ),
+            (
+                "mcp-http-plugin",
+                r#"manifest_version = "2.0.0"
+plugin_id = "mcp-http-plugin"
+kind = "external_node"
+entrypoint = "mcp.tool.v1"
+capabilities = ["node:execute"]
+
+[[operations]]
+name = "echo"
+summary = "Echo tool"
+input_schema = ["message"]
+output_schema = ["message"]
+
+[mcp]
+transport = "streamable_http"
+
+[mcp.streamable_http]
+url = "https://example.test/mcp"
+"#,
+            ),
+        ],
+    );
+
+    let stdio_json_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:mcp-stdio-plugin", "--json"])
+        .output()
+        .expect("catalog show stdio MCP plugin should execute");
+
+    assert!(stdio_json_output.status.success());
+    let stdio_payload = serde_json::from_slice::<serde_json::Value>(&stdio_json_output.stdout)
+        .expect("catalog show stdio MCP plugin json should decode");
+    assert_eq!(stdio_payload["detail"]["plugin_kind"], "external_node");
+    assert_eq!(stdio_payload["detail"]["transport"], "stdio");
+    assert_eq!(
+        stdio_payload["detail"]["runtime"],
+        "per_invocation_stdio_session"
+    );
+
+    let stdio_text_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:mcp-stdio-plugin"])
+        .output()
+        .expect("catalog show stdio MCP plugin text should execute");
+
+    assert!(stdio_text_output.status.success());
+    let stdio_stdout = String::from_utf8(stdio_text_output.stdout).expect("stdout should be UTF-8");
+    assert!(stdio_stdout.contains("transport: stdio"));
+    assert!(stdio_stdout.contains("runtime: per_invocation_stdio_session"));
+    assert!(stdio_stdout.contains("starts a stdio client session for each invocation"));
+
+    let http_json_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:mcp-http-plugin", "--json"])
+        .output()
+        .expect("catalog show streamable HTTP MCP plugin should execute");
+
+    assert!(http_json_output.status.success());
+    let http_payload = serde_json::from_slice::<serde_json::Value>(&http_json_output.stdout)
+        .expect("catalog show streamable HTTP MCP plugin json should decode");
+    assert_eq!(http_payload["detail"]["plugin_kind"], "external_node");
+    assert_eq!(http_payload["detail"]["transport"], "streamable_http");
+    assert_eq!(
+        http_payload["detail"]["runtime"],
+        "per_invocation_streamable_http_session"
+    );
+
+    let http_text_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:mcp-http-plugin"])
+        .output()
+        .expect("catalog show streamable HTTP MCP plugin text should execute");
+
+    assert!(http_text_output.status.success());
+    let http_stdout = String::from_utf8(http_text_output.stdout).expect("stdout should be UTF-8");
+    assert!(http_stdout.contains("transport: streamable_http"));
+    assert!(http_stdout.contains("runtime: per_invocation_streamable_http_session"));
+    assert!(http_stdout.contains("opens a Streamable HTTP client session for each invocation"));
 }
 
 #[test]
@@ -414,4 +622,27 @@ fn acquire_fixture_lock() -> MutexGuard<'static, ()> {
 fn fixture_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn write_catalog_root(root: &Path, plugins: &[(&str, &str)]) {
+    fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins")).expect("plugins directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+    fs::write(
+        root.join("chainbot.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"catalog\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+
+    for (plugin_id, manifest) in plugins {
+        let plugin_dir = root.join("plugins").join(plugin_id);
+        fs::create_dir_all(&plugin_dir).expect("plugin package directory should be creatable");
+        fs::write(plugin_dir.join("config.toml"), manifest)
+            .expect("plugin config should be writable");
+    }
 }
