@@ -11,3 +11,5 @@
 - `CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`: Defines the stable TOML structure, runtime precedence, and trigger/workflow loading contract for ChainBot roots.
 - `CHAINBOT_CLI_DESIGN.md`: Defines the stable CLI command surface, help system, status snapshot contract, and error-navigation semantics.
 - `CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`: Defines the stable package-aligned plugin layout, manifest version roles, and durable runtime state boundaries.
+- `CHAINBOT_PLUGIN_ACTIVATION_CONFIG_DESIGN.md`: Defines operator-owned plugin activation config, secret binding shape, and execution-time injection semantics.
+- `CHAINBOT_OFFICIAL_PLUGIN_DESIGN.md`: Defines official plugin implementation preferences, package shape, and the thin runtime boundary for first-party plugin surfaces.
