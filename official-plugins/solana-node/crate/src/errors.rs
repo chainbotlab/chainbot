@@ -1,0 +1,54 @@
+use std::fmt::{Display, Formatter};
+
+#[derive(Debug)]
+pub enum PluginError {
+    Base64(base64::DecodeError),
+    Bincode(bincode::Error),
+    Json(serde_json::Error),
+    Reqwest(reqwest::Error),
+    InvalidInput(String),
+    Rpc(String),
+    Signing(String),
+    Unsupported(String),
+}
+
+impl Display for PluginError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Base64(error) => write!(f, "base64 error: {error}"),
+            Self::Bincode(error) => write!(f, "bincode error: {error}"),
+            Self::Json(error) => write!(f, "json error: {error}"),
+            Self::Reqwest(error) => write!(f, "request error: {error}"),
+            Self::InvalidInput(detail) => write!(f, "invalid input: {detail}"),
+            Self::Rpc(detail) => write!(f, "rpc error: {detail}"),
+            Self::Signing(detail) => write!(f, "signing error: {detail}"),
+            Self::Unsupported(detail) => write!(f, "unsupported: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for PluginError {}
+
+impl From<base64::DecodeError> for PluginError {
+    fn from(value: base64::DecodeError) -> Self {
+        Self::Base64(value)
+    }
+}
+
+impl From<bincode::Error> for PluginError {
+    fn from(value: bincode::Error) -> Self {
+        Self::Bincode(value)
+    }
+}
+
+impl From<serde_json::Error> for PluginError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
+    }
+}
+
+impl From<reqwest::Error> for PluginError {
+    fn from(value: reqwest::Error) -> Self {
+        Self::Reqwest(value)
+    }
+}

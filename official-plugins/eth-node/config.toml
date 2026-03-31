@@ -1,0 +1,61 @@
+manifest_version = "2.0.0"
+plugin_id = "eth-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/eth-node"
+
+[[operations]]
+name = "eth_get_balance"
+summary = "Read native account balance"
+input_schema = ["endpoint", "address", "block_tag"]
+output_schema = ["balance"]
+kind = "read"
+
+[[operations]]
+name = "eth_get_token_balance"
+summary = "Read ERC20 token balance"
+input_schema = ["endpoint", "token_address", "wallet_address", "block_tag"]
+output_schema = ["balance"]
+kind = "read"
+
+[[operations]]
+name = "eth_transfer_native"
+summary = "Transfer native ETH"
+input_schema = ["endpoint", "to", "amount", "signer_ref", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "transfer"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "eth_raw_read"
+summary = "Execute raw Ethereum RPC read"
+input_schema = ["endpoint", "method", "params"]
+output_schema = ["result", "metadata"]
+kind = "raw_read"
+
+[[operations]]
+name = "eth_raw_write"
+summary = "Execute raw Ethereum signed write"
+input_schema = ["endpoint", "method", "params", "signer_ref", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/eth-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "eth_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/eth_node_official_plugin"
+to = "bin/eth-node"

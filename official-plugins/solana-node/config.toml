@@ -1,0 +1,61 @@
+manifest_version = "2.0.0"
+plugin_id = "solana-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/solana-node"
+
+[[operations]]
+name = "solana_get_balance"
+summary = "Read native account balance"
+input_schema = ["endpoint", "address", "commitment"]
+output_schema = ["balance"]
+kind = "read"
+
+[[operations]]
+name = "solana_get_token_balance"
+summary = "Read SPL token balance"
+input_schema = ["endpoint", "token_account", "commitment"]
+output_schema = ["balance"]
+kind = "read"
+
+[[operations]]
+name = "solana_transfer_native"
+summary = "Transfer native SOL"
+input_schema = ["endpoint", "to", "lamports", "signer_ref", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "transfer"
+requires_managed_signing = true
+default_confirmation = "confirmed"
+
+[[operations]]
+name = "solana_raw_read"
+summary = "Execute raw Solana RPC read"
+input_schema = ["endpoint", "method", "params"]
+output_schema = ["result", "metadata"]
+kind = "raw_read"
+
+[[operations]]
+name = "solana_raw_write"
+summary = "Execute raw Solana signed write"
+input_schema = ["endpoint", "method", "params", "signer_ref", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "confirmed"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/solana-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "solana_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/solana_node_official_plugin"
+to = "bin/solana-node"
