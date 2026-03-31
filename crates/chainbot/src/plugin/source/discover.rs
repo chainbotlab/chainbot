@@ -109,6 +109,7 @@ pub(crate) fn build_list_output(repository: &SourceRepository) -> PluginSourceLi
                 plugin_kind: plugin.manifest.kind.clone(),
                 runtime: plugin.source_manifest.runtime.as_str().to_owned(),
                 install_mode: plugin.source_manifest.install_mode.as_str().to_owned(),
+                surfaces: plugin_surface_summary(&plugin.manifest),
                 release_version: plugin.source_manifest.release_version.clone(),
             })
             .collect(),
@@ -132,6 +133,7 @@ pub(crate) fn build_show_output(
             entrypoint: plugin.manifest.entrypoint.clone(),
             capabilities: plugin.manifest.capabilities.clone(),
             entry_artifact: plugin.source_manifest.entry_artifact.clone(),
+            surfaces: plugin_surface_summary(&plugin.manifest),
             build: plugin
                 .source_manifest
                 .build
@@ -151,6 +153,55 @@ pub(crate) fn build_show_output(
                 }),
         },
     }
+}
+
+fn plugin_surface_summary(manifest: &PluginManifest) -> Vec<String> {
+    let mut summary = Vec::new();
+    if matches!(manifest.plugin_id.as_str(), "eth-node" | "eth-trigger") {
+        summary.push(String::from("chain=ethereum"));
+    } else if matches!(manifest.plugin_id.as_str(), "solana-node" | "solana-trigger") {
+        summary.push(String::from("chain=solana"));
+    }
+
+    if !manifest.operations.is_empty() {
+        let operations = manifest
+            .operations
+            .iter()
+            .map(|operation| match operation.kind {
+                crate::plugin::PluginOperationKind::Generic => operation.name.clone(),
+                crate::plugin::PluginOperationKind::Read => format!("{}:read", operation.name),
+                crate::plugin::PluginOperationKind::Write => format!("{}:write", operation.name),
+                crate::plugin::PluginOperationKind::Transfer => {
+                    format!("{}:transfer", operation.name)
+                }
+                crate::plugin::PluginOperationKind::RawRead => {
+                    format!("{}:raw_read", operation.name)
+                }
+                crate::plugin::PluginOperationKind::RawWrite => {
+                    format!("{}:raw_write", operation.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push(format!("operations={operations}"));
+    }
+
+    if let Some(event_schema) = manifest.event_schema.as_ref()
+        && !event_schema.listener_modes.is_empty()
+    {
+        let listeners = event_schema
+            .listener_modes
+            .iter()
+            .map(|mode| match mode {
+                crate::plugin::PluginTriggerListenerMode::EventLog => "event_log",
+                crate::plugin::PluginTriggerListenerMode::StateChange => "state_change",
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push(format!("listeners={listeners}"));
+    }
+
+    summary
 }
 
 fn discover_single_plugin_repository(

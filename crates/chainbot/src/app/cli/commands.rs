@@ -44,7 +44,7 @@ use crate::domain::trigger::{
     REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use crate::domain::workflow::WorkflowDefinition;
-use crate::errors::UserFacingError;
+use crate::errors::{ContractError, UserFacingError};
 use crate::infrastructure::config::{
     load_effective_root_layout, load_trigger_definitions, resolve_root_layout, set_trigger_enabled,
     LocalStorageDefinition, RawDebugArtifactsDefinition, RootConfigDefinition,
@@ -59,6 +59,7 @@ use crate::plugin::source::{
     PluginSourceDescriptor,
 };
 use crate::plugin::{PluginKind, PluginManifest};
+use crate::secrets::SecretReference;
 
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
@@ -751,6 +752,7 @@ fn default_root_config() -> RootConfigDefinition {
             String::from("timezone"),
             serde_json::Value::String(String::from("UTC")),
         )]),
+        plugin_activation: BTreeMap::new(),
         paths: RootPathOverrides {
             workflows_dir: Some(String::from("workflows")),
             triggers_dir: Some(String::from("triggers")),
@@ -977,6 +979,8 @@ fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, Use
         runtime.definitions.root_config.runtime_defaults.clone(),
         registry,
         runtime.definitions.plugins.clone(),
+        plugin_activation_bindings(&runtime.definitions.root_config)
+            .map_err(UserFacingError::from_contract)?,
         runtime.root_layout.plugins_dir.clone(),
         runtime.root_layout.secrets_dir.clone(),
         runtime.secret_mode,
@@ -985,8 +989,10 @@ fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, Use
 }
 
 pub(crate) fn build_trigger_host_policy(
+    root_config: &RootConfigDefinition,
     manifests: &[PluginManifest],
     plugins_root_dir: &Path,
+    secrets_root_dir: &Path,
 ) -> TriggerPluginHostPolicy {
     let allowlisted_plugin_ids = manifests
         .iter()
@@ -1003,7 +1009,23 @@ pub(crate) fn build_trigger_host_policy(
         allowlisted_plugin_ids,
         allowed_capabilities: BTreeSet::from([REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()]),
         plugin_root_dir: plugins_root_dir.to_path_buf(),
+        plugin_activation: plugin_activation_bindings(root_config).unwrap_or_default(),
+        secrets_root_dir: secrets_root_dir.to_path_buf(),
     }
+}
+
+fn plugin_activation_bindings(
+    root_config: &RootConfigDefinition,
+) -> Result<BTreeMap<String, BTreeMap<String, SecretReference>>, ContractError> {
+    let mut bindings = BTreeMap::new();
+    for (plugin_id, activation) in &root_config.plugin_activation {
+        let mut slots = BTreeMap::new();
+        for (slot, secret_ref) in &activation.secret_bindings {
+            slots.insert(slot.clone(), SecretReference::parse(secret_ref)?);
+        }
+        bindings.insert(plugin_id.clone(), slots);
+    }
+    Ok(bindings)
 }
 
 pub(crate) fn collect_external_trigger_manifests(

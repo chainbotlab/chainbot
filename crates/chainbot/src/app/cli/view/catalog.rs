@@ -109,6 +109,8 @@ pub struct PluginSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -158,6 +160,8 @@ pub struct PluginDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<String>,
     pub schema_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<String>,
@@ -191,6 +195,7 @@ pub struct StatusPluginSummaryView {
     pub builtin_count: usize,
     pub external_node_count: usize,
     pub external_trigger_count: usize,
+    pub surfaces: Vec<String>,
 }
 
 pub fn build_catalog_list(
@@ -239,6 +244,7 @@ pub fn build_catalog_list(
                             .as_ref()
                             .map(|detail| detail.runtime.clone()),
                         capabilities: manifest.capabilities.clone(),
+                        surfaces: plugin_surface_summary(manifest),
                     }
                 })
                 .collect()
@@ -333,6 +339,17 @@ pub fn build_status_plugin_summary(plugins: &[PluginManifest]) -> StatusPluginSu
         builtin_count: *by_kind.get(&PluginKind::Builtin).unwrap_or(&0),
         external_node_count: *by_kind.get(&PluginKind::ExternalNode).unwrap_or(&0),
         external_trigger_count: *by_kind.get(&PluginKind::ExternalTrigger).unwrap_or(&0),
+        surfaces: plugins
+            .iter()
+            .map(|manifest| {
+                let summary = plugin_surface_summary(manifest);
+                if summary.is_empty() {
+                    manifest.plugin_id.clone()
+                } else {
+                    format!("{} [{}]", manifest.plugin_id, summary.join(" | "))
+                }
+            })
+            .collect(),
     }
 }
 
@@ -347,6 +364,7 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
             transport: None,
             runtime: None,
             capabilities: manifest.capabilities.clone(),
+            surfaces: Vec::new(),
             schema_status: String::from("manifest_only"),
             lifecycle: None,
             operations: Vec::new(),
@@ -366,6 +384,7 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
                 .as_ref()
                 .map(|detail| detail.runtime.clone()),
             capabilities: manifest.capabilities.clone(),
+            surfaces: plugin_surface_summary(manifest),
             schema_status: String::from("declared"),
             lifecycle: None,
             operations: manifest.operations.clone(),
@@ -419,6 +438,7 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
                 transport: None,
                 runtime: None,
                 capabilities: manifest.capabilities.clone(),
+                surfaces: plugin_surface_summary(manifest),
                 schema_status: String::from("declared"),
                 lifecycle,
                 operations: Vec::new(),
@@ -500,6 +520,9 @@ pub fn render_catalog_list(
                 }
                 if let Some(runtime) = entry.runtime.as_deref() {
                     line.push_str(&format!(" runtime={runtime}"));
+                }
+                if !entry.surfaces.is_empty() {
+                    line.push_str(&format!(" surfaces={}", entry.surfaces.join(" | ")));
                 }
                 lines.push(line);
             }
@@ -604,6 +627,9 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
                     detail.capabilities.join(", ")
                 ));
             }
+            if !detail.surfaces.is_empty() {
+                lines.push(format!("  surfaces: {}", detail.surfaces.join(" | ")));
+            }
             if !detail.operations.is_empty() {
                 lines.push(String::new());
                 lines.push(String::from("Operations"));
@@ -620,6 +646,21 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
                             "    outputs: {}",
                             operation.output_schema.join(", ")
                         ));
+                    }
+                    let operation_kind = match operation.kind {
+                        crate::plugin::PluginOperationKind::Generic => "generic",
+                        crate::plugin::PluginOperationKind::Read => "read",
+                        crate::plugin::PluginOperationKind::Write => "write",
+                        crate::plugin::PluginOperationKind::Transfer => "transfer",
+                        crate::plugin::PluginOperationKind::RawRead => "raw_read",
+                        crate::plugin::PluginOperationKind::RawWrite => "raw_write",
+                    };
+                    lines.push(format!("    kind: {operation_kind}"));
+                    if operation.requires_managed_signing {
+                        lines.push(String::from("    managed_signing: required"));
+                    }
+                    if let Some(default_confirmation) = operation.default_confirmation.as_deref() {
+                        lines.push(format!("    default_confirmation: {default_confirmation}"));
                     }
                 }
             } else if !detail.input_schema.is_empty() || !detail.output_schema.is_empty() {
@@ -642,6 +683,20 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
                     lines.push(String::from("  fields: none"));
                 } else {
                     lines.push(format!("  fields: {}", event_schema.fields.join(", ")));
+                }
+                if !event_schema.listener_modes.is_empty() {
+                    lines.push(format!(
+                        "  listener_modes: {}",
+                        event_schema
+                            .listener_modes
+                            .iter()
+                            .map(|mode| match mode {
+                                crate::plugin::PluginTriggerListenerMode::EventLog => "event_log",
+                                crate::plugin::PluginTriggerListenerMode::StateChange => "state_change",
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
             }
             if detail.lifecycle.as_deref() == Some("wasm_daemon_persistent_session") {
@@ -669,4 +724,53 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn plugin_surface_summary(manifest: &PluginManifest) -> Vec<String> {
+    let mut summary = Vec::new();
+    if matches!(manifest.plugin_id.as_str(), "eth-node" | "eth-trigger") {
+        summary.push(String::from("chain=ethereum"));
+    } else if matches!(manifest.plugin_id.as_str(), "solana-node" | "solana-trigger") {
+        summary.push(String::from("chain=solana"));
+    }
+
+    if !manifest.operations.is_empty() {
+        let operation_kinds = manifest
+            .operations
+            .iter()
+            .map(|operation| match operation.kind {
+                crate::plugin::PluginOperationKind::Generic => operation.name.clone(),
+                crate::plugin::PluginOperationKind::Read => format!("{}:read", operation.name),
+                crate::plugin::PluginOperationKind::Write => format!("{}:write", operation.name),
+                crate::plugin::PluginOperationKind::Transfer => {
+                    format!("{}:transfer", operation.name)
+                }
+                crate::plugin::PluginOperationKind::RawRead => {
+                    format!("{}:raw_read", operation.name)
+                }
+                crate::plugin::PluginOperationKind::RawWrite => {
+                    format!("{}:raw_write", operation.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push(format!("operations={operation_kinds}"));
+    }
+
+    if let Some(event_schema) = manifest.event_schema.as_ref()
+        && !event_schema.listener_modes.is_empty()
+    {
+        let listeners = event_schema
+            .listener_modes
+            .iter()
+            .map(|mode| match mode {
+                crate::plugin::PluginTriggerListenerMode::EventLog => "event_log",
+                crate::plugin::PluginTriggerListenerMode::StateChange => "state_change",
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push(format!("listeners={listeners}"));
+    }
+
+    summary
 }

@@ -801,6 +801,7 @@ fn stdio_manifest(
             summary: Some("Echo message payloads".to_owned()),
             input_schema: vec!["message".to_owned()],
             output_schema: vec!["message".to_owned()],
+            ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
         mcp: Some(McpPluginContract {
@@ -837,6 +838,7 @@ fn http_manifest(
             summary: Some("Echo message payloads".to_owned()),
             input_schema: vec!["message".to_owned()],
             output_schema: vec!["message".to_owned()],
+            ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
         mcp: Some(McpPluginContract {
@@ -862,6 +864,7 @@ fn echo_request(plugin_id: &str, message: &str) -> ExternalNodePluginRequest {
         operation: "echo".to_owned(),
         requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
         input: BTreeMap::from_iter([("message".to_owned(), json!(message))]),
+        activation: None,
     }
 }
 

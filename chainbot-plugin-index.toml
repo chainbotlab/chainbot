@@ -9,3 +9,23 @@ summary = "Direct-install official plugin"
 plugin_id = "build-official-plugin"
 path = "official-plugins/build-official-plugin"
 summary = "Build-required official plugin"
+
+[[plugins]]
+plugin_id = "eth-node"
+path = "official-plugins/eth-node"
+summary = "Official Ethereum node toolkit plugin"
+
+[[plugins]]
+plugin_id = "eth-trigger"
+path = "official-plugins/eth-trigger"
+summary = "Official Ethereum trigger toolkit plugin"
+
+[[plugins]]
+plugin_id = "solana-node"
+path = "official-plugins/solana-node"
+summary = "Official Solana node toolkit plugin"
+
+[[plugins]]
+plugin_id = "solana-trigger"
+path = "official-plugins/solana-trigger"
+summary = "Official Solana trigger toolkit plugin"

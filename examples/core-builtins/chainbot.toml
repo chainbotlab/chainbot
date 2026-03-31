@@ -1,5 +1,5 @@
 manifest_version = "2.0.0"
-chainbot_version = "2.4.0"
+chainbot_version = "2.4.2"
 profile = "core-builtins"
 secret_refs = []
 

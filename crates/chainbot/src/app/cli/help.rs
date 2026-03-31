@@ -420,6 +420,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
                 "chainbot catalog list",
                 "chainbot catalog list --json --kind plugin",
                 "chainbot catalog show plugin:quote-node-plugin",
+                "chainbot catalog show plugin:eth-node",
             ],
             &["help", "plugin", "status", "validate"],
         ),
@@ -436,6 +437,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
                 "you want to inspect remote installable plugins before writing anything into the current root",
                 "you want one operator-facing CLI surface for github and git plugin sources",
                 "you need `--force` guarded replacement and rollback-aware plugin installation",
+                "you want to inspect official Ethereum or Solana packages before installing only one chain surface",
             ],
             &[
                 "remote source repositories materialized into temporary workspaces",
@@ -466,6 +468,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
             &[
                 "chainbot plugin source list github openai/example-plugins --json",
                 "chainbot plugin source show git ../plugin-repo --plugin quote-node-plugin",
+                "chainbot plugin source show git . --plugin eth-node",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot plugin install git ../plugin-repo --plugin quote-node-plugin --force",
             ],
             &["catalog", "validate", "status"],

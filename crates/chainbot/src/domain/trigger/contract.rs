@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::triggers::validate_builtin_trigger_definition;
 use crate::errors::{assert_required_major, assert_supported_major, ContractError};
+use crate::plugin::PluginActivationEnvelope;
+use crate::secrets::SecretReference;
 
 pub const CURRENT_API_MAJOR: u64 = 2;
 pub const REQUIRED_TRIGGER_PLUGIN_CAPABILITY: &str = "trigger.listen.event";
@@ -55,6 +57,8 @@ pub struct TriggerStartCommand {
     pub params: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub resume_checkpoint: Option<String>,
+    #[serde(default)]
+    pub activation: Option<PluginActivationEnvelope>,
     pub heartbeat_interval_ms: i64,
     pub shutdown_grace_ms: i64,
 }
@@ -124,6 +128,8 @@ pub struct TriggerPluginHostPolicy {
     pub allowlisted_plugin_ids: BTreeSet<String>,
     pub allowed_capabilities: BTreeSet<String>,
     pub plugin_root_dir: PathBuf,
+    pub plugin_activation: BTreeMap<String, BTreeMap<String, SecretReference>>,
+    pub secrets_root_dir: PathBuf,
 }
 
 impl TriggerDefinition {
@@ -178,7 +184,22 @@ impl TriggerStartCommand {
             "trigger_start_command.protocol_version",
             &self.protocol_version,
             CURRENT_API_MAJOR,
-        )
+        )?;
+        if let Some(activation) = self.activation.as_ref() {
+            for (slot, value) in &activation.secrets {
+                validate_non_empty_field(
+                    slot,
+                    "trigger_start_command.activation.secrets",
+                    &self.trigger_id,
+                )?;
+                validate_non_empty_field(
+                    value,
+                    "trigger_start_command.activation.secrets",
+                    &self.trigger_id,
+                )?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -61,6 +61,7 @@
 - path overrides
 - runtime defaults
 - secret references
+- plugin activation config
 - storage mode and backend settings
 - all path settings must stay within `<root>` and use root-relative paths
 
@@ -82,6 +83,9 @@ state_dir = "state"
 [runtime_defaults]
 timezone = "UTC"
 
+[plugin_activation."eth-node".secret_bindings]
+signer = "secret://wallets/eth/hot#private_key"
+
 [storage]
 mode = "local"
 
@@ -98,6 +102,7 @@ enabled = false
 - 当 `storage.mode = "local"` 时，必须提供 `storage.local.database_path`
 - 当 `storage.mode = "postgres"` 时，必须提供 `storage.postgres.database_url`
 - `storage.raw_debug` 只定义可选调试产物配置形状，默认可关闭，不影响主运行正确性
+- `plugin_activation` 是 operator-owned root config；具体 shape 见 `docs/design/CHAINBOT_PLUGIN_ACTIVATION_CONFIG_DESIGN.md`
 
 ## `workflows/<workflow_id>/config.toml`
 
@@ -442,6 +447,7 @@ executable = "bin/market_feed.sh"
 - canonical entrypoint 是 `plugins/<plugin_id>/config.toml`
 - plugin package 目录名必须与 `plugin_id` 完全一致
 - plugin manifest 与 workflow / trigger 分离维护
+- plugin activation config 不属于 package manifest，必须保留在 root-owned config 中
 - `config.toml` may include install-only `[source]` metadata for remote source discovery and install
 - `executable` 必须相对 manifest 文件自身解析
 - external trigger plugin 必须声明 `trigger.listen.event`

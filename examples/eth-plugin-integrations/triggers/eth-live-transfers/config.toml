@@ -1,0 +1,18 @@
+manifest_version = "2.0.0"
+trigger_id = "eth-live-transfers"
+kind = "external_plugin"
+plugin = "eth-trigger"
+source = "eth_log"
+workflow_id = "wf-eth-node"
+enabled = false
+
+[params]
+endpoint = "wss://rpc.example"
+listener_kind = "event_log"
+contract_address = "0x2222222222222222222222222222222222222222"
+event_signature = "Transfer(address,address,uint256)"
+
+[input_mapping]
+address = "payload.from"
+to = "payload.to"
+amount = "payload.value"

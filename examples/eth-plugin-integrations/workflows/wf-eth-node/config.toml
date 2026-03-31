@@ -1,0 +1,55 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-eth-node"
+name = "wf-eth-node"
+
+[runtime.defaults]
+endpoint = "https://rpc.example"
+address = "0x0000000000000000000000000000000000000000"
+to = "0x1111111111111111111111111111111111111111"
+amount = "1000000000000000"
+signer_ref = "signer"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "read-balance"
+kind = "plugin"
+plugin = "eth-node"
+operation = "eth_get_balance"
+depends_on = []
+
+[[nodes.inputs]]
+target = "endpoint"
+source = "run.endpoint"
+
+[[nodes.inputs]]
+target = "address"
+source = "run.address"
+
+[[nodes.inputs]]
+target = "block_tag"
+source = "run.block_tag"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "submit-transfer"
+kind = "plugin"
+plugin = "eth-node"
+operation = "eth_transfer_native"
+depends_on = ["read-balance"]
+
+[[nodes.inputs]]
+target = "endpoint"
+source = "run.endpoint"
+
+[[nodes.inputs]]
+target = "to"
+source = "run.to"
+
+[[nodes.inputs]]
+target = "amount"
+source = "run.amount"
+
+[[nodes.inputs]]
+target = "signer_ref"
+source = "run.signer_ref"

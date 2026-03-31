@@ -28,10 +28,10 @@ use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 use super::{configure_plugin_subprocess_environment, plugin_host_allowlisted_environment};
 use super::contract::{
-    validate_output_schema, ExternalNodePluginRequest, ExternalNodePluginResponse, PluginKind,
-    PluginManifest, PluginOperationDescriptor, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
+    validate_output_schema, ExternalNodePluginRequest, ExternalNodePluginResponse,
+    McpTransportKind, NodePluginResultState, PluginKind, PluginManifest,
+    PluginOperationDescriptor, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
     EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1,
-    McpTransportKind,
 };
 
 pub(crate) const MCP_NODE_INVOCATION_LIFECYCLE_POLICY: &str = "per_invocation_session";
@@ -51,6 +51,7 @@ fn mcp_stdio_timeout() -> Duration {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePluginExecutionResult {
     pub output: std::collections::BTreeMap<String, serde_json::Value>,
+    pub result_state: Option<NodePluginResultState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +206,7 @@ impl ExternalNodePluginHost {
 
         Ok(NodePluginExecutionResult {
             output: response.output,
+            result_state: response.result_state,
         })
     }
 
@@ -242,7 +244,10 @@ impl ExternalNodePluginHost {
         let output = normalize_mcp_tool_result(&manifest.plugin_id, call_result)?;
         validate_output_schema(&manifest.plugin_id, &operation.output_schema, &output)?;
 
-        Ok(NodePluginExecutionResult { output })
+        Ok(NodePluginExecutionResult {
+            output,
+            result_state: None,
+        })
     }
 
     fn resolve_executable_path(&self, manifest: &PluginManifest) -> Result<PathBuf, ContractError> {
@@ -1389,6 +1394,7 @@ mod tests {
                 summary: Some("Normalize quote payload".to_owned()),
                 input_schema: vec!["symbol".to_owned()],
                 output_schema: vec!["decision".to_owned()],
+                ..PluginOperationDescriptor::default()
             }],
             event_schema: None,
             mcp: Some(McpPluginContract {
@@ -1412,6 +1418,7 @@ mod tests {
             operation: "normalize".to_owned(),
             requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
             input: BTreeMap::from_iter([("symbol".to_owned(), json!("BTCUSDT"))]),
+            activation: None,
         }
     }
 

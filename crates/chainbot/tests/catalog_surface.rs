@@ -365,6 +365,174 @@ fn catalog_show_reports_external_trigger_event_schema() {
 }
 
 #[test]
+fn catalog_list_reports_installed_official_chain_node_and_trigger_plugins() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("catalog-official-chain-plugins");
+    let _ = fs::remove_dir_all(&root);
+    write_catalog_root(
+        &root,
+        &[
+            (
+                "eth-node",
+                r#"manifest_version = "2.0.0"
+plugin_id = "eth-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/plugin.sh"
+
+[[operations]]
+name = "eth_raw_read"
+summary = "Raw read"
+input_schema = ["endpoint", "method", "params"]
+output_schema = ["result"]
+kind = "raw_read"
+
+[[operations]]
+name = "eth_raw_write"
+summary = "Raw write"
+input_schema = ["endpoint", "method", "params", "signer_ref", "confirmation_mode"]
+output_schema = ["status", "transaction_hash"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+"#,
+            ),
+            (
+                "solana-trigger",
+                r#"manifest_version = "2.0.0"
+plugin_id = "solana-trigger"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+executable = "bin/external_trigger.sh"
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "Solana trigger payload"
+fields = ["chain", "listener_kind", "slot_ref", "event_id", "payload"]
+listener_modes = ["event_log", "state_change"]
+"#,
+            ),
+        ],
+    );
+
+    let list_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "list", "--kind", "plugin", "--json"])
+        .output()
+        .expect("catalog list should execute");
+
+    assert!(list_output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&list_output.stdout)
+        .expect("catalog list json should decode");
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(2));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "eth-node")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "solana-trigger")));
+
+    let show_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:eth-node", "--json"])
+        .output()
+        .expect("catalog show should execute");
+
+    assert!(show_output.status.success());
+    let show_payload = serde_json::from_slice::<serde_json::Value>(&show_output.stdout)
+        .expect("catalog show json should decode");
+    assert_eq!(show_payload["detail"]["plugin_kind"], "external_node");
+    assert_eq!(
+        show_payload["detail"]["operations"][0]["name"],
+        "eth_raw_read"
+    );
+    assert_eq!(show_payload["detail"]["operations"][0]["kind"], "raw_read");
+    assert_eq!(show_payload["detail"]["operations"][1]["kind"], "raw_write");
+    assert_eq!(
+        show_payload["detail"]["operations"][1]["requires_managed_signing"],
+        true
+    );
+    assert_eq!(
+        show_payload["detail"]["operations"][1]["default_confirmation"],
+        "safe"
+    );
+
+    let trigger_show_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:solana-trigger", "--json"])
+        .output()
+        .expect("catalog show trigger plugin should execute");
+
+    assert!(trigger_show_output.status.success());
+    let trigger_payload = serde_json::from_slice::<serde_json::Value>(&trigger_show_output.stdout)
+        .expect("catalog show trigger plugin json should decode");
+    assert_eq!(trigger_payload["detail"]["plugin_kind"], "external_trigger");
+    assert_eq!(
+        trigger_payload["detail"]["event_schema"]["listener_modes"][0],
+        "event_log"
+    );
+    assert_eq!(
+        trigger_payload["detail"]["event_schema"]["listener_modes"][1],
+        "state_change"
+    );
+}
+
+#[test]
+fn catalog_list_does_not_infer_chain_surface_from_noncanonical_plugin_prefix() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("catalog-noncanonical-chain-prefix");
+    let _ = fs::remove_dir_all(&root);
+    write_catalog_root(
+        &root,
+        &[(
+            "eth-analytics-plugin",
+            r#"manifest_version = "2.0.0"
+plugin_id = "eth-analytics-plugin"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/plugin.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize payload"
+input_schema = ["symbol"]
+output_schema = ["decision"]
+"#,
+        )],
+    );
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "list", "--kind", "plugin", "--json"])
+        .output()
+        .expect("catalog list should execute");
+
+    assert!(output.status.success());
+    let payload = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .expect("catalog list json should decode");
+    let plugin = payload["plugins"]
+        .as_array()
+        .and_then(|plugins| {
+            plugins
+                .iter()
+                .find(|plugin| plugin["plugin_id"] == "eth-analytics-plugin")
+        })
+        .expect("noncanonical plugin should be present");
+    assert_eq!(
+        plugin["surfaces"],
+        serde_json::json!(["operations=normalize"])
+    );
+}
+
+#[test]
 fn catalog_show_reports_wasm_trigger_lifecycle_in_json_and_text() {
     let _lock = acquire_fixture_lock();
     let root = unique_root("catalog-wasm-trigger-lifecycle");

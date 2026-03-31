@@ -325,6 +325,100 @@ fn root_paths_overrides_and_plugin_discovery_are_applied() {
 }
 
 #[test]
+fn plugin_activation_rejects_unknown_plugin_id() {
+    let root = unique_test_root("plugin-activation-unknown-plugin");
+    write_valid_fixture_with_plugin_package(&root);
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"activation\"\n\n[plugin_activation.\"missing-plugin\".secret_bindings]\nsigner = \"secret://wallets/eth/hot#private_key\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("plugin activation root config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("unknown plugin activation binding should fail");
+    assert!(matches!(
+        error,
+        ContractError::InvalidRootConfigField {
+            field: "root_config.plugin_activation",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn plugin_activation_rejects_invalid_secret_reference() {
+    let root = unique_test_root("plugin-activation-invalid-secret-ref");
+    write_valid_fixture_with_plugin_package(&root);
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"activation\"\n\n[plugin_activation.\"quote-plugin\".secret_bindings]\nsigner = \"secret://wallets-only\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("plugin activation root config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("invalid activation secret ref should fail");
+    assert!(matches!(
+        error,
+        ContractError::InvalidSecretReferenceSyntax { .. }
+    ));
+}
+
+#[test]
+fn legacy_official_plugin_id_is_rejected() {
+    let root = unique_test_root("legacy-official-plugin-id");
+    fs::create_dir_all(root.join("workflows").join("wf-alpha"))
+        .expect("workflow package directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("tr-market"))
+        .expect("trigger package directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("eth-node-official-plugin"))
+        .expect("legacy plugin package directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"legacy\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-alpha").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-alpha\"\nname = \"alpha\"\n",
+    )
+    .expect("workflow fixture should be writable");
+    fs::write(
+        root.join("triggers").join("tr-market").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"tr-market\"\nkind = \"builtin\"\nsource = \"market_tick\"\nworkflow_id = \"wf-alpha\"\nenabled = true\n",
+    )
+    .expect("trigger fixture should be writable");
+    fs::write(
+        root.join("plugins")
+            .join("eth-node-official-plugin")
+            .join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"eth-node-official-plugin\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/plugin.sh\"\n\n[[operations]]\nname = \"eth_raw_read\"\nsummary = \"Raw read\"\ninput_schema = [\"endpoint\", \"method\", \"params\"]\noutput_schema = [\"result\"]\nkind = \"raw_read\"\n",
+    )
+    .expect("legacy plugin fixture should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("legacy official plugin ids should fail fast");
+    assert!(matches!(
+        error,
+        ContractError::InvalidRootConfigField {
+            field: "root_config.plugins",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn missing_chainbot_version_is_backfilled_during_startup_load() {
     let root = unique_test_root("config-version-backfill");
     write_valid_fixture(&root);
@@ -636,7 +730,9 @@ fn write_subflow_call_fixture(root: &Path) {
 fn write_valid_fixture_with_plugin_package_source_metadata(root: &Path) {
     write_valid_fixture_with_plugin_package(root);
     fs::write(
-        root.join("plugins").join("quote-plugin").join("config.toml"),
+        root.join("plugins")
+            .join("quote-plugin")
+            .join("config.toml"),
         r#"manifest_version = "2.0.0"
 plugin_id = "quote-plugin"
 kind = "builtin"

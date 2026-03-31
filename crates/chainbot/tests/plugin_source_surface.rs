@@ -99,6 +99,125 @@ fn plugin_source_show_without_plugin_is_a_usage_error_for_multi_plugin_repo() {
 }
 
 #[test]
+fn plugin_source_list_json_reports_official_chain_packages() {
+    let _lock = acquire_fixture_lock();
+    let repo = unique_root("plugin-source-official-chain-repo");
+    create_official_chain_repo(&repo);
+
+    let output = Command::new(chainbot_bin())
+        .args([
+            "plugin",
+            "source",
+            "list",
+            "git",
+            repo.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .output()
+        .expect("plugin source list should execute");
+
+    assert!(output.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("plugin source list json should decode");
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(4));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "eth-node")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "eth-trigger")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "solana-node")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "solana-trigger")));
+}
+
+#[test]
+fn plugin_source_show_json_reports_official_trigger_package_details() {
+    let _lock = acquire_fixture_lock();
+    let repo = unique_root("plugin-source-official-trigger-show");
+    create_official_chain_repo(&repo);
+
+    let output = Command::new(chainbot_bin())
+        .args([
+            "plugin",
+            "source",
+            "show",
+            "git",
+            repo.to_string_lossy().as_ref(),
+            "--plugin",
+            "eth-trigger",
+            "--json",
+        ])
+        .output()
+        .expect("plugin source show should execute");
+
+    assert!(output.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("plugin source show json should decode");
+    assert_eq!(payload["plugin"]["plugin_id"], "eth-trigger");
+    assert_eq!(payload["plugin"]["plugin_kind"], "external_trigger");
+    assert_eq!(payload["plugin"]["runtime"], "bin");
+    assert_eq!(
+        payload["plugin"]["entry_artifact"],
+        "bin/external_trigger.sh"
+    );
+}
+
+#[test]
+fn plugin_source_list_does_not_infer_chain_surface_from_noncanonical_plugin_prefix() {
+    let _lock = acquire_fixture_lock();
+    let repo = unique_root("plugin-source-noncanonical-chain-prefix");
+    let _ = fs::remove_dir_all(&repo);
+    fs::create_dir_all(
+        repo.join("official-plugins")
+            .join("eth-analytics-plugin")
+            .join("bin"),
+    )
+    .expect("plugin directory should be creatable");
+    fs::write(
+        repo.join("chainbot-plugin-index.toml"),
+        "manifest_version = \"1.0.0\"\n\n[[plugins]]\nplugin_id = \"eth-analytics-plugin\"\npath = \"official-plugins/eth-analytics-plugin\"\nsummary = \"Analytics plugin\"\n",
+    )
+    .expect("source index should be writable");
+    write_external_node_plugin(
+        repo.join("official-plugins").join("eth-analytics-plugin"),
+        "eth-analytics-plugin",
+    );
+    init_git_repo(&repo);
+
+    let output = Command::new(chainbot_bin())
+        .args([
+            "plugin",
+            "source",
+            "list",
+            "git",
+            repo.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .output()
+        .expect("plugin source list should execute");
+
+    assert!(output.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("plugin source list json should decode");
+    let plugin = payload["plugins"]
+        .as_array()
+        .and_then(|plugins| {
+            plugins
+                .iter()
+                .find(|plugin| plugin["plugin_id"] == "eth-analytics-plugin")
+        })
+        .expect("noncanonical plugin should be present");
+    assert_eq!(
+        plugin["surfaces"],
+        serde_json::json!(["operations=normalize"])
+    );
+}
+
+#[test]
 fn plugin_source_list_requires_embedded_source_metadata() {
     let _lock = acquire_fixture_lock();
     let repo = unique_root("plugin-source-missing-source");
@@ -253,6 +372,46 @@ fn create_multi_plugin_repo(root: &Path) {
     init_git_repo(root);
 }
 
+fn create_official_chain_repo(root: &Path) {
+    let _ = fs::remove_dir_all(root);
+    for plugin_id in ["eth-node", "eth-trigger", "solana-node", "solana-trigger"] {
+        fs::create_dir_all(root.join("official-plugins").join(plugin_id).join("bin"))
+            .expect("official plugin directory should be creatable");
+    }
+    fs::write(
+        root.join("chainbot-plugin-index.toml"),
+        "manifest_version = \"1.0.0\"\n\n[[plugins]]\nplugin_id = \"eth-node\"\npath = \"official-plugins/eth-node\"\nsummary = \"Official Ethereum node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"eth-trigger\"\npath = \"official-plugins/eth-trigger\"\nsummary = \"Official Ethereum trigger toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-node\"\npath = \"official-plugins/solana-node\"\nsummary = \"Official Solana node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-trigger\"\npath = \"official-plugins/solana-trigger\"\nsummary = \"Official Solana trigger toolkit plugin\"\n",
+    )
+    .expect("source index should be writable");
+    write_official_chain_node_plugin(
+        root.join("official-plugins").join("eth-node"),
+        "eth-node",
+        "eth_raw_read",
+        "eth_raw_write",
+        "eth_transfer_native",
+    );
+    write_official_chain_trigger_plugin(
+        root.join("official-plugins").join("eth-trigger"),
+        "eth-trigger",
+        "Ethereum trigger payload",
+        &["chain", "listener_kind", "block_ref", "event_id", "payload"],
+    );
+    write_official_chain_node_plugin(
+        root.join("official-plugins").join("solana-node"),
+        "solana-node",
+        "solana_raw_read",
+        "solana_raw_write",
+        "solana_transfer_native",
+    );
+    write_official_chain_trigger_plugin(
+        root.join("official-plugins").join("solana-trigger"),
+        "solana-trigger",
+        "Solana trigger payload",
+        &["chain", "listener_kind", "slot_ref", "event_id", "payload"],
+    );
+    init_git_repo(root);
+}
+
 fn write_external_node_plugin(root: PathBuf, plugin_id: &str) {
     fs::write(
         root.join("config.toml"),
@@ -264,6 +423,51 @@ fn write_external_node_plugin(root: PathBuf, plugin_id: &str) {
     fs::write(root.join("bin").join("plugin.sh"), "#!/bin/sh\necho '{}'\n")
         .expect("plugin executable should be writable");
     set_executable(&root.join("bin").join("plugin.sh"));
+}
+
+fn write_official_chain_node_plugin(
+    root: PathBuf,
+    plugin_id: &str,
+    raw_read_operation: &str,
+    raw_write_operation: &str,
+    transfer_operation: &str,
+) {
+    fs::write(
+        root.join("config.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nplugin_id = \"{plugin_id}\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/plugin.sh\"\n\n[[operations]]\nname = \"{raw_read_operation}\"\nsummary = \"Raw read\"\ninput_schema = [\"endpoint\", \"method\", \"params\"]\noutput_schema = [\"result\"]\nkind = \"raw_read\"\n\n[[operations]]\nname = \"{raw_write_operation}\"\nsummary = \"Raw write\"\ninput_schema = [\"endpoint\", \"method\", \"params\", \"signer_ref\", \"confirmation_mode\"]\noutput_schema = [\"status\", \"transaction_id\"]\nkind = \"raw_write\"\nrequires_managed_signing = true\ndefault_confirmation = \"safe\"\n\n[[operations]]\nname = \"{transfer_operation}\"\nsummary = \"Native transfer\"\ninput_schema = [\"endpoint\", \"from\", \"to\", \"amount\", \"signer_ref\", \"confirmation_mode\"]\noutput_schema = [\"status\", \"transaction_id\"]\nkind = \"transfer\"\nrequires_managed_signing = true\ndefault_confirmation = \"safe\"\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"bin/plugin.sh\"\nrelease_version = \"0.1.0\"\n"
+        ),
+    )
+    .expect("plugin config should be writable");
+    fs::write(root.join("bin").join("plugin.sh"), "#!/bin/sh\necho '{}'\n")
+        .expect("plugin executable should be writable");
+    set_executable(&root.join("bin").join("plugin.sh"));
+}
+
+fn write_official_chain_trigger_plugin(
+    root: PathBuf,
+    plugin_id: &str,
+    summary: &str,
+    fields: &[&str],
+) {
+    let quoted_fields = fields
+        .iter()
+        .map(|field| format!("\"{field}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    fs::write(
+        root.join("config.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nplugin_id = \"{plugin_id}\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/external_trigger.sh\"\n\n[trigger_runtime]\nlifecycle = \"process_short_lived\"\npush_callback = \"inline_response\"\ndurable_ack = \"caller_scope\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\n\n[event_schema]\nsummary = \"{summary}\"\nfields = [{quoted_fields}]\nlistener_modes = [\"event_log\", \"state_change\"]\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"bin/external_trigger.sh\"\nrelease_version = \"0.1.0\"\n"
+        ),
+    )
+    .expect("trigger config should be writable");
+    fs::write(
+        root.join("bin").join("external_trigger.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .expect("trigger executable should be writable");
+    set_executable(&root.join("bin").join("external_trigger.sh"));
 }
 
 fn create_mcp_http_repo_with_raw_source_entry_artifact(root: &Path) {

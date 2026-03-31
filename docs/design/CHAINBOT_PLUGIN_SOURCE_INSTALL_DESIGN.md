@@ -25,3 +25,10 @@
 - install 必须经过 prepare、staging、swap、root revalidation。
 - 已存在目标目录时默认拒绝覆盖，仅 `--force` 允许替换。
 - 替换必须带 backup 与 rollback 语义。
+
+## Official Chain Packages
+
+- official Ethereum 和 Solana packages 继续走相同的 `plugin source` / `plugin install` contract。
+- official chain packages 可以是 multi-plugin source repo entries，而不是特殊内建分支。
+- official chain packages 优先使用 `build_required` + package-local Cargo binary output。
+- source discoverability 应继续清晰区分 remote installable packages 与 current-root installed catalog。

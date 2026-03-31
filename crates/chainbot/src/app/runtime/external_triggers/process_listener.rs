@@ -15,6 +15,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::domain::state::StagedTriggerEventRecord;
 use crate::domain::trigger::{
     TriggerAck, TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlaneError,
     TriggerPluginHostPolicy, TriggerPluginMessage, TriggerStartCommand, TriggerStateStore,
@@ -22,7 +23,11 @@ use crate::domain::trigger::{
 };
 use crate::errors::ContractError;
 use crate::plugin::{
-    configure_plugin_subprocess_environment, PluginKind, PluginManifest, TriggerRuntimeLifecycle,
+    configure_plugin_subprocess_environment, PluginActivationEnvelope, PluginKind, PluginManifest,
+    TriggerRuntimeLifecycle,
+};
+use crate::secrets::{
+    redact_text, GpgSecretDecryptor, PlaintextSecretDecryptor, SecretProvider, SecretValue,
 };
 
 #[derive(Debug, Clone)]
@@ -50,6 +55,12 @@ enum ListenerFrame {
     Stdout(String),
     StdoutClosed,
     StdoutError(std::io::Error),
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedTriggerActivation {
+    activation: Option<PluginActivationEnvelope>,
+    resolved_values: Vec<SecretValue>,
 }
 
 impl ListenerSessionState {
@@ -115,7 +126,7 @@ pub(crate) fn collect_external_process_trigger_emissions(
 
     let plugin = validate_trigger_plugin_manifest(manifest, policy)?;
     plugin
-        .stream_emissions(state_store, definition, on_progress)
+        .stream_emissions(state_store, definition, policy, on_progress)
         .map_err(TriggerPlaneError::from)
 }
 
@@ -295,6 +306,7 @@ impl ExternalTriggerPlugin {
         &self,
         state_store: &mut dyn TriggerStateStore,
         definition: &TriggerDefinition,
+        policy: &TriggerPluginHostPolicy,
         on_progress: &mut dyn FnMut() -> Result<(), TriggerPlaneError>,
     ) -> Result<Vec<TriggerEmission>, ContractError> {
         let executable_path = match &self.runtime {
@@ -305,6 +317,7 @@ impl ExternalTriggerPlugin {
         };
 
         validate_existing_executable(&self.plugin_id, executable_path)?;
+        let activation = resolve_trigger_activation(definition, policy)?;
 
         let input = TriggerHostMessage::Start(TriggerStartCommand {
             protocol_version: String::from("2.0.0"),
@@ -318,6 +331,7 @@ impl ExternalTriggerPlugin {
                     detail: error.to_string(),
                 })?
                 .map(|record| record.checkpoint),
+            activation: activation.activation.clone(),
             heartbeat_interval_ms: 5_000,
             shutdown_grace_ms: 10_000,
         });
@@ -417,10 +431,10 @@ impl ExternalTriggerPlugin {
                 }
             });
 
-            let mut emissions = Vec::new();
             let mut state = ListenerSessionState::WaitingReady;
             let heartbeat_interval_ms = input_heartbeat_interval_ms(&input);
             let mut last_activity_ms = contract_now_ms(definition)?;
+            let mut staged_sequence = 0_u64;
 
             loop {
                 let now_ms = contract_now_ms(definition)?;
@@ -467,24 +481,46 @@ impl ExternalTriggerPlugin {
                                 let _ = stdout_handle.join();
                                 return Err(ContractError::TriggerPluginReturnedFailure {
                                     plugin_id: self.plugin_id.clone(),
-                                    message: fatal.message,
+                                    message: redact_text(
+                                        &fatal.message,
+                                        &activation.resolved_values,
+                                    ),
                                 });
                             }
                             TriggerPluginMessage::Event(event) => {
-                                emissions.push(TriggerEmission {
+                                let staged_record = StagedTriggerEventRecord {
+                                    schema_version: String::from("1.0.0"),
+                                    staging_id: format!(
+                                        "process:{}:{}:{}:{}",
+                                        definition.trigger_id,
+                                        event.event_key,
+                                        event.occurred_at_ms,
+                                        staged_sequence
+                                    ),
+                                    trigger_id: definition.trigger_id.clone(),
+                                    workflow_id: definition.workflow_id.clone(),
                                     event_id: format!(
                                         "{}:{}",
                                         definition.trigger_id, event.event_key
                                     ),
+                                    source: definition.source.clone(),
                                     occurred_at_ms: event.occurred_at_ms,
+                                    staged_at_ms: contract_now_ms(definition)?,
                                     checkpoint: Some(event.checkpoint.clone()),
-                                    source: Some(definition.source.clone()),
                                     payload: event.payload,
                                     dedup_key: event.dedup_key,
                                     dedup_window_ms: event.dedup_window_ms,
                                     cooldown_key: event.cooldown_key,
                                     cooldown_ms: event.cooldown_ms,
-                                });
+                                    accepted_at_ms: None,
+                                    last_error: None,
+                                };
+                                state_store
+                                    .append_staged_trigger_event_record_for_acceptance(
+                                        &staged_record,
+                                    )
+                                    .map_err(progress_to_contract_error(definition))?;
+                                staged_sequence = staged_sequence.saturating_add(1);
 
                                 let ack = TriggerHostMessage::Ack(TriggerAck {
                                     checkpoint: event.checkpoint,
@@ -587,11 +623,11 @@ impl ExternalTriggerPlugin {
                 return Err(ContractError::TriggerPluginProcessFailed {
                     plugin_id: self.plugin_id.clone(),
                     status: status.code().unwrap_or(-1),
-                    stderr: stderr.trim().to_owned(),
+                    stderr: redact_text(stderr.trim(), &activation.resolved_values),
                 });
             }
 
-            return Ok(emissions);
+            return Ok(Vec::<TriggerEmission>::new());
         }
 
         Err(ContractError::TriggerPluginProcessIo {
@@ -629,6 +665,46 @@ fn contract_now_ms(definition: &TriggerDefinition) -> Result<i64, ContractError>
     i64::try_from(duration.as_millis()).map_err(|source| ContractError::InvalidTriggerEmission {
         trigger_id: definition.trigger_id.clone(),
         detail: format!("system time overflowed i64 millis: {source}"),
+    })
+}
+
+fn resolve_trigger_activation(
+    definition: &TriggerDefinition,
+    policy: &TriggerPluginHostPolicy,
+) -> Result<ResolvedTriggerActivation, ContractError> {
+    let Some(plugin_id) = definition.plugin.as_deref() else {
+        return Ok(ResolvedTriggerActivation::default());
+    };
+    let Some(bindings) = policy.plugin_activation.get(plugin_id) else {
+        return Ok(ResolvedTriggerActivation::default());
+    };
+    if bindings.is_empty() {
+        return Ok(ResolvedTriggerActivation::default());
+    }
+
+    let mut secrets = Vec::with_capacity(bindings.len());
+    let mut resolved = std::collections::BTreeMap::new();
+    if std::env::var("CHAINBOT_SECRET_DECRYPTOR").ok().as_deref() == Some("plaintext") {
+        let provider =
+            SecretProvider::new(policy.secrets_root_dir.clone(), PlaintextSecretDecryptor);
+        for (slot, reference) in bindings {
+            let value = provider.resolve_reference(reference)?;
+            resolved.insert(slot.clone(), value.expose().to_owned());
+            secrets.push(value);
+        }
+    } else {
+        let provider =
+            SecretProvider::new(policy.secrets_root_dir.clone(), GpgSecretDecryptor::new());
+        for (slot, reference) in bindings {
+            let value = provider.resolve_reference(reference)?;
+            resolved.insert(slot.clone(), value.expose().to_owned());
+            secrets.push(value);
+        }
+    }
+
+    Ok(ResolvedTriggerActivation {
+        activation: Some(PluginActivationEnvelope { secrets: resolved }),
+        resolved_values: secrets,
     })
 }
 

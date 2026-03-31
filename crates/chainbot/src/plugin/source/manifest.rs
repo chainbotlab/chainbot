@@ -48,6 +48,8 @@ pub(crate) struct PluginSourceSummary {
     pub plugin_kind: String,
     pub runtime: String,
     pub install_mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_version: Option<String>,
 }
@@ -72,6 +74,8 @@ pub(crate) struct PluginSourceDetail {
     pub entrypoint: String,
     pub capabilities: Vec<String>,
     pub entry_artifact: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<PluginSourceBuildDetail>,
 }

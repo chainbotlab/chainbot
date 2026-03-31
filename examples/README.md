@@ -11,6 +11,8 @@ This folder contains curated ChainBot roots you can copy, inspect, or adapt.
 | `builtin-triggers/` | you want simple trigger cases in one place | builtin `manual`, `market_tick`, and `cron` packages sharing one workflow | `CHAINBOT_CONFIG_DIR=examples/builtin-triggers target/debug/chainbot validate` |
 | `workflow-composition/` | you want to learn subflow boundaries | parent/child workflows, `nodes.call`, subflow input and output flow | `CHAINBOT_CONFIG_DIR=examples/workflow-composition target/debug/chainbot validate` |
 | `plugin-integrations/` | you want external plugin setup | process + wasm external trigger plugins, external node plugin, package-local `bin/` executables | `CHAINBOT_CONFIG_DIR=examples/plugin-integrations target/debug/chainbot validate` |
+| `eth-plugin-integrations/` | you want official Ethereum surfaces | official Ethereum node + trigger packages, root-owned activation bindings, live-only listener setup | `CHAINBOT_CONFIG_DIR=examples/eth-plugin-integrations target/debug/chainbot validate` |
+| `solana-plugin-integrations/` | you want official Solana surfaces | official Solana node + trigger packages, root-owned activation bindings, live-only listener setup | `CHAINBOT_CONFIG_DIR=examples/solana-plugin-integrations target/debug/chainbot validate` |
 | `custom-paths/` | you need non-default root-relative directories | `[paths]` overrides for workflows, triggers, plugins, secrets, and state | `CHAINBOT_CONFIG_DIR=examples/custom-paths target/debug/chainbot validate` |
 
 ## Example Roots
@@ -82,9 +84,31 @@ Highlights:
 - relocated workflow and trigger package directories
 - relocated plugin, secret, and state directories
 
+### `eth-plugin-integrations/`
+
+Use this when you want copyable official Ethereum node and trigger setup.
+
+Highlights:
+
+- official Ethereum node package with read, transfer, and raw write surfaces
+- official Ethereum trigger package with `event_log` and `state_change` listener modes
+- root-owned `plugin_activation` secret bindings
+- live-only trigger example with user-supplied endpoint params
+
+### `solana-plugin-integrations/`
+
+Use this when you want copyable official Solana node and trigger setup.
+
+Highlights:
+
+- official Solana node package with read, transfer, and raw write surfaces
+- official Solana trigger package with `event_log` and `state_change` listener modes
+- root-owned `plugin_activation` secret bindings
+- live-only trigger example with user-supplied endpoint params
+
 ## Notes
 
 - All examples follow the current `chainbot.toml` contract.
 - No example uses legacy `plugins/manifests/` layout.
 - Secrets and runtime state are represented as empty directories or placeholders, not real credentials.
-- All six curated roots are covered by the `validate_accepts_curated_examples` smoke test in `crates/chainbot/tests/cli_surface.rs`.
+- All eight curated roots are covered by the `validate_accepts_curated_examples` smoke test in `crates/chainbot/tests/cli_surface.rs`.

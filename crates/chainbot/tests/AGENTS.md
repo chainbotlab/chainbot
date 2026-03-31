@@ -17,9 +17,12 @@
 - `execution_scheduler.rs`: Verifies Rust-owned scheduler wave planning, `depends_mode`/`when` behavior, and builtin node registry typed dispatch failures.
 - `mcp_plugin_host.rs`: Verifies stdio-backed MCP host startup, tool invocation success, and deterministic fail-closed transport errors at the plugin boundary.
 - `node_plugin_host.rs`: Verifies external node plugin manifest guards, stdin/stdout roundtrip contract, and capability/version rejection before spawn.
+- `chain_node_plugin_host.rs`: Verifies chain-node activation secret injection and secret-redacted failure surfacing.
 - `trigger_plane.rs`: Verifies trigger package manifest policy checks, builtin/external run-request normalization, workflow binding, dedup/cooldown persistence, and DB-backed trigger records.
+- `chain_trigger_runtime.rs`: Verifies chain-trigger start envelopes receive execution-time activation secrets without host-side chain branches.
 - `secrets_runtime.rs`: Verifies pass-style secret resolution, decryption-failure redaction, and non-persistence guarantees for secret material.
 - `fixtures/`: Deterministic pass-style filesystem fixtures consumed by runtime secret-provider tests.
+- `fixtures/ops/chain/`: Reserved chain-secret fixture namespace for official activation-binding coverage.
 - `worker_host.rs`: Verifies subprocess worker protocol negotiation, Python/JavaScript roundtrip behavior, timeout cleanup, malformed output handling, and stdout/stderr size limits.
 - `end_to_end_vertical_slice.rs`: Verifies the task-11 runnable vertical slice for `validate`/`run`/`serve`/`list-runs`, persisted artifacts, bounded failure-mode behavior, and task-12 restart-hardening flows.
 - `fixtures/workers/`: Deterministic Python and JavaScript worker scripts used by worker-host integration tests.

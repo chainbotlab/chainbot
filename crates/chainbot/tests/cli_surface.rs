@@ -564,6 +564,12 @@ fn validate_accepts_curated_examples() {
     let plugin_integrations_root = workspace_root()
         .join("examples")
         .join("plugin-integrations");
+    let eth_plugin_integrations_root = workspace_root()
+        .join("examples")
+        .join("eth-plugin-integrations");
+    let solana_plugin_integrations_root = workspace_root()
+        .join("examples")
+        .join("solana-plugin-integrations");
     let custom_paths_root = workspace_root().join("examples").join("custom-paths");
 
     for root in [
@@ -572,6 +578,8 @@ fn validate_accepts_curated_examples() {
         builtin_triggers_root,
         workflow_composition_root,
         plugin_integrations_root,
+        eth_plugin_integrations_root,
+        solana_plugin_integrations_root,
         custom_paths_root,
     ] {
         let output = Command::new(chainbot_bin())
