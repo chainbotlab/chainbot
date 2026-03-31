@@ -1,0 +1,55 @@
+[workflow]
+manifest_version = "2.0.0"
+id = "wf-solana-node"
+name = "wf-solana-node"
+
+[runtime.defaults]
+endpoint = "https://rpc.example"
+address = "Example1111111111111111111111111111111111111"
+to = "Recipient111111111111111111111111111111111111"
+lamports = "1000"
+signer_ref = "signer"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "read-balance"
+kind = "plugin"
+plugin = "solana-node"
+operation = "solana_get_balance"
+depends_on = []
+
+[[nodes.inputs]]
+target = "endpoint"
+source = "run.endpoint"
+
+[[nodes.inputs]]
+target = "address"
+source = "run.address"
+
+[[nodes.inputs]]
+target = "commitment"
+source = "run.commitment"
+
+[[nodes]]
+manifest_version = "2.0.0"
+id = "submit-transfer"
+kind = "plugin"
+plugin = "solana-node"
+operation = "solana_transfer_native"
+depends_on = ["read-balance"]
+
+[[nodes.inputs]]
+target = "endpoint"
+source = "run.endpoint"
+
+[[nodes.inputs]]
+target = "to"
+source = "run.to"
+
+[[nodes.inputs]]
+target = "lamports"
+source = "run.lamports"
+
+[[nodes.inputs]]
+target = "signer_ref"
+source = "run.signer_ref"

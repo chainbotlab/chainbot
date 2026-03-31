@@ -1,0 +1,16 @@
+manifest_version = "2.0.0"
+trigger_id = "solana-account-watch"
+kind = "external_plugin"
+plugin = "solana-trigger"
+source = "solana_account"
+workflow_id = "wf-solana-node"
+enabled = false
+
+[params]
+endpoint = "wss://rpc.example"
+listener_kind = "state_change"
+account = "Example1111111111111111111111111111111111111"
+
+[input_mapping]
+address = "payload.account"
+lamports = "payload.balance"

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '%s' '{"contract_version":"1.0.0","success":true,"output":{"balance":"0"}}'

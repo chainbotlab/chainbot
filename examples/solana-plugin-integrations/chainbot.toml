@@ -1,0 +1,20 @@
+manifest_version = "2.0.0"
+chainbot_version = "2.4.2"
+profile = "solana-plugin-integrations"
+secret_refs = []
+
+[plugin_activation."solana-node".secret_bindings]
+signer = "secret://wallets/solana/hot#private_key"
+rpc_token = "secret://providers/solana/mainnet#token"
+
+[plugin_activation."solana-trigger".secret_bindings]
+rpc_token = "secret://providers/solana/mainnet#token"
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "state/runtime.sqlite3"
+
+[storage.raw_debug]
+enabled = false

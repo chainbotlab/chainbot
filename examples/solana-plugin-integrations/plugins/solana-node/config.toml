@@ -1,0 +1,22 @@
+manifest_version = "2.0.0"
+plugin_id = "solana-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/solana-node"
+
+[[operations]]
+name = "solana_get_balance"
+summary = "Read native account balance"
+input_schema = ["endpoint", "address", "commitment"]
+output_schema = ["balance"]
+kind = "read"
+
+[[operations]]
+name = "solana_transfer_native"
+summary = "Transfer native SOL"
+input_schema = ["endpoint", "to", "lamports", "signer_ref", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "transfer"
+requires_managed_signing = true
+default_confirmation = "confirmed"

@@ -1,0 +1,17 @@
+manifest_version = "2.0.0"
+plugin_id = "eth-trigger"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+executable = "bin/eth-trigger"
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "Ethereum listener payload"
+fields = ["chain", "listener_kind", "block_ref", "event_id", "payload"]
+listener_modes = ["event_log", "state_change"]

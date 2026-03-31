@@ -1,0 +1,22 @@
+manifest_version = "2.0.0"
+plugin_id = "eth-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/eth-node"
+
+[[operations]]
+name = "eth_get_balance"
+summary = "Read native account balance"
+input_schema = ["endpoint", "address", "block_tag"]
+output_schema = ["balance"]
+kind = "read"
+
+[[operations]]
+name = "eth_transfer_native"
+summary = "Transfer native ETH"
+input_schema = ["endpoint", "to", "amount", "signer_ref", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "transfer"
+requires_managed_signing = true
+default_confirmation = "safe"
