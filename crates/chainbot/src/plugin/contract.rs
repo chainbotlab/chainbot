@@ -31,7 +31,19 @@ const REQUIRED_TRIGGER_HOST_ERROR_CATEGORIES: &[TriggerHostErrorCategory] = &[
     TriggerHostErrorCategory::PluginFatal,
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginOperationKind {
+    #[default]
+    Generic,
+    Read,
+    Write,
+    Transfer,
+    RawRead,
+    RawWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PluginOperationDescriptor {
     pub name: String,
     #[serde(default)]
@@ -40,14 +52,46 @@ pub struct PluginOperationDescriptor {
     pub input_schema: Vec<String>,
     #[serde(default)]
     pub output_schema: Vec<String>,
+    #[serde(default)]
+    pub kind: PluginOperationKind,
+    #[serde(default)]
+    pub requires_managed_signing: bool,
+    #[serde(default)]
+    pub default_confirmation: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl PluginOperationDescriptor {
+    pub fn is_write_like(&self) -> bool {
+        matches!(
+            self.kind,
+            PluginOperationKind::Write
+                | PluginOperationKind::Transfer
+                | PluginOperationKind::RawWrite
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginTriggerListenerMode {
+    EventLog,
+    StateChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PluginEventSchemaDescriptor {
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
     pub fields: Vec<String>,
+    #[serde(default)]
+    pub listener_modes: Vec<PluginTriggerListenerMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginActivationEnvelope {
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -320,6 +364,8 @@ pub struct ExternalNodePluginRequest {
     pub requested_capabilities: Vec<String>,
     #[serde(default)]
     pub input: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub activation: Option<PluginActivationEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,9 +373,20 @@ pub struct ExternalNodePluginResponse {
     pub contract_version: String,
     pub success: bool,
     #[serde(default)]
+    pub result_state: Option<NodePluginResultState>,
+    #[serde(default)]
     pub output: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodePluginResultState {
+    PreSubmitFailure,
+    Submitted,
+    Settled,
+    Ambiguous,
 }
 
 impl ExternalNodePluginRequest {
@@ -372,7 +429,9 @@ impl ExternalNodePluginRequest {
         }
 
         let operation = manifest.node_operation(&self.operation)?;
-        validate_input_schema(&manifest.plugin_id, &operation.input_schema, &self.input)
+        validate_input_schema(&manifest.plugin_id, &operation.input_schema, &self.input)?;
+        validate_activation_envelope(&manifest.plugin_id, self.activation.as_ref())?;
+        validate_operation_execution_requirements(&manifest.plugin_id, operation, &self.input)
     }
 }
 
@@ -817,6 +876,33 @@ fn validate_operations(
             "plugin.operations.output_schema",
             plugin_id,
         )?;
+        if operation.requires_managed_signing && !operation.is_write_like() {
+            return Err(ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.operations.requires_managed_signing",
+                detail: format!(
+                    "operation {} can only require managed signing when kind is write, transfer, or raw_write",
+                    operation.name
+                ),
+            });
+        }
+        if let Some(default_confirmation) = operation.default_confirmation.as_deref() {
+            validate_non_empty(
+                default_confirmation,
+                "plugin.operations.default_confirmation",
+                plugin_id,
+            )?;
+            if !operation.is_write_like() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.operations.default_confirmation",
+                    detail: format!(
+                        "operation {} can only declare default_confirmation when kind is write, transfer, or raw_write",
+                        operation.name
+                    ),
+                });
+            }
+        }
         if !seen.insert(operation.name.clone()) {
             return Err(ContractError::NodePluginInvalidField {
                 plugin_id: plugin_id.to_owned(),
@@ -824,6 +910,60 @@ fn validate_operations(
                 detail: format!("duplicated value: {}", operation.name),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_operation_execution_requirements(
+    plugin_id: &str,
+    operation: &PluginOperationDescriptor,
+    input: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), ContractError> {
+    if operation.requires_managed_signing {
+        validate_required_string_input(plugin_id, &operation.name, input, "signer_ref")?;
+    }
+    if operation.default_confirmation.is_some() {
+        validate_required_string_input(plugin_id, &operation.name, input, "confirmation_mode")?;
+    }
+    Ok(())
+}
+
+fn validate_required_string_input(
+    plugin_id: &str,
+    operation_name: &str,
+    input: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Result<(), ContractError> {
+    let value =
+        input
+            .get(key)
+            .ok_or_else(|| ContractError::NodePluginProtocolContractViolation {
+                plugin_id: plugin_id.to_owned(),
+                detail: format!(
+                    "operation `{operation_name}` requires string input `{key}` at execution time"
+                ),
+            })?;
+    match value {
+        serde_json::Value::String(text) if !text.trim().is_empty() => Ok(()),
+        _ => Err(ContractError::NodePluginProtocolContractViolation {
+            plugin_id: plugin_id.to_owned(),
+            detail: format!(
+                "operation `{operation_name}` requires non-empty string input `{key}` at execution time"
+            ),
+        }),
+    }
+}
+
+fn validate_activation_envelope(
+    plugin_id: &str,
+    activation: Option<&PluginActivationEnvelope>,
+) -> Result<(), ContractError> {
+    let Some(activation) = activation else {
+        return Ok(());
+    };
+    for (slot, value) in &activation.secrets {
+        validate_non_empty(slot, "node_plugin_request.activation.secrets", plugin_id)?;
+        validate_non_empty(value, "node_plugin_request.activation.secrets", plugin_id)?;
     }
     Ok(())
 }
@@ -842,7 +982,18 @@ fn validate_event_schema(
         &event_schema.fields,
         "plugin.event_schema.fields",
         plugin_id,
-    )
+    )?;
+    let mut seen_modes = BTreeSet::new();
+    for mode in &event_schema.listener_modes {
+        if !seen_modes.insert(*mode) {
+            return Err(ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.event_schema.listener_modes",
+                detail: "duplicated listener mode".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -915,6 +1066,7 @@ mod tests {
             summary: Some("Normalize quote payload".to_owned()),
             input_schema: vec!["symbol".to_owned()],
             output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
         }];
         external_node
             .validate()
@@ -927,6 +1079,7 @@ mod tests {
         external_trigger.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("Market tick payload".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
         external_trigger
             .validate()
@@ -942,6 +1095,7 @@ mod tests {
         manifest.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
 
         assert!(matches!(
@@ -962,12 +1116,14 @@ mod tests {
                 summary: None,
                 input_schema: Vec::new(),
                 output_schema: Vec::new(),
+                ..PluginOperationDescriptor::default()
             },
             PluginOperationDescriptor {
                 name: "normalize".to_owned(),
                 summary: None,
                 input_schema: Vec::new(),
                 output_schema: Vec::new(),
+                ..PluginOperationDescriptor::default()
             },
         ];
         assert!(matches!(
@@ -985,6 +1141,7 @@ mod tests {
         external_node.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("wrong".to_owned()),
             fields: vec!["symbol".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
         assert!(matches!(
             external_node.validate(),
@@ -1002,10 +1159,12 @@ mod tests {
             summary: None,
             input_schema: vec!["symbol".to_owned()],
             output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
         }];
         external_trigger.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),
             fields: vec!["symbol".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
         assert!(matches!(
             external_trigger.validate(),
@@ -1025,6 +1184,7 @@ mod tests {
         manifest.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
 
         manifest
@@ -1042,6 +1202,7 @@ mod tests {
         manifest.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
 
         manifest
@@ -1059,6 +1220,7 @@ mod tests {
         manifest.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
 
         assert!(matches!(
@@ -1089,6 +1251,7 @@ mod tests {
         manifest.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         });
 
         assert!(matches!(
@@ -1110,6 +1273,7 @@ mod tests {
             summary: Some("Echo tool".to_owned()),
             input_schema: vec!["message".to_owned()],
             output_schema: vec!["message".to_owned()],
+            ..PluginOperationDescriptor::default()
         }];
         manifest.mcp = Some(mcp_stdio_contract());
 
@@ -1129,6 +1293,7 @@ mod tests {
             summary: None,
             input_schema: vec!["message".to_owned()],
             output_schema: vec!["message".to_owned()],
+            ..PluginOperationDescriptor::default()
         }];
         manifest.mcp = Some(McpPluginContract {
             transport: McpTransportKind::Stdio,

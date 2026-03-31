@@ -20,8 +20,10 @@ pub(crate) const PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
 pub use contract::{
     ExternalNodePluginRequest, ExternalNodePluginResponse, ExternalTriggerRuntimeContract,
     McpAuthConfig, McpPluginContract, McpStdioTransportConfig, McpStreamableHttpTransportConfig,
-    McpTransportKind, PluginEventSchemaDescriptor, PluginKind, PluginManifest,
-    PluginOperationDescriptor, TriggerDurableAckSemantics, TriggerHostErrorCategory,
+    McpTransportKind, NodePluginResultState, PluginActivationEnvelope,
+    PluginEventSchemaDescriptor, PluginKind, PluginManifest, PluginOperationDescriptor,
+    PluginOperationKind, PluginTriggerListenerMode,
+    TriggerDurableAckSemantics, TriggerHostErrorCategory,
     TriggerPushCallbackSemantics, TriggerRuntimeLifecycle, CURRENT_API_MAJOR,
     EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1,
     NODE_PLUGIN_CONTRACT_MAX_MAJOR, NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
