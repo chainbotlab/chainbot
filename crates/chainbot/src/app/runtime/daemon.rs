@@ -500,7 +500,12 @@ pub(crate) fn serve_once_with_lease(
     let replay_requests =
         load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
     let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
-    let policy = build_trigger_host_policy(&trigger_manifests, &runtime.root_layout.plugins_dir);
+    let policy = build_trigger_host_policy(
+        &runtime.definitions.root_config,
+        &trigger_manifests,
+        &runtime.root_layout.plugins_dir,
+        &runtime.root_layout.secrets_dir,
+    );
     let mut renew_progress = || {
         let now_ms = current_time_ms().map_err(|error| {
             TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {

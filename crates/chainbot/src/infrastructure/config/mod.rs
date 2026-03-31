@@ -136,9 +136,17 @@ pub struct RootConfigDefinition {
     pub secret_refs: Vec<String>,
     #[serde(default)]
     pub runtime_defaults: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugin_activation: BTreeMap<String, PluginActivationDefinition>,
     #[serde(default)]
     pub paths: RootPathOverrides,
     pub storage: StorageDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PluginActivationDefinition {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_bindings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -208,6 +216,27 @@ impl RootConfigDefinition {
 
         for secret_ref in &self.secret_refs {
             let _ = SecretReference::parse(secret_ref)?;
+        }
+
+        for (plugin_id, activation) in &self.plugin_activation {
+            if plugin_id.trim().is_empty() {
+                return Err(ContractError::InvalidRootConfigField {
+                    field: "root_config.plugin_activation",
+                    detail: "plugin_activation keys must not be empty".to_owned(),
+                });
+            }
+            for (slot, secret_ref) in &activation.secret_bindings {
+                if slot.trim().is_empty() {
+                    return Err(ContractError::InvalidRootConfigField {
+                        field: "root_config.plugin_activation.secret_bindings",
+                        detail: format!(
+                            "plugin_activation.{}.secret_bindings keys must not be empty",
+                            plugin_id
+                        ),
+                    });
+                }
+                let _ = SecretReference::parse(secret_ref)?;
+            }
         }
 
         self.storage.validate()?;

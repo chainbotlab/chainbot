@@ -90,6 +90,17 @@ impl crate::domain::trigger::acceptance::TriggerStateStore for RuntimeStateStore
             })
     }
 
+    fn append_staged_trigger_event_record_for_acceptance(
+        &mut self,
+        record: &crate::domain::state::StagedTriggerEventRecord,
+    ) -> Result<(), crate::domain::trigger::TriggerPlaneError> {
+        self.append_staged_trigger_event_record(record)
+            .map(|_| ())
+            .map_err(|error| {
+                crate::domain::trigger::TriggerPlaneError::runtime_state(error.to_string())
+            })
+    }
+
     fn dedup_is_ready_for_acceptance(
         &mut self,
         key: &str,
