@@ -51,7 +51,7 @@ impl RootDefinitionBundle {
             plugin.validate()?;
         }
 
-        validate_bundle_contracts(&workflows, &triggers, &plugins)?;
+        validate_bundle_contracts(&root_config, &workflows, &triggers, &plugins)?;
 
         Ok(Self {
             root_config,

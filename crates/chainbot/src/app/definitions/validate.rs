@@ -12,10 +12,19 @@ use std::path::Path;
 use crate::domain::trigger::TriggerDefinition;
 use crate::domain::workflow::WorkflowDefinition;
 use crate::errors::ContractError;
+use crate::infrastructure::config::RootConfigDefinition;
 use crate::ingress::build_desired_ingress_state;
 use crate::plugin::PluginManifest;
 
+const LEGACY_OFFICIAL_PLUGIN_IDS: &[&str] = &[
+    "eth-node-official-plugin",
+    "eth-trigger-official-plugin",
+    "solana-node-official-plugin",
+    "solana-trigger-official-plugin",
+];
+
 pub(crate) fn validate_bundle_contracts(
+    root_config: &RootConfigDefinition,
     workflows: &[WorkflowDefinition],
     triggers: &[TriggerDefinition],
     plugins: &[PluginManifest],
@@ -48,6 +57,15 @@ pub(crate) fn validate_bundle_contracts(
 
     let mut plugin_ids = std::collections::BTreeSet::new();
     for plugin in plugins {
+        if LEGACY_OFFICIAL_PLUGIN_IDS.contains(&plugin.plugin_id.as_str()) {
+            return Err(ContractError::InvalidRootConfigField {
+                field: "root_config.plugins",
+                detail: format!(
+                    "legacy official plugin_id {} is no longer supported; reinstall the package with its canonical short id",
+                    plugin.plugin_id
+                ),
+            });
+        }
         if !plugin_ids.insert(plugin.plugin_id.clone()) {
             return Err(ContractError::DuplicatePluginId {
                 plugin_id: plugin.plugin_id.clone(),
@@ -59,6 +77,18 @@ pub(crate) fn validate_bundle_contracts(
             .map(Path::to_path_buf)
             .unwrap_or_default();
         validate_package_identity("plugin", &plugin_package_root, &plugin.plugin_id)?;
+    }
+
+    for plugin_id in root_config.plugin_activation.keys() {
+        if !plugin_ids.contains(plugin_id) {
+            return Err(ContractError::InvalidRootConfigField {
+                field: "root_config.plugin_activation",
+                detail: format!(
+                    "plugin_activation references unknown installed plugin_id {}",
+                    plugin_id
+                ),
+            });
+        }
     }
 
     let _ = build_desired_ingress_state(triggers)?;
