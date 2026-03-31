@@ -35,6 +35,9 @@ pub(crate) fn render_plugin_source_list(output: &PluginSourceListOutput) -> Stri
             plugin.install_mode,
             plugin.release_version.as_deref().unwrap_or("—")
         ));
+        if !plugin.surfaces.is_empty() {
+            lines.push(format!("    surfaces={}", plugin.surfaces.join(" | ")));
+        }
     }
     lines.join("\n")
 }
@@ -70,6 +73,9 @@ fn render_plugin_detail(plugin: &PluginSourceDetail) -> String {
     lines.push(format!("entrypoint={}", plugin.entrypoint));
     lines.push(format!("entry_artifact={}", plugin.entry_artifact));
     lines.push(format!("capabilities={}", plugin.capabilities.join(", ")));
+    if !plugin.surfaces.is_empty() {
+        lines.push(format!("surfaces={}", plugin.surfaces.join(" | ")));
+    }
     if let Some(build) = plugin.build.as_ref() {
         lines.push(format!(
             "build kind={} workdir={} command={}",

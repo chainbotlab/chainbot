@@ -249,6 +249,9 @@ pub(crate) fn render_status_output(status: &StatusOutput) -> String {
         status.plugins.external_node_count,
         status.plugins.external_trigger_count
     ));
+    for surface in &status.plugins.surfaces {
+        lines.push(format!("  - {surface}"));
+    }
     lines.push(String::from(
         "  use `chainbot catalog list` for capability details",
     ));
