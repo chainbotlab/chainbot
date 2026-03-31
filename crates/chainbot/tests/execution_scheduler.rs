@@ -29,7 +29,7 @@ use chainbot::errors::ContractError;
 use chainbot::infrastructure::config::RootLayout;
 use chainbot::plugin::{
     McpPluginContract, McpStdioTransportConfig, McpTransportKind, PluginManifest,
-    PluginOperationDescriptor, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
+    PluginOperationDescriptor, PluginOperationKind, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
     EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1, NODE_PLUGIN_EXECUTE_CAPABILITY,
     PLUGIN_KIND_EXTERNAL_NODE,
 };
@@ -1244,6 +1244,7 @@ fn runtime_execution_routes_mcp_tool_entrypoint() {
             summary: Some("Echo message payload".to_owned()),
             input_schema: vec!["message".to_owned()],
             output_schema: vec!["message".to_owned()],
+            ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
         mcp: Some(McpPluginContract {
@@ -1263,6 +1264,7 @@ fn runtime_execution_routes_mcp_tool_entrypoint() {
         BTreeMap::new(),
         BuiltinNodeRegistry::with_test_handlers(),
         vec![manifest],
+        BTreeMap::new(),
         plugins_root,
         root.join("secrets"),
         SecretDecryptMode::Plaintext,
@@ -1349,6 +1351,7 @@ fn runtime_execution_preserves_legacy_external_node_dispatch() {
             summary: Some("Normalize quote payload".to_owned()),
             input_schema: vec!["symbol".to_owned()],
             output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
         mcp: None,
@@ -1360,6 +1363,7 @@ fn runtime_execution_preserves_legacy_external_node_dispatch() {
         BTreeMap::new(),
         BuiltinNodeRegistry::with_test_handlers(),
         vec![manifest],
+        BTreeMap::new(),
         plugins_root,
         root.join("secrets"),
         SecretDecryptMode::Plaintext,
@@ -1392,6 +1396,115 @@ fn runtime_execution_preserves_legacy_external_node_dispatch() {
         report.runtime_namespaces.run_scoped.get("decision"),
         Some(&json!("buy"))
     );
+}
+
+#[test]
+fn runtime_execution_injects_default_confirmation_for_signed_plugin_operations() {
+    let root = unique_test_root("runtime-signed-default-confirmation");
+    let plugins_root = root.join("plugins");
+    let plugin_root = plugins_root.join("eth-signed");
+    let captured_request = root.join("captured-request.json");
+    let executable = plugin_root.join("bin").join("signed_node.sh");
+    write_executable_script_contents(
+        &executable,
+        &format!(
+            "#!/bin/sh\ncat > \"{}\"\nprintf '%s' '{{\"contract_version\":\"1.0.0\",\"success\":true,\"output\":{{\"status\":\"submitted\"}}}}'\n",
+            captured_request.display()
+        ),
+    );
+
+    let workflow = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-runtime-signed".to_owned(),
+        name: "runtime-signed".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![NodeDefinition {
+            api_version: "2.0.0".to_owned(),
+            node_id: "signed-node".to_owned(),
+            kind: "plugin".to_owned(),
+            plugin_id: "eth-signed".to_owned(),
+            operation: "eth_raw_write".to_owned(),
+            depends_mode: DependsMode::All,
+            depends_on: Vec::new(),
+            inputs: vec![
+                VariableBinding {
+                    target: "symbol".to_owned(),
+                    source: VariableReference {
+                        namespace: RuntimeVariableNamespace::ManualInvocationInput,
+                        key: "symbol".to_owned(),
+                    },
+                },
+                VariableBinding {
+                    target: "signer_ref".to_owned(),
+                    source: VariableReference {
+                        namespace: RuntimeVariableNamespace::ManualInvocationInput,
+                        key: "signer_ref".to_owned(),
+                    },
+                },
+            ],
+            when: None,
+            subflow: None,
+        }],
+        package_root: PathBuf::new(),
+    };
+
+    let manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "eth-signed".to_owned(),
+        kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
+        entrypoint: EXTERNAL_NODE_ENTRYPOINT_EXEC_V1.to_owned(),
+        capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+        executable: Some("bin/signed_node.sh".to_owned()),
+        trigger_runtime: None,
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        operations: vec![PluginOperationDescriptor {
+            name: "eth_raw_write".to_owned(),
+            summary: Some("Submit signed payload".to_owned()),
+            input_schema: vec![
+                "symbol".to_owned(),
+                "signer_ref".to_owned(),
+                "confirmation_mode".to_owned(),
+            ],
+            output_schema: vec!["status".to_owned()],
+            kind: PluginOperationKind::RawWrite,
+            requires_managed_signing: true,
+            default_confirmation: Some("safe".to_owned()),
+        }],
+        event_schema: None,
+        mcp: None,
+        manifest_path: plugin_root.join("config.toml"),
+    };
+
+    let execution_plane = ExecutionPlane::with_plugin_runtime(
+        vec![workflow],
+        BTreeMap::new(),
+        BuiltinNodeRegistry::with_test_handlers(),
+        vec![manifest],
+        BTreeMap::new(),
+        plugins_root,
+        root.join("secrets"),
+        SecretDecryptMode::Plaintext,
+    )
+    .expect("runtime execution plane with signed plugin should be constructible");
+
+    let mut request = NormalizedRunRequest::new("run-runtime-signed", "wf-runtime-signed");
+    request
+        .manual_invocation_input
+        .insert("symbol".to_owned(), json!("BTCUSDT"));
+    request
+        .manual_invocation_input
+        .insert("signer_ref".to_owned(), json!("wallet-hot"));
+
+    let report = execution_plane
+        .execute(&request)
+        .expect("runtime should inject default confirmation mode for signed plugin operations");
+
+    assert_eq!(report.status, WorkflowRunStatus::Succeeded);
+    let captured_body =
+        fs::read_to_string(&captured_request).expect("captured request should be readable");
+    assert!(captured_body.contains("\"confirmation_mode\":\"safe\""));
+    assert!(captured_body.contains("\"signer_ref\":\"wallet-hot\""));
 }
 
 fn test_runtime_context() -> BuiltinRuntimeContext {

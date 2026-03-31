@@ -244,6 +244,51 @@ fn plugin_install_force_replaces_existing_target() {
 }
 
 #[test]
+fn plugin_install_can_select_official_chain_plugin_from_multi_plugin_repo() {
+    let _lock = acquire_fixture_lock();
+    let root = basic_root();
+    ensure_basic_root_fixture();
+    let repo = unique_root("plugin-install-official-chain-repo");
+    create_official_chain_repo(&repo);
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args([
+            "plugin",
+            "install",
+            "git",
+            repo.to_string_lossy().as_ref(),
+            "--plugin",
+            "solana-trigger",
+        ])
+        .output()
+        .expect("plugin install should execute");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed_root = root.join("plugins").join("solana-trigger");
+    assert!(installed_root.join("config.toml").is_file());
+    assert!(installed_root
+        .join("bin")
+        .join("external_trigger.sh")
+        .is_file());
+
+    let validate = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("validate")
+        .output()
+        .expect("validate should execute");
+    assert!(
+        validate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validate.stderr)
+    );
+}
+
+#[test]
 fn plugin_install_rejects_missing_embedded_source_metadata() {
     let _lock = acquire_fixture_lock();
     let root = basic_root();
@@ -421,6 +466,10 @@ fn ensure_basic_root_fixture() {
     let _ = fs::remove_dir_all(root.join("plugins").join("built-timeout-plugin"));
     let _ = fs::remove_dir_all(root.join("plugins").join("mcp-http-plugin"));
     let _ = fs::remove_dir_all(root.join("plugins").join("mcp-http-missing-anchor"));
+    let _ = fs::remove_dir_all(root.join("plugins").join("eth-node"));
+    let _ = fs::remove_dir_all(root.join("plugins").join("eth-trigger"));
+    let _ = fs::remove_dir_all(root.join("plugins").join("solana-node"));
+    let _ = fs::remove_dir_all(root.join("plugins").join("solana-trigger"));
     let _ = fs::remove_dir_all(state_root.join("runs"));
     let _ = fs::remove_dir_all(state_root.join("triggers"));
     let _ = fs::remove_file(state_root.join("coordination.sqlite3"));
@@ -489,6 +538,58 @@ fn create_build_plugin_repo(root: &Path, plugin_id: &str) {
     .expect("build script should be writable");
     set_executable(&root.join("build.sh"));
     init_git_repo(root);
+}
+
+fn create_official_chain_repo(root: &Path) {
+    let _ = fs::remove_dir_all(root);
+    for plugin_id in ["eth-node", "eth-trigger", "solana-node", "solana-trigger"] {
+        fs::create_dir_all(root.join("official-plugins").join(plugin_id).join("bin"))
+            .expect("official plugin directory should be creatable");
+    }
+    fs::write(
+        root.join("chainbot-plugin-index.toml"),
+        "manifest_version = \"1.0.0\"\n\n[[plugins]]\nplugin_id = \"eth-node\"\npath = \"official-plugins/eth-node\"\nsummary = \"Official Ethereum node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"eth-trigger\"\npath = \"official-plugins/eth-trigger\"\nsummary = \"Official Ethereum trigger toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-node\"\npath = \"official-plugins/solana-node\"\nsummary = \"Official Solana node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-trigger\"\npath = \"official-plugins/solana-trigger\"\nsummary = \"Official Solana trigger toolkit plugin\"\n",
+    )
+    .expect("source index should be writable");
+    write_chain_node_plugin(root, "eth-node", "eth_raw_read");
+    write_chain_trigger_plugin(root, "eth-trigger", "Ethereum trigger payload");
+    write_chain_node_plugin(root, "solana-node", "solana_raw_read");
+    write_chain_trigger_plugin(root, "solana-trigger", "Solana trigger payload");
+    init_git_repo(root);
+}
+
+fn write_chain_node_plugin(root: &Path, plugin_id: &str, read_operation: &str) {
+    fs::write(
+        root.join("official-plugins").join(plugin_id).join("config.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nplugin_id = \"{plugin_id}\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/plugin.sh\"\n\n[[operations]]\nname = \"{read_operation}\"\nsummary = \"Raw read\"\ninput_schema = [\"endpoint\", \"method\", \"params\"]\noutput_schema = [\"result\"]\nkind = \"raw_read\"\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"bin/plugin.sh\"\nrelease_version = \"0.1.0\"\n"
+        ),
+    )
+    .expect("node plugin config should be writable");
+    let script = root
+        .join("official-plugins")
+        .join(plugin_id)
+        .join("bin")
+        .join("plugin.sh");
+    fs::write(&script, "#!/bin/sh\necho '{}'\n").expect("node plugin script should be writable");
+    set_executable(&script);
+}
+
+fn write_chain_trigger_plugin(root: &Path, plugin_id: &str, summary: &str) {
+    fs::write(
+        root.join("official-plugins").join(plugin_id).join("config.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nplugin_id = \"{plugin_id}\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/external_trigger.sh\"\n\n[trigger_runtime]\nlifecycle = \"process_short_lived\"\npush_callback = \"inline_response\"\ndurable_ack = \"caller_scope\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\n\n[event_schema]\nsummary = \"{summary}\"\nfields = [\"chain\", \"listener_kind\", \"event_id\", \"payload\"]\nlistener_modes = [\"event_log\", \"state_change\"]\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"bin/external_trigger.sh\"\nrelease_version = \"0.1.0\"\n"
+        ),
+    )
+    .expect("trigger plugin config should be writable");
+    let script = root
+        .join("official-plugins")
+        .join(plugin_id)
+        .join("bin")
+        .join("external_trigger.sh");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").expect("trigger plugin script should be writable");
+    set_executable(&script);
 }
 
 fn create_mcp_http_plugin_repo(root: &Path, plugin_id: &str) {

@@ -254,6 +254,7 @@ fn trigger_plugin_manifest_validation() {
         event_schema: Some(PluginEventSchemaDescriptor {
             summary: Some("External trigger payload".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         }),
         mcp: None,
         manifest_path: plugin_root.join("plugin-ok").join("config.toml"),
@@ -1566,6 +1567,7 @@ fn plugin_manifest(
         event_schema: (kind == "external_trigger").then(|| PluginEventSchemaDescriptor {
             summary: Some("External trigger payload".to_owned()),
             fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
         }),
         mcp: None,
         manifest_path: PathBuf::new(),
@@ -1587,6 +1589,8 @@ fn policy(
             .map(|value| value.to_string())
             .collect::<BTreeSet<_>>(),
         plugin_root_dir: plugin_root.to_path_buf(),
+        plugin_activation: BTreeMap::new(),
+        secrets_root_dir: plugin_root.join("../secrets"),
     }
 }
 

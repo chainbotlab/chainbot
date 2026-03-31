@@ -14,8 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::errors::ContractError;
 use chainbot::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginManifest, PluginOperationDescriptor,
-    EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, NODE_PLUGIN_EXECUTE_CAPABILITY, PLUGIN_KIND_EXTERNAL_NODE,
+    ExternalNodePluginHost, ExternalNodePluginRequest, NodePluginResultState, PluginManifest,
+    PluginOperationDescriptor, PluginOperationKind, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
+    PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
 
@@ -44,6 +45,7 @@ fn node_plugin_manifest_validation() {
         .execute(&manifest, &request)
         .expect("manifest and executable contract should be valid");
     assert_eq!(result.output.get("decision"), Some(&json!("buy")));
+    assert_eq!(result.result_state, None);
 
     let mut escaped_manifest = manifest.clone();
     escaped_manifest.executable = Some("../escape.sh".to_owned());
@@ -80,6 +82,29 @@ fn external_node_plugin_roundtrip() {
         .execute(&manifest, &request)
         .expect("external node plugin should execute with a stable stdin/stdout contract");
     assert_eq!(result.output.get("decision"), Some(&json!("sell")));
+    assert_eq!(result.result_state, None);
+}
+
+#[test]
+fn external_node_plugin_roundtrip_preserves_result_state() {
+    let root = unique_test_root("node-plugin-result-state");
+    let plugins_root = root.join("plugins");
+    let executable = plugins_root.join("bin").join("node_result_state.sh");
+    write_plugin_script(
+        &executable,
+        "{\"contract_version\":\"1.0.0\",\"success\":true,\"result_state\":\"submitted\",\"output\":{\"decision\":\"hold\"}}",
+        None,
+    );
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let manifest = external_node_manifest("node-result-state", "bin/node_result_state.sh");
+    let request = valid_request("node-result-state", "node-4");
+
+    let result = host
+        .execute(&manifest, &request)
+        .expect("external node plugin should preserve result_state");
+    assert_eq!(result.output.get("decision"), Some(&json!("hold")));
+    assert_eq!(result.result_state, Some(NodePluginResultState::Submitted));
 }
 
 #[test]
@@ -149,6 +174,45 @@ fn node_plugin_host_uses_default_deny_environment() {
     );
 }
 
+#[test]
+fn node_plugin_host_rejects_signed_operation_without_runtime_signing_inputs() {
+    let root = unique_test_root("node-plugin-signing-guard");
+    let plugins_root = root.join("plugins");
+    let executable = plugins_root.join("bin").join("node_signing_guard.sh");
+    write_plugin_script(
+        &executable,
+        "{\"contract_version\":\"1.0.0\",\"success\":true,\"output\":{\"decision\":\"hold\"}}",
+        None,
+    );
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let mut manifest = external_node_manifest("node-signing-guard", "bin/node_signing_guard.sh");
+    manifest.operations = vec![PluginOperationDescriptor {
+        name: "submit".to_owned(),
+        summary: Some("Submit signed payload".to_owned()),
+        input_schema: vec![
+            "symbol".to_owned(),
+            "signer_ref".to_owned(),
+            "confirmation_mode".to_owned(),
+        ],
+        output_schema: vec!["decision".to_owned()],
+        kind: PluginOperationKind::RawWrite,
+        requires_managed_signing: true,
+        default_confirmation: Some("safe".to_owned()),
+    }];
+    let mut request = valid_request("node-signing-guard", "node-5");
+    request.operation = "submit".to_owned();
+
+    let error = host
+        .execute(&manifest, &request)
+        .expect_err("signed operation without signer_ref should fail before spawn");
+    assert!(matches!(
+        error,
+        ContractError::NodePluginInputSchemaMismatch { plugin_id, detail }
+            if plugin_id == "node-signing-guard" && detail.contains("required input key signer_ref is missing")
+    ));
+}
+
 fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
     PluginManifest {
         api_version: "2.0.0".to_owned(),
@@ -165,6 +229,7 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
             summary: Some("Normalize quote payload".to_owned()),
             input_schema: vec!["symbol".to_owned()],
             output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
         mcp: None,
@@ -180,6 +245,7 @@ fn valid_request(plugin_id: &str, node_id: &str) -> ExternalNodePluginRequest {
         operation: "normalize".to_owned(),
         requested_capabilities: vec!["node:execute".to_owned()],
         input: BTreeMap::from_iter([("symbol".to_owned(), json!("BTCUSDT"))]),
+        activation: None,
     }
 }
 
