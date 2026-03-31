@@ -101,6 +101,10 @@ pub trait TriggerStateStore: std::fmt::Debug {
         staging_id: &str,
         accepted_at_ms: i64,
     ) -> Result<(), TriggerPlaneError>;
+    fn append_staged_trigger_event_record_for_acceptance(
+        &mut self,
+        record: &StagedTriggerEventRecord,
+    ) -> Result<(), TriggerPlaneError>;
     fn dedup_is_ready_for_acceptance(
         &mut self,
         key: &str,
@@ -222,17 +226,13 @@ impl TriggerPlane {
             if !definition.enabled {
                 continue;
             }
-
-            let staged_records = self
-                .state_store
-                .list_pending_staged_trigger_event_records_for_acceptance(
-                    &definition.trigger_id,
-                    STAGED_TRIGGER_EVENT_BATCH_LIMIT,
-                )?;
             let mut emissions = self
                 .builtin_events
                 .remove(&definition.trigger_id)
                 .unwrap_or_default();
+            let mut staged_requests =
+                self.drain_staged_records_for_definition(&definition, accepted_at_ms, on_progress)?;
+            run_requests.append(&mut staged_requests);
             if definition.kind()? == crate::domain::trigger::TriggerKind::ExternalPlugin {
                 if let Some(collector) = self.external_emission_collector.as_mut() {
                     let mut progress = || on_progress();
@@ -242,22 +242,9 @@ impl TriggerPlane {
                 }
             }
 
-            for staged_record in staged_records {
-                on_progress()?;
-                let request = self.normalize_emission(
-                    &definition,
-                    trigger_emission_from_staged_record(&staged_record),
-                    accepted_at_ms,
-                )?;
-                self.state_store
-                    .mark_staged_trigger_event_accepted_for_acceptance(
-                        &staged_record.staging_id,
-                        accepted_at_ms,
-                    )?;
-                if let Some(request) = request {
-                    run_requests.push(request);
-                }
-            }
+            let mut post_external_staged_requests =
+                self.drain_staged_records_for_definition(&definition, accepted_at_ms, on_progress)?;
+            run_requests.append(&mut post_external_staged_requests);
 
             for emission in emissions {
                 let request = self.normalize_emission(&definition, emission, accepted_at_ms)?;
@@ -268,6 +255,41 @@ impl TriggerPlane {
         }
 
         Ok(run_requests)
+    }
+
+    fn drain_staged_records_for_definition<F>(
+        &mut self,
+        definition: &TriggerDefinition,
+        accepted_at_ms: i64,
+        on_progress: &mut F,
+    ) -> Result<Vec<TriggerRunRequest>, TriggerPlaneError>
+    where
+        F: FnMut() -> Result<(), TriggerPlaneError>,
+    {
+        let staged_records = self
+            .state_store
+            .list_pending_staged_trigger_event_records_for_acceptance(
+                &definition.trigger_id,
+                STAGED_TRIGGER_EVENT_BATCH_LIMIT,
+            )?;
+        let mut requests = Vec::new();
+        for staged_record in staged_records {
+            on_progress()?;
+            let request = self.normalize_emission(
+                definition,
+                trigger_emission_from_staged_record(&staged_record),
+                accepted_at_ms,
+            )?;
+            self.state_store
+                .mark_staged_trigger_event_accepted_for_acceptance(
+                    &staged_record.staging_id,
+                    accepted_at_ms,
+                )?;
+            if let Some(request) = request {
+                requests.push(request);
+            }
+        }
+        Ok(requests)
     }
 
     fn normalize_emission(
