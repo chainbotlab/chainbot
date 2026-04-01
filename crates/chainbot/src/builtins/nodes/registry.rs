@@ -17,8 +17,8 @@ use super::handlers::{
     data_get::DataGetHandler, data_math::DataMathHandler, data_merge::DataMergeHandler,
     data_parse_json::DataParseJsonHandler, data_pick::DataPickHandler,
     data_stringify_json::DataStringifyJsonHandler, data_template::DataTemplateHandler,
-    emit_subflow_output::EmitSubflowOutputHandler, fail::FailHandler, http::HttpHandler,
-    identity::IdentityHandler, script::ScriptHandler,
+    emit_subflow_output::EmitSubflowOutputHandler, fail::FailHandler, identity::IdentityHandler,
+    script::ScriptHandler,
 };
 
 pub(crate) use super::spec::*;
@@ -41,7 +41,6 @@ pub fn build_builtin_registry(context: BuiltinRuntimeContext) -> BuiltinNodeRegi
     registry.register_handler(IdentityHandler);
     registry.register_handler(EmitSubflowOutputHandler);
     registry.register_handler(ScriptHandler::new(Arc::clone(&context)));
-    registry.register_handler(HttpHandler::new(Arc::clone(&context)));
 
     registry
 }
@@ -87,19 +86,6 @@ mod tests {
             identity.outputs.get("symbol"),
             Some(&serde_json::json!("ETHUSDT"))
         );
-
-        let http_error = registry
-            .dispatch(
-                BUILTIN_HTTP_KIND,
-                &BuiltinNodeRequest {
-                    operation: String::new(),
-                    ..request
-                },
-            )
-            .expect_err("builtin.http handler should be registered and validate its input");
-        assert!(http_error
-            .to_string()
-            .contains("HTTP node requires a URL in operation"));
     }
 
     #[test]
@@ -108,7 +94,7 @@ mod tests {
             api_version: "2.0.0".to_owned(),
             node_id: "node".to_owned(),
             kind: "builtin".to_owned(),
-            plugin_id: BUILTIN_HTTP_KIND.to_owned(),
+            plugin_id: BUILTIN_IDENTITY_KIND.to_owned(),
             operation: "https://example.com".to_owned(),
             depends_mode: Default::default(),
             depends_on: Vec::new(),
@@ -118,7 +104,7 @@ mod tests {
         };
         assert_eq!(
             super::super::dispatch::builtin_dispatch_kind(&builtin_alias),
-            Some(BUILTIN_HTTP_KIND)
+            Some(BUILTIN_IDENTITY_KIND)
         );
     }
 

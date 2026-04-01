@@ -38,7 +38,6 @@ mod tests {
             BUILTIN_IDENTITY_KIND,
             BUILTIN_EMIT_SUBFLOW_OUTPUT_KIND,
             BUILTIN_SCRIPT_KIND,
-            BUILTIN_HTTP_KIND,
         ]);
         let actual = builtin_node_descriptors()
             .iter()

@@ -14,4 +14,4 @@
 - `input_resolver.rs`: Secret-aware input materialization reused by builtin node handlers.
 - `registry.rs`: Canonical builtin node registry assembly plus builtin kind constants and registry tests.
 - `script_worker.rs`: Script-node subprocess host, limits, and runtime failure mapping owned by the builtin node subsystem.
-- `handlers/`: Per-builtin node handlers such as identity, subflow-output, HTTP, and script execution.
+- `handlers/`: Per-builtin node handlers such as flow/data transforms, identity, subflow-output, and script execution.
