@@ -14,7 +14,7 @@ use crate::domain::workflow::WorkflowDefinition;
 use crate::errors::ContractError;
 use crate::infrastructure::config::RootConfigDefinition;
 use crate::ingress::build_desired_ingress_state;
-use crate::plugin::PluginManifest;
+use crate::plugin::{PluginActivationContract, PluginKind, PluginManifest};
 
 const LEGACY_OFFICIAL_PLUGIN_IDS: &[&str] = &[
     "eth-node-official-plugin",
@@ -56,6 +56,7 @@ pub(crate) fn validate_bundle_contracts(
     }
 
     let mut plugin_ids = std::collections::BTreeSet::new();
+    let mut plugin_manifest_by_id = std::collections::BTreeMap::new();
     for plugin in plugins {
         if LEGACY_OFFICIAL_PLUGIN_IDS.contains(&plugin.plugin_id.as_str()) {
             return Err(ContractError::InvalidRootConfigField {
@@ -77,6 +78,11 @@ pub(crate) fn validate_bundle_contracts(
             .map(Path::to_path_buf)
             .unwrap_or_default();
         validate_package_identity("plugin", &plugin_package_root, &plugin.plugin_id)?;
+        plugin_manifest_by_id.insert(plugin.plugin_id.clone(), plugin);
+    }
+
+    for workflow in workflows {
+        validate_legacy_builtin_http_usage(workflow)?;
     }
 
     for plugin_id in root_config.plugin_activation.keys() {
@@ -91,8 +97,137 @@ pub(crate) fn validate_bundle_contracts(
         }
     }
 
+    for workflow in workflows {
+        for node in &workflow.nodes {
+            if node.kind != "plugin" {
+                continue;
+            }
+            let Some(plugin) = plugin_manifest_by_id.get(&node.plugin_id) else {
+                let detail = if node.plugin_id == "http-node" {
+                    "workflow references plugin `http-node`, but it is not installed in this root; install the official package first, then re-run validation".to_owned()
+                } else {
+                    format!(
+                        "workflow references plugin `{}`, but no installed plugin manifest was found for that plugin_id",
+                        node.plugin_id
+                    )
+                };
+                return Err(ContractError::InvalidWorkflowNodeField {
+                    workflow_id: workflow.workflow_id.clone(),
+                    node_id: node.node_id.clone(),
+                    field: "node.plugin",
+                    detail,
+                });
+            };
+            if plugin.kind()? != PluginKind::ExternalNode {
+                continue;
+            }
+            validate_plugin_activation_requirements(root_config, workflow, node, plugin)?;
+        }
+    }
+
     let _ = build_desired_ingress_state(triggers)?;
 
+    Ok(())
+}
+
+fn validate_legacy_builtin_http_usage(workflow: &WorkflowDefinition) -> Result<(), ContractError> {
+    for node in &workflow.nodes {
+        if node.kind == "builtin.http" || node.plugin_id == "builtin.http" {
+            return Err(ContractError::InvalidWorkflowNodeField {
+                workflow_id: workflow.workflow_id.clone(),
+                node_id: node.node_id.clone(),
+                field: "node.plugin",
+                detail: "builtin.http has been retired; install the official `http-node` plugin, switch to kind=`plugin`, use plugin=`http-node`, and set operation=`request`".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_plugin_activation_requirements(
+    root_config: &RootConfigDefinition,
+    workflow: &WorkflowDefinition,
+    node: &crate::domain::runtime::NodeDefinition,
+    plugin: &PluginManifest,
+) -> Result<(), ContractError> {
+    let Some(contract) = plugin.activation.as_ref() else {
+        return Ok(());
+    };
+    let activation = root_config.plugin_activation.get(&plugin.plugin_id);
+
+    if activation.is_none() {
+        if contract.required_secret_slots.is_empty() {
+            return Ok(());
+        }
+        return Err(ContractError::InvalidWorkflowNodeField {
+            workflow_id: workflow.workflow_id.clone(),
+            node_id: node.node_id.clone(),
+            field: "root_config.plugin_activation",
+            detail: format!(
+                "plugin `{}` requires plugin_activation with secret_bindings for slots: {}",
+                plugin.plugin_id,
+                contract.required_secret_slots.join(", ")
+            ),
+        });
+    }
+
+    let activation = activation.expect("checked above");
+    validate_declared_activation_slots(workflow, node, plugin, contract, activation)?;
+    if contract.requires_allowed_origins
+        && !activation.secret_bindings.is_empty()
+        && activation.allowed_origins.is_empty()
+    {
+        return Err(ContractError::InvalidWorkflowNodeField {
+            workflow_id: workflow.workflow_id.clone(),
+            node_id: node.node_id.clone(),
+            field: "root_config.plugin_activation.allowed_origins",
+            detail: format!(
+                "plugin `{}` requires allowed_origins whenever secret_bindings are configured",
+                plugin.plugin_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_declared_activation_slots(
+    workflow: &WorkflowDefinition,
+    node: &crate::domain::runtime::NodeDefinition,
+    plugin: &PluginManifest,
+    contract: &PluginActivationContract,
+    activation: &crate::infrastructure::config::PluginActivationDefinition,
+) -> Result<(), ContractError> {
+    for slot in activation.secret_bindings.keys() {
+        let declared = contract
+            .required_secret_slots
+            .iter()
+            .chain(contract.optional_secret_slots.iter())
+            .any(|candidate| candidate == slot);
+        if !declared {
+            return Err(ContractError::InvalidWorkflowNodeField {
+                workflow_id: workflow.workflow_id.clone(),
+                node_id: node.node_id.clone(),
+                field: "root_config.plugin_activation.secret_bindings",
+                detail: format!(
+                    "plugin `{}` does not declare activation slot `{}`",
+                    plugin.plugin_id, slot
+                ),
+            });
+        }
+    }
+    for slot in &contract.required_secret_slots {
+        if !activation.secret_bindings.contains_key(slot) {
+            return Err(ContractError::InvalidWorkflowNodeField {
+                workflow_id: workflow.workflow_id.clone(),
+                node_id: node.node_id.clone(),
+                field: "root_config.plugin_activation.secret_bindings",
+                detail: format!(
+                    "plugin `{}` is missing required activation slot `{}`",
+                    plugin.plugin_id, slot
+                ),
+            });
+        }
+    }
     Ok(())
 }
 

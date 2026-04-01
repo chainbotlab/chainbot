@@ -1,0 +1,3 @@
+#!/bin/sh
+cat >/dev/null
+printf '%s' '{"contract_version":"1.0.0","success":true,"output":{"status":200,"ok":true,"url":"https://api.example.com/quote","body":"{\"price\":123}","headers":{}}}'

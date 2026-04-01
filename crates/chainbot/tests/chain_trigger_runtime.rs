@@ -76,6 +76,7 @@ fn chain_trigger_runtime_injects_activation_secrets_into_start_message() {
             fields: vec!["event_id".to_owned()],
             listener_modes: vec![],
         }),
+        activation: None,
         mcp: None,
         manifest_path: plugin_root.join("eth-trigger").join("config.toml"),
     };
@@ -188,6 +189,7 @@ fn chain_trigger_runtime_stages_event_before_ack_and_accepts_same_cycle() {
             fields: vec!["event_id".to_owned()],
             listener_modes: vec![],
         }),
+        activation: None,
         mcp: None,
         manifest_path: plugin_root.join("eth-trigger").join("config.toml"),
     };

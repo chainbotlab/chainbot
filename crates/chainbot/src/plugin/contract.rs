@@ -51,6 +51,8 @@ pub struct PluginOperationDescriptor {
     #[serde(default)]
     pub input_schema: Vec<String>,
     #[serde(default)]
+    pub optional_input_schema: Vec<String>,
+    #[serde(default)]
     pub output_schema: Vec<String>,
     #[serde(default)]
     pub kind: PluginOperationKind,
@@ -89,9 +91,21 @@ pub struct PluginEventSchemaDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginActivationContract {
+    #[serde(default)]
+    pub required_secret_slots: Vec<String>,
+    #[serde(default)]
+    pub optional_secret_slots: Vec<String>,
+    #[serde(default)]
+    pub requires_allowed_origins: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PluginActivationEnvelope {
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -203,6 +217,8 @@ pub struct PluginManifest {
     #[serde(default)]
     pub event_schema: Option<PluginEventSchemaDescriptor>,
     #[serde(default)]
+    pub activation: Option<PluginActivationContract>,
+    #[serde(default)]
     pub mcp: Option<McpPluginContract>,
     #[serde(skip)]
     pub manifest_path: PathBuf,
@@ -235,6 +251,7 @@ impl PluginManifest {
                 ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
                 ensure_trigger_runtime_absent(&self.plugin_id, self.trigger_runtime.as_ref())?;
                 ensure_event_schema_absent(&self.plugin_id, self.event_schema.as_ref())?;
+                validate_activation_contract(&self.plugin_id, self.activation.as_ref())?;
                 if self.entrypoint == EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1 {
                     validate_external_node_mcp_contract(self)?;
                 } else {
@@ -271,6 +288,7 @@ impl PluginManifest {
                 ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
                 ensure_operations_absent(&self.plugin_id, &self.operations)?;
                 ensure_mcp_absent(&self.plugin_id, self.mcp.as_ref())?;
+                ensure_activation_absent(&self.plugin_id, self.activation.as_ref())?;
                 validate_external_trigger_runtime_contract(
                     &self.plugin_id,
                     self.executable.as_deref(),
@@ -429,8 +447,13 @@ impl ExternalNodePluginRequest {
         }
 
         let operation = manifest.node_operation(&self.operation)?;
-        validate_input_schema(&manifest.plugin_id, &operation.input_schema, &self.input)?;
-        validate_activation_envelope(&manifest.plugin_id, self.activation.as_ref())?;
+        validate_input_schema(
+            &manifest.plugin_id,
+            &operation.input_schema,
+            &operation.optional_input_schema,
+            &self.input,
+        )?;
+        validate_activation_envelope(manifest, self.activation.as_ref())?;
         validate_operation_execution_requirements(&manifest.plugin_id, operation, &self.input)
     }
 }
@@ -542,6 +565,63 @@ fn ensure_trigger_runtime_absent(
         field: "plugin.trigger_runtime",
         detail: "field is not allowed for this plugin kind".to_owned(),
     })
+}
+
+fn ensure_activation_absent(
+    plugin_id: &str,
+    activation: Option<&PluginActivationContract>,
+) -> Result<(), ContractError> {
+    if activation.is_none() {
+        return Ok(());
+    }
+    Err(ContractError::NodePluginInvalidField {
+        plugin_id: plugin_id.to_owned(),
+        field: "plugin.activation",
+        detail: "field is not allowed for this plugin kind".to_owned(),
+    })
+}
+
+fn validate_activation_contract(
+    plugin_id: &str,
+    activation: Option<&PluginActivationContract>,
+) -> Result<(), ContractError> {
+    let Some(activation) = activation else {
+        return Ok(());
+    };
+    validate_unique_non_empty_list(
+        &activation.required_secret_slots,
+        "plugin.activation.required_secret_slots",
+        plugin_id,
+    )?;
+    validate_unique_non_empty_list(
+        &activation.optional_secret_slots,
+        "plugin.activation.optional_secret_slots",
+        plugin_id,
+    )?;
+    for slot in &activation.required_secret_slots {
+        if activation
+            .optional_secret_slots
+            .iter()
+            .any(|other| other == slot)
+        {
+            return Err(ContractError::NodePluginInvalidField {
+                plugin_id: plugin_id.to_owned(),
+                field: "plugin.activation.optional_secret_slots",
+                detail: format!("slot {slot} cannot be both required and optional"),
+            });
+        }
+    }
+    if activation.requires_allowed_origins
+        && activation.required_secret_slots.is_empty()
+        && activation.optional_secret_slots.is_empty()
+    {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field: "plugin.activation.requires_allowed_origins",
+            detail: "allowed origins require at least one declared secret slot".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_external_trigger_runtime_contract(
@@ -872,10 +952,28 @@ fn validate_operations(
             plugin_id,
         )?;
         validate_unique_non_empty_list(
+            &operation.optional_input_schema,
+            "plugin.operations.optional_input_schema",
+            plugin_id,
+        )?;
+        validate_unique_non_empty_list(
             &operation.output_schema,
             "plugin.operations.output_schema",
             plugin_id,
         )?;
+        for optional in &operation.optional_input_schema {
+            if operation
+                .input_schema
+                .iter()
+                .any(|required| required == optional)
+            {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.operations.optional_input_schema",
+                    detail: format!("input {optional} cannot be both required and optional"),
+                });
+            }
+        }
         if operation.requires_managed_signing && !operation.is_write_like() {
             return Err(ContractError::NodePluginInvalidField {
                 plugin_id: plugin_id.to_owned(),
@@ -954,16 +1052,102 @@ fn validate_required_string_input(
     }
 }
 
-fn validate_activation_envelope(
+fn validate_allowed_origin(
     plugin_id: &str,
+    origin: &str,
+    field: &'static str,
+) -> Result<(), ContractError> {
+    let parsed =
+        reqwest::Url::parse(origin).map_err(|source| ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field,
+            detail: format!("invalid allowed origin {origin}: {source}"),
+        })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field,
+            detail: format!("allowed origin {origin} must use http or https"),
+        });
+    }
+    if parsed.host_str().is_none() {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field,
+            detail: format!("allowed origin {origin} must include a host"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field,
+            detail: format!("allowed origin {origin} must not include query or fragment"),
+        });
+    }
+    if parsed.path() != "/" {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: plugin_id.to_owned(),
+            field,
+            detail: format!("allowed origin {origin} must not include a path"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_activation_envelope(
+    manifest: &PluginManifest,
     activation: Option<&PluginActivationEnvelope>,
 ) -> Result<(), ContractError> {
+    let plugin_id = manifest.plugin_id.as_str();
     let Some(activation) = activation else {
         return Ok(());
     };
     for (slot, value) in &activation.secrets {
         validate_non_empty(slot, "node_plugin_request.activation.secrets", plugin_id)?;
         validate_non_empty(value, "node_plugin_request.activation.secrets", plugin_id)?;
+    }
+    validate_unique_non_empty_list(
+        &activation.allowed_origins,
+        "node_plugin_request.activation.allowed_origins",
+        plugin_id,
+    )?;
+    for origin in &activation.allowed_origins {
+        validate_allowed_origin(
+            plugin_id,
+            origin,
+            "node_plugin_request.activation.allowed_origins",
+        )?;
+    }
+
+    if let Some(contract) = manifest.activation.as_ref() {
+        for slot in activation.secrets.keys() {
+            let mut declared = contract
+                .required_secret_slots
+                .iter()
+                .chain(contract.optional_secret_slots.iter());
+            if !declared.any(|candidate| candidate == slot) {
+                return Err(ContractError::NodePluginProtocolContractViolation {
+                    plugin_id: manifest.plugin_id.clone(),
+                    detail: format!(
+                        "activation secret slot `{slot}` is not declared in plugin manifest"
+                    ),
+                });
+            }
+        }
+        for slot in &contract.required_secret_slots {
+            if !activation.secrets.contains_key(slot) {
+                return Err(ContractError::NodePluginProtocolContractViolation {
+                    plugin_id: manifest.plugin_id.clone(),
+                    detail: format!("required activation secret slot `{slot}` is missing"),
+                });
+            }
+        }
+        if contract.requires_allowed_origins && activation.allowed_origins.is_empty() {
+            return Err(ContractError::NodePluginProtocolContractViolation {
+                plugin_id: manifest.plugin_id.clone(),
+                detail: "activation allowed_origins are required for this plugin".to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -1013,6 +1197,7 @@ mod tests {
             trigger_runtime: None,
             operations: Vec::new(),
             event_schema: None,
+            activation: None,
             mcp: None,
             manifest_path: PathBuf::new(),
         }
@@ -1068,6 +1253,11 @@ mod tests {
             output_schema: vec!["decision".to_owned()],
             ..PluginOperationDescriptor::default()
         }];
+        external_node.activation = Some(PluginActivationContract {
+            required_secret_slots: vec!["api_token".to_owned()],
+            optional_secret_slots: vec!["secondary_token".to_owned()],
+            requires_allowed_origins: true,
+        });
         external_node
             .validate()
             .expect("operations metadata should validate");
@@ -1132,6 +1322,89 @@ mod tests {
                 field: "plugin.operations.name",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn plugin_manifest_rejects_activation_slot_overlap() {
+        let mut manifest = base_manifest();
+        manifest.operations = vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: None,
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
+        }];
+        manifest.activation = Some(PluginActivationContract {
+            required_secret_slots: vec!["token".to_owned()],
+            optional_secret_slots: vec!["token".to_owned()],
+            requires_allowed_origins: false,
+        });
+        assert!(matches!(
+            manifest.validate(),
+            Err(ContractError::NodePluginInvalidField {
+                field: "plugin.activation.optional_secret_slots",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn node_plugin_request_validates_activation_against_manifest_contract() {
+        let mut manifest = base_manifest();
+        manifest.operations = vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: None,
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
+        }];
+        manifest.activation = Some(PluginActivationContract {
+            required_secret_slots: vec!["api_token".to_owned()],
+            optional_secret_slots: vec![],
+            requires_allowed_origins: true,
+        });
+
+        let valid = ExternalNodePluginRequest {
+            contract_version: "1.0.0".to_owned(),
+            plugin_id: manifest.plugin_id.clone(),
+            node_id: "node-1".to_owned(),
+            operation: "normalize".to_owned(),
+            requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+            input: BTreeMap::from([(String::from("symbol"), serde_json::json!("BTCUSDT"))]),
+            activation: Some(PluginActivationEnvelope {
+                secrets: BTreeMap::from([(String::from("api_token"), String::from("secret"))]),
+                allowed_origins: vec!["https://api.example.test".to_owned()],
+            }),
+        };
+        valid
+            .validate(&manifest)
+            .expect("activation should satisfy manifest contract");
+
+        let missing_origin = ExternalNodePluginRequest {
+            activation: Some(PluginActivationEnvelope {
+                secrets: BTreeMap::from([(String::from("api_token"), String::from("secret"))]),
+                allowed_origins: Vec::new(),
+            }),
+            ..valid.clone()
+        };
+        assert!(matches!(
+            missing_origin.validate(&manifest),
+            Err(ContractError::NodePluginProtocolContractViolation { detail, .. })
+                if detail.contains("allowed_origins")
+        ));
+
+        let unknown_slot = ExternalNodePluginRequest {
+            activation: Some(PluginActivationEnvelope {
+                secrets: BTreeMap::from([(String::from("other"), String::from("secret"))]),
+                allowed_origins: vec!["https://api.example.test".to_owned()],
+            }),
+            ..valid
+        };
+        assert!(matches!(
+            unknown_slot.validate(&manifest),
+            Err(ContractError::NodePluginProtocolContractViolation { detail, .. })
+                if detail.contains("not declared")
         ));
     }
 
@@ -1323,9 +1596,14 @@ mod tests {
 fn validate_input_schema(
     plugin_id: &str,
     input_schema: &[String],
+    optional_input_schema: &[String],
     input: &BTreeMap<String, serde_json::Value>,
 ) -> Result<(), ContractError> {
-    let allowed: BTreeSet<&str> = input_schema.iter().map(String::as_str).collect();
+    let allowed: BTreeSet<&str> = input_schema
+        .iter()
+        .chain(optional_input_schema.iter())
+        .map(String::as_str)
+        .collect();
     for key in input.keys() {
         if !allowed.contains(key.as_str()) {
             return Err(ContractError::NodePluginInputSchemaMismatch {

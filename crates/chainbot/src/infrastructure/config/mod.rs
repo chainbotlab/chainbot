@@ -147,6 +147,8 @@ pub struct RootConfigDefinition {
 pub struct PluginActivationDefinition {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -237,6 +239,22 @@ impl RootConfigDefinition {
                 }
                 let _ = SecretReference::parse(secret_ref)?;
             }
+            for origin in &activation.allowed_origins {
+                if origin.trim().is_empty() {
+                    return Err(ContractError::InvalidRootConfigField {
+                        field: "root_config.plugin_activation.allowed_origins",
+                        detail: format!(
+                            "plugin_activation.{}.allowed_origins entries must not be empty",
+                            plugin_id
+                        ),
+                    });
+                }
+                validate_allowed_origin(
+                    plugin_id,
+                    origin,
+                    "root_config.plugin_activation.allowed_origins",
+                )?;
+            }
         }
 
         self.storage.validate()?;
@@ -311,6 +329,49 @@ impl RootConfigDefinition {
             raw_debug_artifacts_dir,
         })
     }
+}
+
+fn validate_allowed_origin(
+    plugin_id: &str,
+    origin: &str,
+    field: &'static str,
+) -> Result<(), ContractError> {
+    let parsed =
+        reqwest::Url::parse(origin).map_err(|source| ContractError::InvalidRootConfigField {
+            field,
+            detail: format!(
+                "plugin_activation.{}.allowed_origins contains invalid origin {}: {}",
+                plugin_id, origin, source
+            ),
+        })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ContractError::InvalidRootConfigField {
+            field,
+            detail: format!(
+                "plugin_activation.{}.allowed_origins origin {} must use http or https",
+                plugin_id, origin
+            ),
+        });
+    }
+    if parsed.host_str().is_none() {
+        return Err(ContractError::InvalidRootConfigField {
+            field,
+            detail: format!(
+                "plugin_activation.{}.allowed_origins origin {} must include a host",
+                plugin_id, origin
+            ),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() || parsed.path() != "/" {
+        return Err(ContractError::InvalidRootConfigField {
+            field,
+            detail: format!(
+                "plugin_activation.{}.allowed_origins origin {} must be an origin without path, query, or fragment",
+                plugin_id, origin
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl StorageDefinition {

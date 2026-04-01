@@ -29,3 +29,8 @@ summary = "Official Solana node toolkit plugin"
 plugin_id = "solana-trigger"
 path = "official-plugins/solana-trigger"
 summary = "Official Solana trigger toolkit plugin"
+
+[[plugins]]
+plugin_id = "http-node"
+path = "official-plugins/http-node"
+summary = "Official outbound HTTP node plugin"

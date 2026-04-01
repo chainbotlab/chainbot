@@ -29,6 +29,7 @@ use crate::app::cli::view::status::{build_status_output, render_status_output};
 use crate::app::definitions::load_root_definition_bundle;
 use crate::app::runtime::daemon;
 use crate::app::runtime::execution::ExecutionPlane;
+use crate::app::runtime::execution::PluginActivationRuntime;
 #[cfg(test)]
 use crate::app::runtime::external_triggers::supervisor::{
     build_desired_external_trigger_sessions, ExternalTriggerSupervisor,
@@ -1009,12 +1010,12 @@ pub(crate) fn build_trigger_host_policy(
         allowlisted_plugin_ids,
         allowed_capabilities: BTreeSet::from([REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()]),
         plugin_root_dir: plugins_root_dir.to_path_buf(),
-        plugin_activation: plugin_activation_bindings(root_config).unwrap_or_default(),
+        plugin_activation: trigger_plugin_activation_bindings(root_config).unwrap_or_default(),
         secrets_root_dir: secrets_root_dir.to_path_buf(),
     }
 }
 
-fn plugin_activation_bindings(
+fn trigger_plugin_activation_bindings(
     root_config: &RootConfigDefinition,
 ) -> Result<BTreeMap<String, BTreeMap<String, SecretReference>>, ContractError> {
     let mut bindings = BTreeMap::new();
@@ -1024,6 +1025,26 @@ fn plugin_activation_bindings(
             slots.insert(slot.clone(), SecretReference::parse(secret_ref)?);
         }
         bindings.insert(plugin_id.clone(), slots);
+    }
+    Ok(bindings)
+}
+
+fn plugin_activation_bindings(
+    root_config: &RootConfigDefinition,
+) -> Result<BTreeMap<String, PluginActivationRuntime>, ContractError> {
+    let mut bindings = BTreeMap::new();
+    for (plugin_id, activation) in &root_config.plugin_activation {
+        let mut slots = BTreeMap::new();
+        for (slot, secret_ref) in &activation.secret_bindings {
+            slots.insert(slot.clone(), SecretReference::parse(secret_ref)?);
+        }
+        bindings.insert(
+            plugin_id.clone(),
+            PluginActivationRuntime {
+                secret_bindings: slots,
+                allowed_origins: activation.allowed_origins.clone(),
+            },
+        );
     }
     Ok(bindings)
 }

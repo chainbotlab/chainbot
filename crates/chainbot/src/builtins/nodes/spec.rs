@@ -21,7 +21,6 @@ pub(crate) const BUILTIN_DATA_MATH_KIND: &str = "builtin.data.math";
 pub(crate) const BUILTIN_IDENTITY_KIND: &str = "builtin.identity";
 pub(crate) const BUILTIN_EMIT_SUBFLOW_OUTPUT_KIND: &str = "builtin.emit_subflow_output";
 pub(crate) const BUILTIN_SCRIPT_KIND: &str = "builtin.script";
-pub(crate) const BUILTIN_HTTP_KIND: &str = "builtin.http";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinNodeSpec {
@@ -139,13 +138,6 @@ const BUILTIN_NODE_SPECS: &[BuiltinNodeSpec] = &[
         operations: &["python:<relative_path>", "javascript:<relative_path>"],
         inputs: &["payload:*"],
         outputs: &["result", "object_fields:*"],
-    },
-    BuiltinNodeSpec {
-        kind: BUILTIN_HTTP_KIND,
-        summary: "Send an HTTP request and capture status, body, URL, and headers.",
-        operations: &["<url>"],
-        inputs: &["method", "headers", "body"],
-        outputs: &["status", "ok", "url", "body", "headers"],
     },
 ];
 

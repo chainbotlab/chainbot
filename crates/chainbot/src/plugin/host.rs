@@ -1397,6 +1397,7 @@ mod tests {
                 ..PluginOperationDescriptor::default()
             }],
             event_schema: None,
+            activation: None,
             mcp: Some(McpPluginContract {
                 transport: McpTransportKind::Stdio,
                 stdio: Some(McpStdioTransportConfig {

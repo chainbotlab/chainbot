@@ -1,0 +1,18 @@
+manifest_version = "2.0.0"
+plugin_id = "http-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/http-node"
+
+[activation]
+optional_secret_slots = ["authorization"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "request"
+summary = "Send an outbound HTTP request"
+input_schema = ["url"]
+optional_input_schema = ["method", "headers", "body"]
+output_schema = ["status", "ok", "url", "body", "headers"]
+kind = "read"

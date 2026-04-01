@@ -1,0 +1,34 @@
+manifest_version = "2.0.0"
+plugin_id = "http-node"
+kind = "external_node"
+entrypoint = "node.exec.v1"
+capabilities = ["node:execute"]
+executable = "bin/http-node"
+
+[activation]
+optional_secret_slots = ["authorization"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "request"
+summary = "Send an outbound HTTP request"
+input_schema = ["url"]
+optional_input_schema = ["method", "headers", "body"]
+output_schema = ["status", "ok", "url", "body", "headers"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/http-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "http_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/http_node_official_plugin"
+to = "bin/http-node"

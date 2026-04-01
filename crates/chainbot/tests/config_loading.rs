@@ -370,6 +370,278 @@ fn plugin_activation_rejects_invalid_secret_reference() {
 }
 
 #[test]
+fn plugin_activation_rejects_missing_allowed_origins_for_http_node() {
+    let root = unique_test_root("plugin-activation-missing-allowed-origins");
+    fs::create_dir_all(root.join("workflows").join("wf-http"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("http-node"))
+        .expect("plugin directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"activation\"\n\n[plugin_activation.\"http-node\".secret_bindings]\nauthorization = \"secret://ops/http/auth#token\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-http").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-http\"\nname = \"http\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"plugin\"\nplugin = \"http-node\"\noperation = \"request\"\ndepends_on = []\n",
+    )
+    .expect("workflow config should be writable");
+    fs::write(
+        root.join("plugins").join("http-node").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"http-node\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/http-node\"\n\n[activation]\noptional_secret_slots = [\"authorization\"]\nrequires_allowed_origins = true\n\n[[operations]]\nname = \"request\"\nsummary = \"Send outbound HTTP request\"\ninput_schema = [\"url\", \"method\", \"headers\", \"body\"]\noutput_schema = [\"status\", \"ok\", \"url\", \"body\", \"headers\"]\nkind = \"read\"\n",
+    )
+    .expect("plugin config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("activation secret without allowed origins should fail");
+    assert!(matches!(
+        error,
+        ContractError::InvalidWorkflowNodeField {
+            field: "root_config.plugin_activation.allowed_origins",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn plugin_activation_rejects_malformed_allowed_origin_for_http_node() {
+    let root = unique_test_root("plugin-activation-malformed-allowed-origin");
+    fs::create_dir_all(root.join("workflows").join("wf-http"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("http-node"))
+        .expect("plugin directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"activation\"\n\n[plugin_activation.\"http-node\"]\nallowed_origins = [\"https://api.example.test/path\"]\n\n[plugin_activation.\"http-node\".secret_bindings]\nauthorization = \"secret://ops/http/auth#token\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-http").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-http\"\nname = \"http\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"plugin\"\nplugin = \"http-node\"\noperation = \"request\"\ndepends_on = []\n",
+    )
+    .expect("workflow config should be writable");
+    fs::write(
+        root.join("plugins").join("http-node").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"http-node\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/http-node\"\n\n[activation]\noptional_secret_slots = [\"authorization\"]\nrequires_allowed_origins = true\n\n[[operations]]\nname = \"request\"\nsummary = \"Send outbound HTTP request\"\ninput_schema = [\"url\"]\noptional_input_schema = [\"method\", \"headers\", \"body\"]\noutput_schema = [\"status\", \"ok\", \"url\", \"body\", \"headers\"]\nkind = \"read\"\n",
+    )
+    .expect("plugin config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("malformed allowed origin should fail root validation");
+    assert!(matches!(
+        error,
+        ContractError::InvalidRootConfigField {
+            field: "root_config.plugin_activation.allowed_origins",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn plugin_activation_rejects_undeclared_secret_slot_for_http_node() {
+    let root = unique_test_root("plugin-activation-undeclared-slot");
+    fs::create_dir_all(root.join("workflows").join("wf-http"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("http-node"))
+        .expect("plugin directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"activation\"\n\n[plugin_activation.\"http-node\"]\nallowed_origins = [\"https://api.example.test\"]\n\n[plugin_activation.\"http-node\".secret_bindings]\nwrong = \"secret://ops/http/auth#token\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-http").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-http\"\nname = \"http\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"plugin\"\nplugin = \"http-node\"\noperation = \"request\"\ndepends_on = []\n",
+    )
+    .expect("workflow config should be writable");
+    fs::write(
+        root.join("plugins").join("http-node").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"http-node\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/http-node\"\n\n[activation]\noptional_secret_slots = [\"authorization\"]\nrequires_allowed_origins = true\n\n[[operations]]\nname = \"request\"\nsummary = \"Send outbound HTTP request\"\ninput_schema = [\"url\"]\noptional_input_schema = [\"method\", \"headers\", \"body\"]\noutput_schema = [\"status\", \"ok\", \"url\", \"body\", \"headers\"]\nkind = \"read\"\n",
+    )
+    .expect("plugin config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("undeclared activation slot should fail root validation");
+    assert!(matches!(
+        error,
+        ContractError::InvalidWorkflowNodeField {
+            field: "root_config.plugin_activation.secret_bindings",
+            detail,
+            ..
+        } if detail.contains("does not declare activation slot")
+    ));
+}
+
+#[test]
+fn plugin_activation_rejects_missing_required_secret_slot() {
+    let root = unique_test_root("plugin-activation-missing-required-slot");
+    fs::create_dir_all(root.join("workflows").join("wf-required"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("required-node"))
+        .expect("plugin directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"activation\"\n\n[plugin_activation.\"required-node\"]\nallowed_origins = [\"https://api.example.test\"]\n\n[plugin_activation.\"required-node\".secret_bindings]\nsecondary = \"secret://ops/http/auth#token\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-required").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-required\"\nname = \"required\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"plugin\"\nplugin = \"required-node\"\noperation = \"request\"\ndepends_on = []\n",
+    )
+    .expect("workflow config should be writable");
+    fs::write(
+        root.join("plugins").join("required-node").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"required-node\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v1\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/required-node\"\n\n[activation]\nrequired_secret_slots = [\"authorization\"]\noptional_secret_slots = [\"secondary\"]\nrequires_allowed_origins = true\n\n[[operations]]\nname = \"request\"\nsummary = \"Send outbound HTTP request\"\ninput_schema = [\"url\"]\noptional_input_schema = [\"method\", \"headers\", \"body\"]\noutput_schema = [\"status\", \"ok\", \"url\", \"body\", \"headers\"]\nkind = \"read\"\n",
+    )
+    .expect("plugin config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("missing required activation slot should fail root validation");
+    assert!(matches!(
+        error,
+        ContractError::InvalidWorkflowNodeField {
+            field: "root_config.plugin_activation.secret_bindings",
+            detail,
+            ..
+        } if detail.contains("missing required activation slot")
+    ));
+}
+
+#[test]
+fn legacy_builtin_http_authoring_is_rejected() {
+    let root = unique_test_root("legacy-builtin-http-authoring");
+    fs::create_dir_all(root.join("workflows").join("wf-http"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins")).expect("plugins directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"legacy-http\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-http").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-http\"\nname = \"http\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"builtin\"\nplugin = \"builtin.http\"\noperation = \"https://example.com\"\ndepends_on = []\n",
+    )
+    .expect("workflow config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("legacy builtin.http authoring should fail fast");
+    assert!(matches!(
+        error,
+        ContractError::InvalidWorkflowNodeField {
+            field: "node.plugin",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn legacy_builtin_http_kind_alias_is_rejected() {
+    let root = unique_test_root("legacy-builtin-http-kind-alias");
+    fs::create_dir_all(root.join("workflows").join("wf-http"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins")).expect("plugins directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"legacy-http\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-http").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-http\"\nname = \"http\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"builtin.http\"\nplugin = \"noop\"\noperation = \"https://example.com\"\ndepends_on = []\n",
+    )
+    .expect("workflow config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("legacy builtin.http kind alias should fail fast");
+    assert!(matches!(
+        error,
+        ContractError::InvalidWorkflowNodeField {
+            field: "node.plugin",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn http_node_requires_installed_plugin_manifest() {
+    let root = unique_test_root("http-node-missing-plugin");
+    fs::create_dir_all(root.join("workflows").join("wf-http"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");
+    fs::create_dir_all(root.join("plugins")).expect("plugins directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"http-node\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-http").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-http\"\nname = \"http\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"request\"\nkind = \"plugin\"\nplugin = \"http-node\"\noperation = \"request\"\ndepends_on = []\n\n[[nodes.inputs]]\ntarget = \"url\"\nsource = \"workflow.url\"\n\n[runtime.defaults]\nurl = \"https://api.example.com\"\n",
+    )
+    .expect("workflow config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("http-node without installed plugin should fail fast");
+    assert!(matches!(
+        error,
+        ContractError::InvalidWorkflowNodeField {
+            field: "node.plugin",
+            detail,
+            ..
+        } if detail.contains("install the official package first")
+    ));
+}
+
+#[test]
 fn legacy_official_plugin_id_is_rejected() {
     let root = unique_test_root("legacy-official-plugin-id");
     fs::create_dir_all(root.join("workflows").join("wf-alpha"))

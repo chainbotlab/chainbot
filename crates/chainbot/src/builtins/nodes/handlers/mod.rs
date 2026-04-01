@@ -1,5 +1,5 @@
 //! [INPUT]
-//! Individual builtin node handler modules for flow, data, HTTP, script, and subflow-output behaviors.
+//! Individual builtin node handler modules for flow, data, script, and subflow-output behaviors.
 //!
 //! [OUTPUT]
 //! Exposes the builtin node handler module tree used by registry assembly.
@@ -19,6 +19,5 @@ pub mod data_stringify_json;
 pub mod data_template;
 pub mod emit_subflow_output;
 pub mod fail;
-pub mod http;
 pub mod identity;
 pub mod script;

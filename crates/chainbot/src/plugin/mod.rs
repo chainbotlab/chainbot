@@ -19,6 +19,7 @@ pub(crate) const PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
 
 pub use contract::{
     ExternalNodePluginRequest, ExternalNodePluginResponse, ExternalTriggerRuntimeContract,
+    PluginActivationContract,
     McpAuthConfig, McpPluginContract, McpStdioTransportConfig, McpStreamableHttpTransportConfig,
     McpTransportKind, NodePluginResultState, PluginActivationEnvelope,
     PluginEventSchemaDescriptor, PluginKind, PluginManifest, PluginOperationDescriptor,
