@@ -92,7 +92,7 @@ The repository root remains a pure Cargo workspace. Frontend tooling is isolated
 
 Main configuration file: `chainbot.toml`
 
-For complete copyable roots, see [`examples/`](examples/README.md).
+For complete copyable roots, see [`examples/`](examples/README.md), including the canonical `http-plugin-integrations/` root for the official `http-node` plugin path.
 
 Use `chainbot help validate`, `chainbot help trigger`, and `chainbot help run` for CLI-embedded config examples.
 

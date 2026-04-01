@@ -17,6 +17,7 @@
 - `builtin-triggers/`: Shared workflow root showing builtin manual, market-tick, and cron trigger packages.
 - `workflow-composition/`: Parent/child workflow root focused on subflow contracts without external plugin setup.
 - `plugin-integrations/`: External trigger and external node plugin root focused on package-aligned plugin integration.
+- `http-plugin-integrations/`: Official outbound HTTP node root showing the installed-plugin mirror after the canonical source/install path.
 - `eth-plugin-integrations/`: Official Ethereum node and trigger root with activation secret bindings and live-only listener examples.
 - `solana-plugin-integrations/`: Official Solana node and trigger root with activation secret bindings and live-only listener examples.
 - `custom-paths/`: Root showing non-default `[paths]` overrides while staying inside the configured root.

@@ -11,6 +11,7 @@ This folder contains curated ChainBot roots you can copy, inspect, or adapt.
 | `builtin-triggers/` | you want simple trigger cases in one place | builtin `manual`, `market_tick`, and `cron` packages sharing one workflow | `CHAINBOT_CONFIG_DIR=examples/builtin-triggers target/debug/chainbot validate` |
 | `workflow-composition/` | you want to learn subflow boundaries | parent/child workflows, `nodes.call`, subflow input and output flow | `CHAINBOT_CONFIG_DIR=examples/workflow-composition target/debug/chainbot validate` |
 | `plugin-integrations/` | you want external plugin setup | process + wasm external trigger plugins, external node plugin, package-local `bin/` executables | `CHAINBOT_CONFIG_DIR=examples/plugin-integrations target/debug/chainbot validate` |
+| `http-plugin-integrations/` | you want the canonical outbound HTTP plugin path | official `http-node` package, plugin-based HTTP workflow authoring, installed-plugin mirror root | `CHAINBOT_CONFIG_DIR=examples/http-plugin-integrations target/debug/chainbot validate` |
 | `eth-plugin-integrations/` | you want official Ethereum surfaces | official Ethereum node + trigger packages, root-owned activation bindings, live-only listener setup | `CHAINBOT_CONFIG_DIR=examples/eth-plugin-integrations target/debug/chainbot validate` |
 | `solana-plugin-integrations/` | you want official Solana surfaces | official Solana node + trigger packages, root-owned activation bindings, live-only listener setup | `CHAINBOT_CONFIG_DIR=examples/solana-plugin-integrations target/debug/chainbot validate` |
 | `custom-paths/` | you need non-default root-relative directories | `[paths]` overrides for workflows, triggers, plugins, secrets, and state | `CHAINBOT_CONFIG_DIR=examples/custom-paths target/debug/chainbot validate` |
@@ -74,6 +75,17 @@ Highlights:
 - plugin-local `bin/` executables
 - use `chainbot catalog show plugin:<name>` to see lifecycle details for each trigger plugin
 
+### `http-plugin-integrations/`
+
+Use this when you want the canonical outbound HTTP node path without falling back to `builtin.http`.
+
+Highlights:
+
+- official `http-node` plugin package mirrored into the root's installed `plugins/` directory
+- plugin-based workflow authoring with `kind = "plugin"` and `operation = "request"`
+- a credential-free installed-root mirror you can inspect after the canonical source/install flow
+- a minimal `bin/http-node` executable so the root remains copyable and validates standalone
+
 ### `custom-paths/`
 
 Use this when you want to see how the root contract behaves away from the default folder names.
@@ -111,4 +123,4 @@ Highlights:
 - All examples follow the current `chainbot.toml` contract.
 - No example uses legacy `plugins/manifests/` layout.
 - Secrets and runtime state are represented as empty directories or placeholders, not real credentials.
-- All eight curated roots are covered by the `validate_accepts_curated_examples` smoke test in `crates/chainbot/tests/cli_surface.rs`.
+- All nine curated roots are covered by the `validate_accepts_curated_examples` smoke test in `crates/chainbot/tests/cli_surface.rs`.
