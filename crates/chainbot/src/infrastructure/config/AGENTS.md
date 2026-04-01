@@ -6,7 +6,7 @@
 - Constraints: Keep backend-agnostic configuration contracts in `../../domain/`.
 
 ## Members
-- `mod.rs`: Config adapter module boundary.
+- `mod.rs`: Config adapter module boundary plus root-level plugin activation parsing and validation.
 - `root_layout.rs`: Workspace root layout discovery adapter.
 - `loader.rs`: Root config decoding and assembly adapter.
 - `package_loader.rs`: Package-level loading and integration adapter.
