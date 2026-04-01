@@ -703,7 +703,10 @@ fn resolve_trigger_activation(
     }
 
     Ok(ResolvedTriggerActivation {
-        activation: Some(PluginActivationEnvelope { secrets: resolved }),
+        activation: Some(PluginActivationEnvelope {
+            secrets: resolved,
+            allowed_origins: Vec::new(),
+        }),
         resolved_values: secrets,
     })
 }

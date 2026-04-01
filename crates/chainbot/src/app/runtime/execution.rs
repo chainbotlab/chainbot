@@ -63,12 +63,18 @@ use crate::secrets::{
 
 pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginActivationRuntime {
+    pub secret_bindings: BTreeMap<String, SecretReference>,
+    pub allowed_origins: Vec<String>,
+}
+
 pub struct ExecutionPlane {
     workflows: BTreeMap<String, WorkflowDefinition>,
     config_defaults: BTreeMap<String, serde_json::Value>,
     builtin_registry: BuiltinNodeRegistry,
     plugin_manifests: BTreeMap<String, PluginManifest>,
-    plugin_activation: BTreeMap<String, BTreeMap<String, SecretReference>>,
+    plugin_activation: BTreeMap<String, PluginActivationRuntime>,
     plugins_root: PathBuf,
     secrets_dir: PathBuf,
     secret_mode: SecretDecryptMode,
@@ -106,7 +112,7 @@ impl ExecutionPlane {
         config_defaults: BTreeMap<String, serde_json::Value>,
         builtin_registry: BuiltinNodeRegistry,
         plugin_manifests: Vec<PluginManifest>,
-        plugin_activation: BTreeMap<String, BTreeMap<String, SecretReference>>,
+        plugin_activation: BTreeMap<String, PluginActivationRuntime>,
         plugins_root: PathBuf,
         secrets_dir: PathBuf,
         secret_mode: SecretDecryptMode,
@@ -129,7 +135,7 @@ impl ExecutionPlane {
         config_defaults: BTreeMap<String, serde_json::Value>,
         builtin_registry: BuiltinNodeRegistry,
         plugin_manifests: Vec<PluginManifest>,
-        plugin_activation: BTreeMap<String, BTreeMap<String, SecretReference>>,
+        plugin_activation: BTreeMap<String, PluginActivationRuntime>,
         plugins_root: PathBuf,
         secrets_dir: PathBuf,
         secret_mode: SecretDecryptMode,
@@ -534,16 +540,16 @@ impl ExecutionPlane {
         let Some(bindings) = self.plugin_activation.get(plugin_id) else {
             return Ok((None, Vec::new()));
         };
-        if bindings.is_empty() {
+        if bindings.secret_bindings.is_empty() && bindings.allowed_origins.is_empty() {
             return Ok((None, Vec::new()));
         }
 
         let mut resolved = BTreeMap::new();
-        let mut secrets = Vec::with_capacity(bindings.len());
+        let mut secrets = Vec::with_capacity(bindings.secret_bindings.len());
         match self.secret_mode {
             SecretDecryptMode::Gpg => {
                 let provider = SecretProvider::new(self.secrets_dir.clone(), GpgSecretDecryptor::new());
-                for (slot, reference) in bindings {
+                for (slot, reference) in &bindings.secret_bindings {
                     let value = provider.resolve_reference(reference)?;
                     resolved.insert(slot.clone(), value.expose().to_owned());
                     secrets.push(value);
@@ -551,7 +557,7 @@ impl ExecutionPlane {
             }
             SecretDecryptMode::Plaintext => {
                 let provider = SecretProvider::new(self.secrets_dir.clone(), PlaintextSecretDecryptor);
-                for (slot, reference) in bindings {
+                for (slot, reference) in &bindings.secret_bindings {
                     let value = provider.resolve_reference(reference)?;
                     resolved.insert(slot.clone(), value.expose().to_owned());
                     secrets.push(value);
@@ -559,7 +565,13 @@ impl ExecutionPlane {
             }
         }
 
-        Ok((Some(PluginActivationEnvelope { secrets: resolved }), secrets))
+        Ok((
+            Some(PluginActivationEnvelope {
+                secrets: resolved,
+                allowed_origins: bindings.allowed_origins.clone(),
+            }),
+            secrets,
+        ))
     }
 }
 

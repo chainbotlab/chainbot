@@ -188,6 +188,12 @@ pub enum ContractError {
         namespace: String,
         key: String,
     },
+    InvalidWorkflowNodeField {
+        workflow_id: String,
+        node_id: String,
+        field: &'static str,
+        detail: String,
+    },
     InvalidSubflowContract {
         workflow_id: String,
         node_id: String,
@@ -721,6 +727,15 @@ impl Display for ContractError {
             } => write!(
                 f,
                 "workflow {workflow_id} node {node_id} has invalid {context} reference {namespace}:{key}"
+            ),
+            Self::InvalidWorkflowNodeField {
+                workflow_id,
+                node_id,
+                field,
+                detail,
+            } => write!(
+                f,
+                "workflow {workflow_id} node {node_id} has invalid field {field}: {detail}"
             ),
             Self::InvalidSubflowContract {
                 workflow_id,
