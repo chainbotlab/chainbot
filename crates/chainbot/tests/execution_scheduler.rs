@@ -1247,6 +1247,7 @@ fn runtime_execution_routes_mcp_tool_entrypoint() {
             ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
+        activation: None,
         mcp: Some(McpPluginContract {
             transport: McpTransportKind::Stdio,
             stdio: Some(McpStdioTransportConfig {
@@ -1354,6 +1355,7 @@ fn runtime_execution_preserves_legacy_external_node_dispatch() {
             ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
+        activation: None,
         mcp: None,
         manifest_path: plugin_root.join("config.toml"),
     };
@@ -1466,12 +1468,14 @@ fn runtime_execution_injects_default_confirmation_for_signed_plugin_operations()
                 "signer_ref".to_owned(),
                 "confirmation_mode".to_owned(),
             ],
+            optional_input_schema: Vec::new(),
             output_schema: vec!["status".to_owned()],
             kind: PluginOperationKind::RawWrite,
             requires_managed_signing: true,
             default_confirmation: Some("safe".to_owned()),
         }],
         event_schema: None,
+        activation: None,
         mcp: None,
         manifest_path: plugin_root.join("config.toml"),
     };

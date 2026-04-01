@@ -195,6 +195,7 @@ fn node_plugin_host_rejects_signed_operation_without_runtime_signing_inputs() {
             "signer_ref".to_owned(),
             "confirmation_mode".to_owned(),
         ],
+        optional_input_schema: Vec::new(),
         output_schema: vec!["decision".to_owned()],
         kind: PluginOperationKind::RawWrite,
         requires_managed_signing: true,
@@ -232,6 +233,7 @@ fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {
             ..PluginOperationDescriptor::default()
         }],
         event_schema: None,
+        activation: None,
         mcp: None,
         manifest_path: PathBuf::new(),
     }

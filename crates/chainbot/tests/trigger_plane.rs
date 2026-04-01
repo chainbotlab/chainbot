@@ -256,6 +256,7 @@ fn trigger_plugin_manifest_validation() {
             fields: vec!["symbol".to_owned(), "price".to_owned()],
             ..PluginEventSchemaDescriptor::default()
         }),
+        activation: None,
         mcp: None,
         manifest_path: plugin_root.join("plugin-ok").join("config.toml"),
     };
@@ -1569,6 +1570,7 @@ fn plugin_manifest(
             fields: vec!["symbol".to_owned(), "price".to_owned()],
             ..PluginEventSchemaDescriptor::default()
         }),
+        activation: None,
         mcp: None,
         manifest_path: PathBuf::new(),
     }
