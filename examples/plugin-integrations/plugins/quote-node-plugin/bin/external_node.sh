@@ -1,5 +1,5 @@
 #!/bin/sh
 cat >/dev/null
 cat <<'JSON'
-{"contract_version":"1.0.0","success":true,"output":{"decision":"buy"}}
+{"jsonrpc":"2.0","id":1,"result":{"contract_version":"1.0.0","output":{"decision":"buy"}}}
 JSON

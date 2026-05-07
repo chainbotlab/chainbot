@@ -16,6 +16,7 @@ use chainbot::errors::ContractError;
 use chainbot::plugin::{
     ExternalNodePluginHost, ExternalNodePluginRequest, NodePluginResultState, PluginManifest,
     PluginOperationDescriptor, PluginOperationKind, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
+    EXTERNAL_NODE_ENTRYPOINT_EXEC_V2,
     PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
@@ -105,6 +106,81 @@ fn external_node_plugin_roundtrip_preserves_result_state() {
         .expect("external node plugin should preserve result_state");
     assert_eq!(result.output.get("decision"), Some(&json!("hold")));
     assert_eq!(result.result_state, Some(NodePluginResultState::Submitted));
+}
+
+#[test]
+fn external_node_plugin_v2_roundtrip() {
+    let root = unique_test_root("node-plugin-v2-roundtrip");
+    let plugins_root = root.join("plugins");
+    let executable = plugins_root.join("bin").join("node_v2_roundtrip.sh");
+    write_plugin_script(
+        &executable,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"contract_version\":\"1.0.0\",\"result_state\":\"settled\",\"output\":{\"decision\":\"sell\"}}}",
+        None,
+    );
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let mut manifest = external_node_manifest("node-v2-roundtrip", "bin/node_v2_roundtrip.sh");
+    manifest.entrypoint = EXTERNAL_NODE_ENTRYPOINT_EXEC_V2.to_owned();
+    let request = valid_request("node-v2-roundtrip", "node-v2-1");
+
+    let result = host
+        .execute(&manifest, &request)
+        .expect("node.exec.v2 plugin should execute with JSON-RPC framing");
+    assert_eq!(result.output.get("decision"), Some(&json!("sell")));
+    assert_eq!(result.result_state, Some(NodePluginResultState::Settled));
+}
+
+#[test]
+fn external_node_plugin_v2_rejects_mismatched_response_id() {
+    let root = unique_test_root("node-plugin-v2-id-mismatch");
+    let plugins_root = root.join("plugins");
+    let executable = plugins_root.join("bin").join("node_v2_bad_id.sh");
+    write_plugin_script(
+        &executable,
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"contract_version\":\"1.0.0\",\"output\":{\"decision\":\"hold\"}}}",
+        None,
+    );
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let mut manifest = external_node_manifest("node-v2-bad-id", "bin/node_v2_bad_id.sh");
+    manifest.entrypoint = EXTERNAL_NODE_ENTRYPOINT_EXEC_V2.to_owned();
+    let request = valid_request("node-v2-bad-id", "node-v2-2");
+
+    let error = host
+        .execute(&manifest, &request)
+        .expect_err("node.exec.v2 response id mismatch must fail closed");
+    assert!(matches!(
+        error,
+        ContractError::NodePluginProtocolContractViolation { plugin_id, detail }
+            if plugin_id == "node-v2-bad-id" && detail.contains("response id must match request id")
+    ));
+}
+
+#[test]
+fn external_node_plugin_v2_surfaces_jsonrpc_error() {
+    let root = unique_test_root("node-plugin-v2-error");
+    let plugins_root = root.join("plugins");
+    let executable = plugins_root.join("bin").join("node_v2_error.sh");
+    write_plugin_script(
+        &executable,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"upstream rejected request\"}}",
+        None,
+    );
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let mut manifest = external_node_manifest("node-v2-error", "bin/node_v2_error.sh");
+    manifest.entrypoint = EXTERNAL_NODE_ENTRYPOINT_EXEC_V2.to_owned();
+    let request = valid_request("node-v2-error", "node-v2-3");
+
+    let error = host
+        .execute(&manifest, &request)
+        .expect_err("node.exec.v2 error payload should map to plugin failure");
+    assert!(matches!(
+        error,
+        ContractError::NodePluginReturnedFailure { plugin_id, message }
+            if plugin_id == "node-v2-error" && message == "upstream rejected request"
+    ));
 }
 
 #[test]
