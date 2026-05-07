@@ -3,7 +3,7 @@
 ## Scope
 - Position: Curated root-level ChainBot configuration examples for humans and agents.
 - Logic: Each example root demonstrates the current canonical config contract without test-only noise or legacy layouts.
-- Constraints: Keep examples deterministic, credential-free, and aligned with `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` plus `docs/design/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`.
+- Constraints: Keep examples deterministic, credential-free, and aligned with `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` plus `docs/decisions/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`.
 
 ## Constraints
 - Prefer canonical `chainbot.toml` + package-directory layouts.

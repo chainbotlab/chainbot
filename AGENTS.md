@@ -7,26 +7,24 @@
 - Entry rule: Read root `AGENTS.md`, then the nearest local `AGENTS.md`, then any linked design or implementation docs.
 
 docs/
-|- design/
-|- implementation/
+|- decisions/
+|- engineering/
 |- research/
-|- interfaces/
-|- user/
+|- postmortem/
 `- archive/
 ## Topology
 - `.agents/`: Project-local agent assets and repository-specific skills.
 - `crates/`: Cargo workspace members and crate-local manifests.
-- `docs/`: Long-lived design, implementation, research, interface, user, and archive knowledge.
+- `docs/`: Long-lived decisions, engineering records, research, postmortems, and archive knowledge.
 - `examples/`: Copyable workspace roots aligned with the stable ChainBot contract.
 - `official-plugins/`: Repository-local official remote plugin source catalog used for discoverability and install contract fixtures.
-- `postmortem/`: Durable incident records and debugging learnings worth preserving.
 
 ## Local Maps
 - `docs/AGENTS.md`: Documentation taxonomy and bucket-level ownership.
 - `crates/AGENTS.md`: Workspace member inventory.
 - `crates/chainbot/AGENTS.md`: `chainbot` crate boundary and test surface.
 - `crates/chainbot/src/AGENTS.md`: Frozen source-tree module map and root Rust file constraints.
-- `postmortem/AGENTS.md`: Postmortem naming rules, retained structure, and writing triggers.
+- `docs/postmortem/AGENTS.md`: Postmortem naming rules, retained structure, and writing triggers.
 
 ## Crates
 - `crates/chainbot/`: Primary CLI, runtime, builtin, ingress, and plugin host crate.

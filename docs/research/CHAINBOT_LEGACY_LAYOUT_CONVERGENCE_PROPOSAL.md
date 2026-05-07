@@ -160,6 +160,6 @@ Legacy layout support is ready for removal only when all of the following are tr
 
 ## Recommended Follow-Up
 
-- keep the current compatibility implementation documented in `docs/implementation/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`
+- keep the current compatibility implementation documented in `docs/engineering/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`
 - add operator-visible legacy-layout inspection before planning removal
 - treat legacy-layout retirement as its own implementation milestone rather than bundling it into unrelated feature work
