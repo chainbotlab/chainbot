@@ -23,7 +23,10 @@ pub const PLUGIN_KIND_EXTERNAL_NODE: &str = "external_node";
 pub const PLUGIN_KIND_EXTERNAL_TRIGGER: &str = "external_trigger";
 pub const NODE_PLUGIN_EXECUTE_CAPABILITY: &str = "node:execute";
 pub const EXTERNAL_NODE_ENTRYPOINT_EXEC_V1: &str = "node.exec.v1";
+pub const EXTERNAL_NODE_ENTRYPOINT_EXEC_V2: &str = "node.exec.v2";
 pub const EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1: &str = "mcp.tool.v1";
+pub const NODE_EXEC_V2_JSONRPC_VERSION: &str = "2.0";
+pub const NODE_EXEC_V2_METHOD_EXECUTE: &str = "node.execute";
 
 const REQUIRED_TRIGGER_HOST_ERROR_CATEGORIES: &[TriggerHostErrorCategory] = &[
     TriggerHostErrorCategory::Transport,
@@ -255,32 +258,7 @@ impl PluginManifest {
                 if self.entrypoint == EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1 {
                     validate_external_node_mcp_contract(self)?;
                 } else {
-                    validate_non_empty(
-                        self.executable.as_deref().unwrap_or_default(),
-                        "plugin.executable",
-                        &self.plugin_id,
-                    )?;
-                    validate_operations(&self.plugin_id, &self.operations)?;
-                    ensure_mcp_absent(&self.plugin_id, self.mcp.as_ref())?;
-                    if self.operations.is_empty() {
-                        return Err(ContractError::NodePluginInvalidField {
-                            plugin_id: self.plugin_id.clone(),
-                            field: "plugin.operations",
-                            detail: "external_node plugins must declare at least one operation"
-                                .to_owned(),
-                        });
-                    }
-
-                    if !self
-                        .capabilities
-                        .iter()
-                        .any(|capability| capability == NODE_PLUGIN_EXECUTE_CAPABILITY)
-                    {
-                        return Err(ContractError::NodePluginCapabilityNotDeclared {
-                            plugin_id: self.plugin_id.clone(),
-                            capability: NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned(),
-                        });
-                    }
+                    validate_external_node_exec_contract(self)?;
                 }
             }
             PluginKind::ExternalTrigger => {
@@ -398,6 +376,48 @@ pub struct ExternalNodePluginResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+    String(String),
+    Number(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalNodeJsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: JsonRpcId,
+    pub method: String,
+    pub params: ExternalNodePluginRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalNodeJsonRpcError {
+    pub code: i64,
+    pub message: String,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalNodeJsonRpcSuccessResult {
+    pub contract_version: String,
+    #[serde(default)]
+    pub result_state: Option<NodePluginResultState>,
+    #[serde(default)]
+    pub output: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalNodeJsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: JsonRpcId,
+    #[serde(default)]
+    pub result: Option<ExternalNodeJsonRpcSuccessResult>,
+    #[serde(default)]
+    pub error: Option<ExternalNodeJsonRpcError>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePluginResultState {
@@ -473,6 +493,65 @@ impl ExternalNodePluginResponse {
                 "node_plugin_response.error",
                 &manifest.plugin_id,
             )
+        }
+    }
+}
+
+impl ExternalNodeJsonRpcSuccessResult {
+    pub fn validate(&self, manifest: &PluginManifest) -> Result<(), ContractError> {
+        assert_supported_major(
+            "node_exec_v2.result.contract_version",
+            &self.contract_version,
+            NODE_PLUGIN_CONTRACT_MAX_MAJOR,
+        )
+        .map_err(|error| match error {
+            ContractError::UnsupportedFutureMajorVersion { .. }
+            | ContractError::UnsupportedMajorVersion { .. } => error,
+            _ => ContractError::NodePluginProtocolContractViolation {
+                plugin_id: manifest.plugin_id.clone(),
+                detail: "node.exec.v2 result contract_version is invalid".to_owned(),
+            },
+        })
+    }
+}
+
+impl ExternalNodeJsonRpcResponse {
+    pub fn validate(
+        &self,
+        manifest: &PluginManifest,
+        request_id: &JsonRpcId,
+    ) -> Result<(), ContractError> {
+        if self.jsonrpc != NODE_EXEC_V2_JSONRPC_VERSION {
+            return Err(ContractError::NodePluginProtocolContractViolation {
+                plugin_id: manifest.plugin_id.clone(),
+                detail: format!(
+                    "node.exec.v2 response must set jsonrpc={NODE_EXEC_V2_JSONRPC_VERSION}"
+                ),
+            });
+        }
+
+        if &self.id != request_id {
+            return Err(ContractError::NodePluginProtocolContractViolation {
+                plugin_id: manifest.plugin_id.clone(),
+                detail: "node.exec.v2 response id must match request id".to_owned(),
+            });
+        }
+
+        match (&self.result, &self.error) {
+            (Some(result), None) => result.validate(manifest),
+            (None, Some(error)) => validate_non_empty(
+                &error.message,
+                "node_exec_v2.error.message",
+                &manifest.plugin_id,
+            ),
+            (Some(_), Some(_)) => Err(ContractError::NodePluginProtocolContractViolation {
+                plugin_id: manifest.plugin_id.clone(),
+                detail: "node.exec.v2 response cannot include both result and error".to_owned(),
+            }),
+            (None, None) => Err(ContractError::NodePluginProtocolContractViolation {
+                plugin_id: manifest.plugin_id.clone(),
+                detail: "node.exec.v2 response must include either result or error".to_owned(),
+            }),
         }
     }
 }
@@ -868,6 +947,43 @@ fn validate_external_node_mcp_contract(manifest: &PluginManifest) -> Result<(), 
     };
 
     validate_mcp_contract(&manifest.plugin_id, mcp)
+}
+
+fn validate_external_node_exec_contract(manifest: &PluginManifest) -> Result<(), ContractError> {
+    validate_non_empty(
+        manifest.executable.as_deref().unwrap_or_default(),
+        "plugin.executable",
+        &manifest.plugin_id,
+    )?;
+    validate_operations(&manifest.plugin_id, &manifest.operations)?;
+    ensure_mcp_absent(&manifest.plugin_id, manifest.mcp.as_ref())?;
+    if manifest.operations.is_empty() {
+        return Err(ContractError::NodePluginInvalidField {
+            plugin_id: manifest.plugin_id.clone(),
+            field: "plugin.operations",
+            detail: "external_node plugins must declare at least one operation".to_owned(),
+        });
+    }
+
+    if !manifest
+        .capabilities
+        .iter()
+        .any(|capability| capability == NODE_PLUGIN_EXECUTE_CAPABILITY)
+    {
+        return Err(ContractError::NodePluginCapabilityNotDeclared {
+            plugin_id: manifest.plugin_id.clone(),
+            capability: NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned(),
+        });
+    }
+
+    match manifest.entrypoint.as_str() {
+        EXTERNAL_NODE_ENTRYPOINT_EXEC_V1 | EXTERNAL_NODE_ENTRYPOINT_EXEC_V2 => Ok(()),
+        _ => Err(ContractError::NodePluginInvalidField {
+            plugin_id: manifest.plugin_id.clone(),
+            field: "plugin.entrypoint",
+            detail: "unsupported external_node subprocess entrypoint".to_owned(),
+        }),
+    }
 }
 
 fn validate_mcp_contract(plugin_id: &str, mcp: &McpPluginContract) -> Result<(), ContractError> {

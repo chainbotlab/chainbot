@@ -300,7 +300,7 @@ fn plugin_install_rejects_missing_embedded_source_metadata() {
         r#"manifest_version = "2.0.0"
 plugin_id = "missing-source-plugin"
 kind = "external_node"
-entrypoint = "node.exec.v1"
+entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/plugin.sh"
 

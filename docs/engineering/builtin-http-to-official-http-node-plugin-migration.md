@@ -208,7 +208,7 @@ The practical payoff is larger than this one migration:
 manifest_version = "2.0.0"
 plugin_id = "http-node"
 kind = "external_node"
-entrypoint = "node.exec.v1"
+entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/http-node"
 

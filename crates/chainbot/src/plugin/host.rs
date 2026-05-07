@@ -28,10 +28,12 @@ use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 use super::{configure_plugin_subprocess_environment, plugin_host_allowlisted_environment};
 use super::contract::{
-    validate_output_schema, ExternalNodePluginRequest, ExternalNodePluginResponse,
-    McpTransportKind, NodePluginResultState, PluginKind, PluginManifest,
-    PluginOperationDescriptor, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
-    EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1,
+    validate_output_schema, ExternalNodeJsonRpcRequest, ExternalNodeJsonRpcResponse,
+    ExternalNodePluginRequest, ExternalNodePluginResponse, JsonRpcId, McpTransportKind,
+    NodePluginResultState, PluginKind, PluginManifest, PluginOperationDescriptor,
+    EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, EXTERNAL_NODE_ENTRYPOINT_EXEC_V2,
+    EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1, NODE_EXEC_V2_JSONRPC_VERSION,
+    NODE_EXEC_V2_METHOD_EXECUTE,
 };
 
 pub(crate) const MCP_NODE_INVOCATION_LIFECYCLE_POLICY: &str = "per_invocation_session";
@@ -113,6 +115,7 @@ impl ExternalNodePluginHost {
     ) -> Result<NodePluginExecutionResult, ContractError> {
         match NodeInvokerKind::for_manifest(manifest)? {
             NodeInvokerKind::LegacySubprocess => self.execute_legacy_subprocess(manifest, request),
+            NodeInvokerKind::JsonRpcSubprocess => self.execute_jsonrpc_subprocess(manifest, request),
             NodeInvokerKind::McpPerInvocationSession => {
                 self.execute_mcp_per_invocation_session(manifest, request)
             }
@@ -127,56 +130,13 @@ impl ExternalNodePluginHost {
         manifest.validate()?;
         request.validate(manifest)?;
 
-        let executable = self.resolve_executable_path(manifest)?;
         let request_json = serde_json::to_vec(request).map_err(|source| {
             ContractError::NodePluginProtocolEncode {
                 plugin_id: manifest.plugin_id.clone(),
                 source,
             }
         })?;
-
-        let mut command = Command::new(&executable);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        configure_plugin_subprocess_environment(&mut command);
-
-        let mut child = command
-            .spawn()
-            .map_err(|source| ContractError::NodePluginSpawnFailed {
-                plugin_id: manifest.plugin_id.clone(),
-                executable: executable.clone(),
-                source,
-            })?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            stdin.write_all(&request_json).map_err(|source| {
-                ContractError::NodePluginProcessIo {
-                    plugin_id: manifest.plugin_id.clone(),
-                    operation: "write request to plugin stdin",
-                    source,
-                }
-            })?;
-        }
-
-        let output =
-            child
-                .wait_with_output()
-                .map_err(|source| ContractError::NodePluginProcessIo {
-                    plugin_id: manifest.plugin_id.clone(),
-                    operation: "wait for plugin process output",
-                    source,
-                })?;
-
-        if !output.status.success() {
-            return Err(ContractError::NodePluginProcessFailed {
-                plugin_id: manifest.plugin_id.clone(),
-                exit_code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
+        let output = self.execute_subprocess(manifest, &request_json)?;
 
         let response: ExternalNodePluginResponse =
             serde_json::from_slice(&output.stdout).map_err(|source| {
@@ -208,6 +168,103 @@ impl ExternalNodePluginHost {
             output: response.output,
             result_state: response.result_state,
         })
+    }
+
+    fn execute_jsonrpc_subprocess(
+        &self,
+        manifest: &PluginManifest,
+        request: &ExternalNodePluginRequest,
+    ) -> Result<NodePluginExecutionResult, ContractError> {
+        manifest.validate()?;
+        request.validate(manifest)?;
+
+        let request_json = serde_json::to_vec(&ExternalNodeJsonRpcRequest {
+            jsonrpc: NODE_EXEC_V2_JSONRPC_VERSION.to_owned(),
+            id: JsonRpcId::Number(1),
+            method: NODE_EXEC_V2_METHOD_EXECUTE.to_owned(),
+            params: request.clone(),
+        })
+        .map_err(|source| ContractError::NodePluginProtocolEncode {
+            plugin_id: manifest.plugin_id.clone(),
+            source,
+        })?;
+
+        let output = self.execute_subprocess(manifest, &request_json)?;
+        let response: ExternalNodeJsonRpcResponse =
+            serde_json::from_slice(&output.stdout).map_err(|source| {
+                ContractError::NodePluginProtocolDecode {
+                    plugin_id: manifest.plugin_id.clone(),
+                    source,
+                }
+            })?;
+        response.validate(manifest, &JsonRpcId::Number(1))?;
+
+        if let Some(error) = response.error {
+            return Err(ContractError::NodePluginReturnedFailure {
+                plugin_id: manifest.plugin_id.clone(),
+                message: error.message,
+            });
+        }
+
+        let result = response.result.ok_or_else(|| ContractError::NodePluginProtocolContractViolation {
+            plugin_id: manifest.plugin_id.clone(),
+            detail: "node.exec.v2 response missing result payload".to_owned(),
+        })?;
+        let operation = manifest.node_operation(&request.operation)?;
+        validate_output_schema(&manifest.plugin_id, &operation.output_schema, &result.output)?;
+
+        Ok(NodePluginExecutionResult {
+            output: result.output,
+            result_state: result.result_state,
+        })
+    }
+
+    fn execute_subprocess(
+        &self,
+        manifest: &PluginManifest,
+        request_json: &[u8],
+    ) -> Result<std::process::Output, ContractError> {
+        let executable = self.resolve_executable_path(manifest)?;
+
+        let mut command = Command::new(&executable);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_plugin_subprocess_environment(&mut command);
+
+        let mut child = command
+            .spawn()
+            .map_err(|source| ContractError::NodePluginSpawnFailed {
+                plugin_id: manifest.plugin_id.clone(),
+                executable: executable.clone(),
+                source,
+            })?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(request_json).map_err(|source| ContractError::NodePluginProcessIo {
+                plugin_id: manifest.plugin_id.clone(),
+                operation: "write request to plugin stdin",
+                source,
+            })?;
+        }
+
+        let output = child.wait_with_output().map_err(|source| ContractError::NodePluginProcessIo {
+            plugin_id: manifest.plugin_id.clone(),
+            operation: "wait for plugin process output",
+            source,
+        })?;
+
+        if !output.status.success() {
+            return Err(ContractError::NodePluginProcessFailed {
+                plugin_id: manifest.plugin_id.clone(),
+                exit_code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+
+        Ok(output)
     }
 
     fn execute_mcp_per_invocation_session(
@@ -1247,6 +1304,7 @@ fn extract_error_detail_from_value(value: &serde_json::Value) -> Option<String> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeInvokerKind {
     LegacySubprocess,
+    JsonRpcSubprocess,
     McpPerInvocationSession,
 }
 
@@ -1255,6 +1313,7 @@ impl NodeInvokerKind {
         manifest.validate()?;
         match manifest.entrypoint.as_str() {
             EXTERNAL_NODE_ENTRYPOINT_EXEC_V1 => Ok(Self::LegacySubprocess),
+            EXTERNAL_NODE_ENTRYPOINT_EXEC_V2 => Ok(Self::JsonRpcSubprocess),
             EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1 => Ok(Self::McpPerInvocationSession),
             _ => Err(ContractError::NodePluginInvalidField {
                 plugin_id: manifest.plugin_id.clone(),

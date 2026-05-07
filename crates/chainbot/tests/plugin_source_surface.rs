@@ -229,7 +229,7 @@ fn plugin_source_list_requires_embedded_source_metadata() {
         r#"manifest_version = "2.0.0"
 plugin_id = "alpha-plugin"
 kind = "external_node"
-entrypoint = "node.exec.v1"
+entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/plugin.sh"
 

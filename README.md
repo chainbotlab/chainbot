@@ -166,7 +166,7 @@ price = "payload.price"
 manifest_version = "2.0.0"
 plugin_id = "quote-plugin"
 kind = "external_node"
-entrypoint = "node.exec.v1"
+entrypoint = "node.exec.v2"
 capabilities = ["normalize"]
 executable = "bin/quote-plugin.sh"
 ```

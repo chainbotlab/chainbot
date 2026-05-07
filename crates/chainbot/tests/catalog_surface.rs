@@ -377,7 +377,7 @@ fn catalog_list_reports_installed_official_chain_node_and_trigger_plugins() {
                 r#"manifest_version = "2.0.0"
 plugin_id = "eth-node"
 kind = "external_node"
-entrypoint = "node.exec.v1"
+entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/plugin.sh"
 
@@ -496,7 +496,7 @@ fn catalog_list_does_not_infer_chain_surface_from_noncanonical_plugin_prefix() {
             r#"manifest_version = "2.0.0"
 plugin_id = "eth-analytics-plugin"
 kind = "external_node"
-entrypoint = "node.exec.v1"
+entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/plugin.sh"
 

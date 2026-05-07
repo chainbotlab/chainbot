@@ -30,7 +30,8 @@ use chainbot::infrastructure::config::RootLayout;
 use chainbot::plugin::{
     McpPluginContract, McpStdioTransportConfig, McpTransportKind, PluginManifest,
     PluginOperationDescriptor, PluginOperationKind, EXTERNAL_NODE_ENTRYPOINT_EXEC_V1,
-    EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1, NODE_PLUGIN_EXECUTE_CAPABILITY,
+    EXTERNAL_NODE_ENTRYPOINT_EXEC_V2, EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1,
+    NODE_PLUGIN_EXECUTE_CAPABILITY,
     PLUGIN_KIND_EXTERNAL_NODE,
 };
 use serde_json::json;
@@ -1396,6 +1397,99 @@ fn runtime_execution_preserves_legacy_external_node_dispatch() {
     );
     assert_eq!(
         report.runtime_namespaces.run_scoped.get("decision"),
+        Some(&json!("buy"))
+    );
+}
+
+#[test]
+fn runtime_execution_supports_node_exec_v2_dispatch() {
+    let root = unique_test_root("runtime-node-exec-v2");
+    let plugins_root = root.join("plugins");
+    let plugin_root = plugins_root.join("v2-quote");
+    let executable = plugin_root.join("bin").join("v2_node.sh");
+    write_executable_script_contents(
+        &executable,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"contract_version\":\"1.0.0\",\"output\":{\"decision\":\"buy\"}}}'\n",
+    );
+
+    let workflow = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-runtime-v2".to_owned(),
+        name: "runtime-v2".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![NodeDefinition {
+            api_version: "2.0.0".to_owned(),
+            node_id: "v2-node".to_owned(),
+            kind: "plugin".to_owned(),
+            plugin_id: "v2-quote".to_owned(),
+            operation: "normalize".to_owned(),
+            depends_mode: DependsMode::All,
+            depends_on: Vec::new(),
+            inputs: vec![VariableBinding {
+                target: "symbol".to_owned(),
+                source: VariableReference {
+                    namespace: RuntimeVariableNamespace::ManualInvocationInput,
+                    key: "symbol".to_owned(),
+                },
+            }],
+            when: None,
+            subflow: None,
+        }],
+        package_root: PathBuf::new(),
+    };
+
+    let manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "v2-quote".to_owned(),
+        kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
+        entrypoint: EXTERNAL_NODE_ENTRYPOINT_EXEC_V2.to_owned(),
+        capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+        executable: Some("bin/v2_node.sh".to_owned()),
+        trigger_runtime: None,
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        operations: vec![PluginOperationDescriptor {
+            name: "normalize".to_owned(),
+            summary: Some("Normalize quote payload".to_owned()),
+            input_schema: vec!["symbol".to_owned()],
+            output_schema: vec!["decision".to_owned()],
+            ..PluginOperationDescriptor::default()
+        }],
+        event_schema: None,
+        activation: None,
+        mcp: None,
+        manifest_path: plugin_root.join("config.toml"),
+    };
+
+    let execution_plane = ExecutionPlane::with_plugin_runtime(
+        vec![workflow],
+        BTreeMap::new(),
+        BuiltinNodeRegistry::with_test_handlers(),
+        vec![manifest],
+        BTreeMap::new(),
+        plugins_root,
+        root.join("secrets"),
+        SecretDecryptMode::Plaintext,
+    )
+    .expect("runtime execution plane with node.exec.v2 plugin should be constructible");
+
+    let mut request = NormalizedRunRequest::new("run-runtime-v2", "wf-runtime-v2");
+    request
+        .manual_invocation_input
+        .insert("symbol".to_owned(), json!("BTCUSDT"));
+
+    let report = execution_plane
+        .execute(&request)
+        .expect("runtime should dispatch node.exec.v2 plugins through the scheduler");
+
+    assert_eq!(report.status, WorkflowRunStatus::Succeeded);
+    assert_eq!(report.schedule_waves, vec![vec!["v2-node".to_owned()]]);
+    assert_eq!(report.node_states.get("v2-node"), Some(&ScheduledNodeState::Succeeded));
+    assert_eq!(
+        report
+            .node_outputs
+            .get("v2-node")
+            .and_then(|outputs| outputs.get("decision")),
         Some(&json!("buy"))
     );
 }
