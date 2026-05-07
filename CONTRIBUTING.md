@@ -95,13 +95,13 @@ docs/
 
 | Document | Purpose |
 |----------|---------|
-| `docs/design/CHAINBOT_WORKSPACE_DESIGN.md` | Root workspace layout and boundaries |
-| `docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` | Workflow/node definitions, trigger kinds, plugin linkage |
-| `docs/design/CHAINBOT_CLI_DESIGN.md` | CLI command surface and semantics |
+| `docs/decisions/CHAINBOT_WORKSPACE_DESIGN.md` | Root workspace layout and boundaries |
+| `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` | Workflow/node definitions, trigger kinds, plugin linkage |
+| `docs/decisions/CHAINBOT_CLI_DESIGN.md` | CLI command surface and semantics |
 
 ### Implementation Records
 
-Implementation decisions are documented in `docs/implementation/`:
+Implementation decisions are documented in `docs/engineering/`:
 
 - `WORKSPACE_BOOTSTRAP_IMPLEMENTATION.md` — Initial setup
 - `CHAINBOT_V2_MVP_IMPLEMENTATION.md` — MVP release

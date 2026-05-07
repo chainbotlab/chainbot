@@ -6,11 +6,10 @@
 - Constraints: Keep docs concise, durable, and linked from root context.
 
 ## Members
-- `design/`: Long-lived architectural decisions and invariants.
-- `implementation/`: Execution notes, validation expectations, and bootstrapping details.
+- `decisions/`: Long-lived architectural decisions and invariants.
+- `engineering/`: Execution notes, validation expectations, and bootstrapping details.
 - `research/`: Exploration notes and discarded options when they become necessary.
-- `solutions/`: Categorized documented solutions and best practices with YAML frontmatter (`module`, `tags`, `problem_type`), relevant when implementing or debugging in documented areas.
-- `interfaces/`: Contracts with upstreams, adapters, or external surfaces.
+- `postmortem/`: Durable incident records and debugging learnings.
 - `archive/`: Retired docs and tombstones.
 
 ## Conventions

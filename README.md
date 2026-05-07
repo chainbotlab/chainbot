@@ -178,8 +178,8 @@ Current version: **2.2.0**
 ## Links
 
 - [Contributing Guide](CONTRIBUTING.md) — Development setup and architecture
-- [CLI Design](docs/design/CHAINBOT_CLI_DESIGN.md) — CLI command reference
-- [Workspace Design](docs/design/CHAINBOT_WORKSPACE_DESIGN.md) — Root layout specification
-- [Trigger & Workflow Design](docs/design/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md) — Workflow definition format
+- [CLI Design](docs/decisions/CHAINBOT_CLI_DESIGN.md) — CLI command reference
+- [Workspace Design](docs/decisions/CHAINBOT_WORKSPACE_DESIGN.md) — Root layout specification
+- [Trigger & Workflow Design](docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md) — Workflow definition format
 - [Landing Page Source](interface/land-page/src/pages/index.astro) — Product-introduction interface
 - [User Docs Config](interface/user-docs/docs.json) — Mintlify navigation and branding surface

@@ -1,6 +1,0 @@
-
-- Scope-creep correction: constrained Task 1 to manifest contract/decode/tests only, reverted broad runtime/docs/examples changes, and kept only compile-required touchpoints so future tasks must isolate implementation boundaries before editing.
-- Regression lesson: the earlier patch accidentally coupled external-trigger runtime metadata with an external-node runtime schema migration; Task 1 must keep external-node legacy `plugin.executable` validation compatible while adding trigger-only metadata.
-- Task 6 warning cleanup required a test-only shim: gated `Weak` import and `runtime_guard` field behind `cfg(test)` in `trigger_wasm.rs` so teardown probe coverage stays intact without introducing production warning noise.
-- Final sweep fixture check: no `#[ignore]` markers remain under `crates/chainbot` runtime/test surfaces touched by this task; timing sleeps in `end_to_end_vertical_slice.rs` remain intentional lease/daemon cadence buffers and are tracked as deterministic wait windows rather than ignored flaky fixtures.
-- F3 QA hygiene note: the current worktree contains an untracked `examples/plugin-integrations/state/runtime.sqlite3`; copying the example root verbatim pollutes manual QA with historical runs, so final observable checks should use a clean temp copy with that local DB removed before judging fresh daemon behavior.
