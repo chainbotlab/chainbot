@@ -1,6 +1,6 @@
-use axum::{extract::ws::{Message, WebSocket, WebSocketUpgrade}, response::Response, routing::get, Router};
+use axum::{extract::ws::{Message, WebSocket, WebSocketUpgrade}, routing::get, Router};
 use eth_trigger_official_plugin::run_from_stdin;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

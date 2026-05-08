@@ -1,5 +1,5 @@
 use axum::{extract::ws::{Message, WebSocket, WebSocketUpgrade}, routing::get, Router};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use solana_trigger_official_plugin::run_from_stdin;
 use std::net::SocketAddr;

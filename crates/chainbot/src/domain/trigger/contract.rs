@@ -128,8 +128,14 @@ pub struct TriggerPluginHostPolicy {
     pub allowlisted_plugin_ids: BTreeSet<String>,
     pub allowed_capabilities: BTreeSet<String>,
     pub plugin_root_dir: PathBuf,
-    pub plugin_activation: BTreeMap<String, BTreeMap<String, SecretReference>>,
+    pub plugin_activation: BTreeMap<String, TriggerPluginActivationBindings>,
     pub secrets_root_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TriggerPluginActivationBindings {
+    pub secret_bindings: BTreeMap<String, SecretReference>,
+    pub allowed_origins: Vec<String>,
 }
 
 impl TriggerDefinition {
@@ -195,6 +201,13 @@ impl TriggerStartCommand {
                 validate_non_empty_field(
                     value,
                     "trigger_start_command.activation.secrets",
+                    &self.trigger_id,
+                )?;
+            }
+            for origin in &activation.allowed_origins {
+                validate_non_empty_field(
+                    origin,
+                    "trigger_start_command.activation.allowed_origins",
                     &self.trigger_id,
                 )?;
             }

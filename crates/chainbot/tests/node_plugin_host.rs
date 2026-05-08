@@ -251,7 +251,7 @@ fn node_plugin_host_uses_default_deny_environment() {
 }
 
 #[test]
-fn node_plugin_host_rejects_signed_operation_without_runtime_signing_inputs() {
+fn node_plugin_host_allows_signed_operation_without_signer_ref_input() {
     let root = unique_test_root("node-plugin-signing-guard");
     let plugins_root = root.join("plugins");
     let executable = plugins_root.join("bin").join("node_signing_guard.sh");
@@ -268,7 +268,6 @@ fn node_plugin_host_rejects_signed_operation_without_runtime_signing_inputs() {
         summary: Some("Submit signed payload".to_owned()),
         input_schema: vec![
             "symbol".to_owned(),
-            "signer_ref".to_owned(),
             "confirmation_mode".to_owned(),
         ],
         optional_input_schema: Vec::new(),
@@ -279,15 +278,14 @@ fn node_plugin_host_rejects_signed_operation_without_runtime_signing_inputs() {
     }];
     let mut request = valid_request("node-signing-guard", "node-5");
     request.operation = "submit".to_owned();
+    request
+        .input
+        .insert(String::from("confirmation_mode"), json!("safe"));
 
-    let error = host
+    let response = host
         .execute(&manifest, &request)
-        .expect_err("signed operation without signer_ref should fail before spawn");
-    assert!(matches!(
-        error,
-        ContractError::NodePluginInputSchemaMismatch { plugin_id, detail }
-            if plugin_id == "node-signing-guard" && detail.contains("required input key signer_ref is missing")
-    ));
+        .expect("signed operation should no longer require signer_ref input");
+    assert_eq!(response.output.get("decision"), Some(&json!("hold")));
 }
 
 fn external_node_manifest(plugin_id: &str, executable: &str) -> PluginManifest {

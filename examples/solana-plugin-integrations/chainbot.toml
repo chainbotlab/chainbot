@@ -5,7 +5,9 @@ secret_refs = []
 
 [plugin_activation."solana-node".secret_bindings]
 signer = "secret://wallets/solana/hot#private_key"
-rpc_token = "secret://providers/solana/mainnet#token"
+
+[plugin_activation."solana-trigger"]
+allowed_origins = ["https://rpc.example", "wss://rpc.example"]
 
 [plugin_activation."solana-trigger".secret_bindings]
 rpc_token = "secret://providers/solana/mainnet#token"

@@ -5,7 +5,9 @@ secret_refs = []
 
 [plugin_activation."eth-node".secret_bindings]
 signer = "secret://wallets/eth/hot#private_key"
-rpc_token = "secret://providers/ethereum/mainnet#token"
+
+[plugin_activation."eth-trigger"]
+allowed_origins = ["https://rpc.example", "wss://rpc.example"]
 
 [plugin_activation."eth-trigger".secret_bindings]
 rpc_token = "secret://providers/ethereum/mainnet#token"

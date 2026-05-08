@@ -678,16 +678,16 @@ fn resolve_trigger_activation(
     let Some(bindings) = policy.plugin_activation.get(plugin_id) else {
         return Ok(ResolvedTriggerActivation::default());
     };
-    if bindings.is_empty() {
+    if bindings.secret_bindings.is_empty() && bindings.allowed_origins.is_empty() {
         return Ok(ResolvedTriggerActivation::default());
     }
 
-    let mut secrets = Vec::with_capacity(bindings.len());
+    let mut secrets = Vec::with_capacity(bindings.secret_bindings.len());
     let mut resolved = std::collections::BTreeMap::new();
     if std::env::var("CHAINBOT_SECRET_DECRYPTOR").ok().as_deref() == Some("plaintext") {
         let provider =
             SecretProvider::new(policy.secrets_root_dir.clone(), PlaintextSecretDecryptor);
-        for (slot, reference) in bindings {
+        for (slot, reference) in &bindings.secret_bindings {
             let value = provider.resolve_reference(reference)?;
             resolved.insert(slot.clone(), value.expose().to_owned());
             secrets.push(value);
@@ -695,7 +695,7 @@ fn resolve_trigger_activation(
     } else {
         let provider =
             SecretProvider::new(policy.secrets_root_dir.clone(), GpgSecretDecryptor::new());
-        for (slot, reference) in bindings {
+        for (slot, reference) in &bindings.secret_bindings {
             let value = provider.resolve_reference(reference)?;
             resolved.insert(slot.clone(), value.expose().to_owned());
             secrets.push(value);
@@ -705,7 +705,7 @@ fn resolve_trigger_activation(
     Ok(ResolvedTriggerActivation {
         activation: Some(PluginActivationEnvelope {
             secrets: resolved,
-            allowed_origins: Vec::new(),
+            allowed_origins: bindings.allowed_origins.clone(),
         }),
         resolved_values: secrets,
     })

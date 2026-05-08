@@ -266,7 +266,7 @@ impl PluginManifest {
                 ensure_list_empty(&self.output_schema, "plugin.output_schema", &self.plugin_id)?;
                 ensure_operations_absent(&self.plugin_id, &self.operations)?;
                 ensure_mcp_absent(&self.plugin_id, self.mcp.as_ref())?;
-                ensure_activation_absent(&self.plugin_id, self.activation.as_ref())?;
+                validate_activation_contract(&self.plugin_id, self.activation.as_ref())?;
                 validate_external_trigger_runtime_contract(
                     &self.plugin_id,
                     self.executable.as_deref(),
@@ -642,20 +642,6 @@ fn ensure_trigger_runtime_absent(
     Err(ContractError::NodePluginInvalidField {
         plugin_id: plugin_id.to_owned(),
         field: "plugin.trigger_runtime",
-        detail: "field is not allowed for this plugin kind".to_owned(),
-    })
-}
-
-fn ensure_activation_absent(
-    plugin_id: &str,
-    activation: Option<&PluginActivationContract>,
-) -> Result<(), ContractError> {
-    if activation.is_none() {
-        return Ok(());
-    }
-    Err(ContractError::NodePluginInvalidField {
-        plugin_id: plugin_id.to_owned(),
-        field: "plugin.activation",
         detail: "field is not allowed for this plugin kind".to_owned(),
     })
 }
@@ -1133,9 +1119,6 @@ fn validate_operation_execution_requirements(
     operation: &PluginOperationDescriptor,
     input: &BTreeMap<String, serde_json::Value>,
 ) -> Result<(), ContractError> {
-    if operation.requires_managed_signing {
-        validate_required_string_input(plugin_id, &operation.name, input, "signer_ref")?;
-    }
     if operation.default_confirmation.is_some() {
         validate_required_string_input(plugin_id, &operation.name, input, "confirmation_mode")?;
     }

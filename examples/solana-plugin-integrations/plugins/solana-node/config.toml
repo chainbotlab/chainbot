@@ -5,6 +5,9 @@ entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/solana-node"
 
+[activation]
+required_secret_slots = ["signer"]
+
 [[operations]]
 name = "solana_get_balance"
 summary = "Read native account balance"
@@ -15,7 +18,7 @@ kind = "read"
 [[operations]]
 name = "solana_transfer_native"
 summary = "Transfer native SOL"
-input_schema = ["endpoint", "to", "lamports", "signer_ref", "confirmation_mode", "preflight"]
+input_schema = ["endpoint", "to", "lamports", "confirmation_mode", "preflight"]
 output_schema = ["status", "transaction_id", "metadata"]
 kind = "transfer"
 requires_managed_signing = true

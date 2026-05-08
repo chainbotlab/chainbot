@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chainbot::domain::trigger::{
-    TriggerDefinition, TriggerHostMessage, TriggerPlane, TriggerPluginHostPolicy,
+    TriggerDefinition, TriggerHostMessage, TriggerPlane, TriggerPluginActivationBindings,
+    TriggerPluginHostPolicy,
     TriggerStartCommand, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use chainbot::plugin::{
@@ -76,7 +77,11 @@ fn chain_trigger_runtime_injects_activation_secrets_into_start_message() {
             fields: vec!["event_id".to_owned()],
             listener_modes: vec![],
         }),
-        activation: None,
+        activation: Some(chainbot::plugin::PluginActivationContract {
+            required_secret_slots: Vec::new(),
+            optional_secret_slots: vec!["rpc_token".to_owned()],
+            requires_allowed_origins: true,
+        }),
         mcp: None,
         manifest_path: plugin_root.join("eth-trigger").join("config.toml"),
     };
@@ -103,11 +108,14 @@ fn chain_trigger_runtime_injects_activation_secrets_into_start_message() {
         plugin_root_dir: plugin_root.clone(),
         plugin_activation: BTreeMap::from([(
             String::from("eth-trigger"),
-            BTreeMap::from([(
-                String::from("rpc_token"),
-                SecretReference::parse("secret://providers/ethereum/mainnet#token")
-                    .expect("secret ref should parse"),
-            )]),
+            TriggerPluginActivationBindings {
+                secret_bindings: BTreeMap::from([(
+                    String::from("rpc_token"),
+                    SecretReference::parse("secret://providers/ethereum/mainnet#token")
+                        .expect("secret ref should parse"),
+                )]),
+                allowed_origins: vec![String::from("wss://rpc.example")],
+            },
         )]),
         secrets_root_dir: secrets_root,
     };
@@ -127,7 +135,7 @@ fn chain_trigger_runtime_injects_activation_secrets_into_start_message() {
         .expect("collect_run_requests should succeed");
 
     let captured: TriggerHostMessage = serde_json::from_str(
-        &fs::read_to_string(capture_path).expect("captured start should be readable"),
+        &fs::read_to_string(&capture_path).expect("captured start should be readable"),
     )
     .expect("captured start should decode");
     let TriggerHostMessage::Start(TriggerStartCommand { activation, .. }) = captured else {
@@ -136,6 +144,11 @@ fn chain_trigger_runtime_injects_activation_secrets_into_start_message() {
     assert_eq!(
         activation.and_then(|value| value.secrets.get("rpc_token").cloned()),
         Some(String::from("eth-provider-token"))
+    );
+    let captured_activation = captured_start_activation(&capture_path);
+    assert_eq!(
+        captured_activation.get("allowed_origins"),
+        Some(&serde_json::json!(["wss://rpc.example"]))
     );
     unsafe {
         match previous_secret_mode {
@@ -268,6 +281,20 @@ fn write_plaintext_secret(root: &Path, secret_ref: &str, value: &str) {
         _ => format!("{value}\n"),
     };
     fs::write(path, payload).expect("secret should be writable");
+}
+
+fn captured_start_activation(path: &Path) -> serde_json::Map<String, serde_json::Value> {
+    let captured: TriggerHostMessage = serde_json::from_str(
+        &fs::read_to_string(path).expect("captured start should be readable"),
+    )
+    .expect("captured start should decode");
+    let TriggerHostMessage::Start(TriggerStartCommand { activation, .. }) = captured else {
+        panic!("expected start message");
+    };
+    activation
+        .and_then(|value| serde_json::to_value(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .expect("activation should be present")
 }
 
 fn unique_test_root(prefix: &str) -> PathBuf {

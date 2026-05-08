@@ -5,6 +5,9 @@ entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/eth-node"
 
+[activation]
+required_secret_slots = ["signer"]
+
 [[operations]]
 name = "eth_get_balance"
 summary = "Read native account balance"
@@ -22,7 +25,7 @@ kind = "read"
 [[operations]]
 name = "eth_transfer_native"
 summary = "Transfer native ETH"
-input_schema = ["endpoint", "to", "amount", "signer_ref", "confirmation_mode", "preflight"]
+input_schema = ["endpoint", "to", "amount", "confirmation_mode", "preflight"]
 output_schema = ["status", "transaction_id", "metadata"]
 kind = "transfer"
 requires_managed_signing = true
@@ -38,7 +41,7 @@ kind = "raw_read"
 [[operations]]
 name = "eth_raw_write"
 summary = "Execute raw Ethereum signed write"
-input_schema = ["endpoint", "method", "params", "signer_ref", "confirmation_mode", "preflight"]
+input_schema = ["endpoint", "method", "params", "confirmation_mode", "preflight"]
 output_schema = ["status", "transaction_id", "metadata"]
 kind = "raw_write"
 requires_managed_signing = true

@@ -391,7 +391,7 @@ kind = "raw_read"
 [[operations]]
 name = "eth_raw_write"
 summary = "Raw write"
-input_schema = ["endpoint", "method", "params", "signer_ref", "confirmation_mode"]
+input_schema = ["endpoint", "method", "params", "confirmation_mode"]
 output_schema = ["status", "transaction_hash"]
 kind = "raw_write"
 requires_managed_signing = true
@@ -406,6 +406,10 @@ kind = "external_trigger"
 entrypoint = "trigger.exec.v1"
 capabilities = ["trigger.listen.event"]
 executable = "bin/external_trigger.sh"
+
+[activation]
+optional_secret_slots = ["rpc_token"]
+requires_allowed_origins = true
 
 [trigger_runtime]
 lifecycle = "process_short_lived"

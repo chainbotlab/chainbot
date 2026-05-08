@@ -18,10 +18,12 @@ pub struct PluginRequest {
     pub activation: Option<PluginActivationEnvelope>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct PluginActivationEnvelope {
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

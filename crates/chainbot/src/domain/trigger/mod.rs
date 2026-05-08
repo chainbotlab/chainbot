@@ -14,8 +14,8 @@ pub mod emission;
 pub use acceptance::{TriggerPlane, TriggerPlaneError, TriggerRunRequest, TriggerStateStore};
 pub use contract::{
     TriggerAck, TriggerDefinition, TriggerEventFrame, TriggerFatal, TriggerHeartbeat,
-    TriggerHostMessage, TriggerKind, TriggerPluginHostPolicy, TriggerPluginMessage, TriggerReady,
-    TriggerStartCommand, TriggerStop, CURRENT_API_MAJOR, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
-    TRIGGER_KIND_BUILTIN, TRIGGER_KIND_EXTERNAL_PLUGIN,
+    TriggerHostMessage, TriggerKind, TriggerPluginActivationBindings, TriggerPluginHostPolicy,
+    TriggerPluginMessage, TriggerReady, TriggerStartCommand, TriggerStop, CURRENT_API_MAJOR,
+    REQUIRED_TRIGGER_PLUGIN_CAPABILITY, TRIGGER_KIND_BUILTIN, TRIGGER_KIND_EXTERNAL_PLUGIN,
 };
 pub use emission::TriggerEmission;

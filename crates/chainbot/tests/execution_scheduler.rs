@@ -1530,13 +1530,6 @@ fn runtime_execution_injects_default_confirmation_for_signed_plugin_operations()
                         key: "symbol".to_owned(),
                     },
                 },
-                VariableBinding {
-                    target: "signer_ref".to_owned(),
-                    source: VariableReference {
-                        namespace: RuntimeVariableNamespace::ManualInvocationInput,
-                        key: "signer_ref".to_owned(),
-                    },
-                },
             ],
             when: None,
             subflow: None,
@@ -1559,7 +1552,6 @@ fn runtime_execution_injects_default_confirmation_for_signed_plugin_operations()
             summary: Some("Submit signed payload".to_owned()),
             input_schema: vec![
                 "symbol".to_owned(),
-                "signer_ref".to_owned(),
                 "confirmation_mode".to_owned(),
             ],
             optional_input_schema: Vec::new(),
@@ -1590,10 +1582,6 @@ fn runtime_execution_injects_default_confirmation_for_signed_plugin_operations()
     request
         .manual_invocation_input
         .insert("symbol".to_owned(), json!("BTCUSDT"));
-    request
-        .manual_invocation_input
-        .insert("signer_ref".to_owned(), json!("wallet-hot"));
-
     let report = execution_plane
         .execute(&request)
         .expect("runtime should inject default confirmation mode for signed plugin operations");
@@ -1602,7 +1590,7 @@ fn runtime_execution_injects_default_confirmation_for_signed_plugin_operations()
     let captured_body =
         fs::read_to_string(&captured_request).expect("captured request should be readable");
     assert!(captured_body.contains("\"confirmation_mode\":\"safe\""));
-    assert!(captured_body.contains("\"signer_ref\":\"wallet-hot\""));
+    assert!(!captured_body.contains("\"signer_ref\""));
 }
 
 fn test_runtime_context() -> BuiltinRuntimeContext {

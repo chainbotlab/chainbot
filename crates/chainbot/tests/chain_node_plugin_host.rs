@@ -61,13 +61,7 @@ fn chain_node_runtime_injects_activation_secrets_and_redacts_failures() {
             operation: "eth_raw_write".to_owned(),
             depends_mode: DependsMode::All,
             depends_on: Vec::new(),
-            inputs: vec![VariableBinding {
-                target: "signer_ref".to_owned(),
-                source: VariableReference {
-                    namespace: RuntimeVariableNamespace::ManualInvocationInput,
-                    key: "signer_ref".to_owned(),
-                },
-            }],
+            inputs: Vec::new(),
             when: None,
             subflow: None,
         }],
@@ -87,7 +81,7 @@ fn chain_node_runtime_injects_activation_secrets_and_redacts_failures() {
         operations: vec![PluginOperationDescriptor {
             name: "eth_raw_write".to_owned(),
             summary: Some("Submit signed payload".to_owned()),
-            input_schema: vec!["signer_ref".to_owned(), "confirmation_mode".to_owned()],
+            input_schema: vec!["confirmation_mode".to_owned()],
             optional_input_schema: Vec::new(),
             output_schema: vec!["status".to_owned()],
             kind: PluginOperationKind::RawWrite,
@@ -95,7 +89,11 @@ fn chain_node_runtime_injects_activation_secrets_and_redacts_failures() {
             default_confirmation: Some("safe".to_owned()),
         }],
         event_schema: None,
-        activation: None,
+        activation: Some(chainbot::plugin::PluginActivationContract {
+            required_secret_slots: vec!["signer".to_owned()],
+            optional_secret_slots: Vec::new(),
+            requires_allowed_origins: false,
+        }),
         mcp: None,
         manifest_path: plugin_root.join("config.toml"),
     };
@@ -122,10 +120,7 @@ fn chain_node_runtime_injects_activation_secrets_and_redacts_failures() {
     )
     .expect("execution plane should build");
 
-    let mut request = NormalizedRunRequest::new("run-chain-node", "wf-chain-node");
-    request
-        .manual_invocation_input
-        .insert(String::from("signer_ref"), json!("signer"));
+    let request = NormalizedRunRequest::new("run-chain-node", "wf-chain-node");
 
     let report = execution_plane
         .execute(&request)
@@ -164,6 +159,10 @@ fn chain_node_runtime_injects_activation_secrets_and_redacts_failures() {
             .and_then(|value| value.get("confirmation_mode")),
         Some(&json!("safe"))
     );
+    assert!(captured_json
+        .get("input")
+        .and_then(|value| value.get("signer_ref"))
+        .is_none());
 }
 
 #[test]
