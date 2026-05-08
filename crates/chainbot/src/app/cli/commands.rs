@@ -41,7 +41,7 @@ use crate::domain::runtime::{NormalizedRunRequest, WorkflowRunStatus};
 use crate::domain::state::StagedTriggerEventRecord;
 use crate::domain::state::{RunRecordSummary, RunStatus, TriggerEventRecord};
 use crate::domain::trigger::{
-    TriggerDefinition, TriggerPluginHostPolicy, TriggerRunRequest,
+    TriggerDefinition, TriggerPluginActivationBindings, TriggerPluginHostPolicy, TriggerRunRequest,
     REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use crate::domain::workflow::WorkflowDefinition;
@@ -1017,14 +1017,20 @@ pub(crate) fn build_trigger_host_policy(
 
 fn trigger_plugin_activation_bindings(
     root_config: &RootConfigDefinition,
-) -> Result<BTreeMap<String, BTreeMap<String, SecretReference>>, ContractError> {
+) -> Result<BTreeMap<String, TriggerPluginActivationBindings>, ContractError> {
     let mut bindings = BTreeMap::new();
     for (plugin_id, activation) in &root_config.plugin_activation {
         let mut slots = BTreeMap::new();
         for (slot, secret_ref) in &activation.secret_bindings {
             slots.insert(slot.clone(), SecretReference::parse(secret_ref)?);
         }
-        bindings.insert(plugin_id.clone(), slots);
+        bindings.insert(
+            plugin_id.clone(),
+            TriggerPluginActivationBindings {
+                secret_bindings: slots,
+                allowed_origins: activation.allowed_origins.clone(),
+            },
+        );
     }
     Ok(bindings)
 }

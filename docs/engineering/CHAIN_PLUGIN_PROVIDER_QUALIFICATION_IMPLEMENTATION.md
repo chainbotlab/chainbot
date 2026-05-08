@@ -24,6 +24,10 @@
 - `CHAINBOT_SOLANA_NODE_LIVE_ENDPOINT`
 - `CHAINBOT_ETH_TRIGGER_LIVE_ENDPOINT`
 - `CHAINBOT_SOLANA_TRIGGER_LIVE_ENDPOINT`
+- optional: `CHAINBOT_ETH_TRIGGER_LIVE_ALLOWED_ORIGIN`
+- optional: `CHAINBOT_SOLANA_TRIGGER_LIVE_ALLOWED_ORIGIN`
+- optional: `CHAINBOT_ETH_TRIGGER_LIVE_RPC_TOKEN`
+- optional: `CHAINBOT_SOLANA_TRIGGER_LIVE_RPC_TOKEN`
 
 ## Operator Expectations
 
@@ -31,6 +35,8 @@
 - live qualification 不是默认 CI correctness gate。
 - deterministic local tests 仍然是主验收面。
 - provider credential 必须通过环境变量或 activation-secret-equivalent 注入，不能写进 curated examples。
+- node qualification 会走一次真实 `raw_read`，验证 endpoint health 和基础 JSON-RPC compatibility。
+- trigger qualification 会完成一次真实 trigger startup，并由本地 capture WebSocket 接住第一条 subscription request，验证公网 provider 配置和 activation contract 能一起完成启动。
 
 ## Notes
 

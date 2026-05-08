@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use crate::domain::trigger::TriggerDefinition;
+use crate::domain::trigger::{TriggerDefinition, TriggerKind};
 use crate::domain::workflow::WorkflowDefinition;
 use crate::errors::ContractError;
 use crate::infrastructure::config::RootConfigDefinition;
@@ -125,6 +125,22 @@ pub(crate) fn validate_bundle_contracts(
         }
     }
 
+    for trigger in triggers {
+        if trigger.kind()? != TriggerKind::ExternalPlugin {
+            continue;
+        }
+        let Some(plugin_id) = trigger.plugin.as_deref() else {
+            continue;
+        };
+        let Some(plugin) = plugin_manifest_by_id.get(plugin_id) else {
+            continue;
+        };
+        if plugin.kind()? != PluginKind::ExternalTrigger {
+            continue;
+        }
+        validate_trigger_activation_requirements(root_config, trigger, plugin)?;
+    }
+
     let _ = build_desired_ingress_state(triggers)?;
 
     Ok(())
@@ -227,6 +243,77 @@ fn validate_declared_activation_slots(
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_trigger_activation_requirements(
+    root_config: &RootConfigDefinition,
+    trigger: &TriggerDefinition,
+    plugin: &PluginManifest,
+) -> Result<(), ContractError> {
+    let Some(contract) = plugin.activation.as_ref() else {
+        return Ok(());
+    };
+    let activation = root_config.plugin_activation.get(&plugin.plugin_id);
+
+    if activation.is_none() {
+        if contract.required_secret_slots.is_empty() {
+            return Ok(());
+        }
+        return Err(ContractError::InvalidTriggerDefinitionField {
+            trigger_id: trigger.trigger_id.clone(),
+            field: "root_config.plugin_activation",
+            detail: format!(
+                "plugin `{}` requires plugin_activation with secret_bindings for slots: {}",
+                plugin.plugin_id,
+                contract.required_secret_slots.join(", ")
+            ),
+        });
+    }
+
+    let activation = activation.expect("checked above");
+    for slot in activation.secret_bindings.keys() {
+        let declared = contract
+            .required_secret_slots
+            .iter()
+            .chain(contract.optional_secret_slots.iter())
+            .any(|candidate| candidate == slot);
+        if !declared {
+            return Err(ContractError::InvalidTriggerDefinitionField {
+                trigger_id: trigger.trigger_id.clone(),
+                field: "root_config.plugin_activation.secret_bindings",
+                detail: format!(
+                    "plugin `{}` does not declare activation slot `{}`",
+                    plugin.plugin_id, slot
+                ),
+            });
+        }
+    }
+    for slot in &contract.required_secret_slots {
+        if !activation.secret_bindings.contains_key(slot) {
+            return Err(ContractError::InvalidTriggerDefinitionField {
+                trigger_id: trigger.trigger_id.clone(),
+                field: "root_config.plugin_activation.secret_bindings",
+                detail: format!(
+                    "plugin `{}` is missing required activation slot `{}`",
+                    plugin.plugin_id, slot
+                ),
+            });
+        }
+    }
+    if contract.requires_allowed_origins
+        && !activation.secret_bindings.is_empty()
+        && activation.allowed_origins.is_empty()
+    {
+        return Err(ContractError::InvalidTriggerDefinitionField {
+            trigger_id: trigger.trigger_id.clone(),
+            field: "root_config.plugin_activation.allowed_origins",
+            detail: format!(
+                "plugin `{}` requires allowed_origins whenever secret_bindings are configured",
+                plugin.plugin_id
+            ),
+        });
     }
     Ok(())
 }

@@ -5,6 +5,9 @@ entrypoint = "node.exec.v2"
 capabilities = ["node:execute"]
 executable = "bin/eth-node"
 
+[activation]
+required_secret_slots = ["signer"]
+
 [[operations]]
 name = "eth_get_balance"
 summary = "Read native account balance"
@@ -15,7 +18,7 @@ kind = "read"
 [[operations]]
 name = "eth_transfer_native"
 summary = "Transfer native ETH"
-input_schema = ["endpoint", "to", "amount", "signer_ref", "confirmation_mode", "preflight"]
+input_schema = ["endpoint", "to", "amount", "confirmation_mode", "preflight"]
 output_schema = ["status", "transaction_id", "metadata"]
 kind = "transfer"
 requires_managed_signing = true

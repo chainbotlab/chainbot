@@ -3,6 +3,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PluginActivationEnvelope {
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TriggerStartCommand {
     pub protocol_version: String,
@@ -12,6 +20,8 @@ pub struct TriggerStartCommand {
     pub params: BTreeMap<String, Value>,
     #[serde(default)]
     pub resume_checkpoint: Option<String>,
+    #[serde(default)]
+    pub activation: Option<PluginActivationEnvelope>,
     pub heartbeat_interval_ms: i64,
     pub shutdown_grace_ms: i64,
 }

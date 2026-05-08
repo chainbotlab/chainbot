@@ -5,6 +5,10 @@ entrypoint = "trigger.exec.v1"
 capabilities = ["trigger.listen.event"]
 executable = "bin/eth-trigger"
 
+[activation]
+optional_secret_slots = ["rpc_token"]
+requires_allowed_origins = true
+
 [trigger_runtime]
 lifecycle = "process_short_lived"
 push_callback = "inline_response"
