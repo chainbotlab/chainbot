@@ -34,3 +34,13 @@ summary = "Official Solana trigger toolkit plugin"
 plugin_id = "http-node"
 path = "official-plugins/http-node"
 summary = "Official outbound HTTP node plugin"
+
+[[plugins]]
+plugin_id = "binance-node"
+path = "official-plugins/binance-node"
+summary = "Official Binance REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "binance-trigger"
+path = "official-plugins/binance-trigger"
+summary = "Official Binance market and user-stream trigger plugin"

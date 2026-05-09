@@ -1,0 +1,160 @@
+manifest_version = "2.0.0"
+plugin_id = "binance-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/binance-node"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "binance_get_server_time"
+summary = "Read Binance server time"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["server_time"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_exchange_info"
+summary = "Read Binance exchange metadata"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "base_url"]
+output_schema = ["exchange_info"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_ticker"
+summary = "Read Binance 24hr ticker payload"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "base_url"]
+output_schema = ["ticker"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_depth"
+summary = "Read Binance order book depth"
+input_schema = ["product_line", "symbol"]
+optional_input_schema = ["environment", "limit", "base_url"]
+output_schema = ["depth"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_klines"
+summary = "Read Binance kline series"
+input_schema = ["product_line", "symbol", "interval"]
+optional_input_schema = ["environment", "start_time", "end_time", "limit", "base_url"]
+output_schema = ["klines"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_account"
+summary = "Read Binance account state"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "recv_window", "base_url"]
+output_schema = ["account"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_balances"
+summary = "Read Binance balances"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "recv_window", "base_url"]
+output_schema = ["balances"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_open_orders"
+summary = "Read Binance open orders"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "recv_window", "base_url"]
+output_schema = ["orders"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_order"
+summary = "Read a Binance order by symbol and identifier"
+input_schema = ["product_line", "symbol"]
+optional_input_schema = ["environment", "order_id", "orig_client_order_id", "recv_window", "base_url"]
+output_schema = ["order"]
+kind = "read"
+
+[[operations]]
+name = "binance_get_positions"
+summary = "Read Binance futures positions"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "recv_window", "base_url"]
+output_schema = ["positions"]
+kind = "read"
+
+[[operations]]
+name = "binance_place_order"
+summary = "Place a Binance order"
+input_schema = ["product_line", "symbol", "side", "type", "confirmation_mode"]
+optional_input_schema = ["environment", "quantity", "quote_order_qty", "price", "time_in_force", "client_order_id", "reduce_only", "position_side", "stop_price", "close_position", "working_type", "recv_window", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "binance_cancel_order"
+summary = "Cancel a Binance order"
+input_schema = ["product_line", "symbol", "confirmation_mode"]
+optional_input_schema = ["environment", "order_id", "orig_client_order_id", "recv_window", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "binance_cancel_all_orders"
+summary = "Cancel all open Binance orders for a symbol"
+input_schema = ["product_line", "symbol", "confirmation_mode"]
+optional_input_schema = ["environment", "recv_window", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "binance_create_user_stream"
+summary = "Create a Binance listenKey for user-data streams"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["status", "listen_key", "metadata"]
+kind = "raw_write"
+
+[[operations]]
+name = "binance_keepalive_user_stream"
+summary = "Extend a Binance listenKey lifetime"
+input_schema = ["product_line", "listen_key"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["status", "listen_key", "metadata"]
+kind = "raw_write"
+
+[[operations]]
+name = "binance_close_user_stream"
+summary = "Close a Binance listenKey"
+input_schema = ["product_line", "listen_key"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["status", "metadata"]
+kind = "raw_write"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/binance-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "binance_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/binance_node_official_plugin"
+to = "bin/binance-node"
