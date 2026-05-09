@@ -33,6 +33,7 @@ use crate::secrets::{
 #[derive(Debug, Clone)]
 struct ExternalTriggerPlugin {
     plugin_id: String,
+    manifest: PluginManifest,
     runtime: ExternalTriggerPluginRuntime,
 }
 
@@ -204,6 +205,7 @@ fn validate_trigger_plugin_manifest(
 
     Ok(ExternalTriggerPlugin {
         plugin_id: manifest.plugin_id.clone(),
+        manifest: manifest.clone(),
         runtime,
     })
 }
@@ -317,7 +319,7 @@ impl ExternalTriggerPlugin {
         };
 
         validate_existing_executable(&self.plugin_id, executable_path)?;
-        let activation = resolve_trigger_activation(definition, policy)?;
+        let activation = resolve_trigger_activation(&self.manifest, definition, policy)?;
 
         let input = TriggerHostMessage::Start(TriggerStartCommand {
             protocol_version: String::from("2.0.0"),
@@ -669,6 +671,7 @@ fn contract_now_ms(definition: &TriggerDefinition) -> Result<i64, ContractError>
 }
 
 fn resolve_trigger_activation(
+    manifest: &PluginManifest,
     definition: &TriggerDefinition,
     policy: &TriggerPluginHostPolicy,
 ) -> Result<ResolvedTriggerActivation, ContractError> {
@@ -676,9 +679,11 @@ fn resolve_trigger_activation(
         return Ok(ResolvedTriggerActivation::default());
     };
     let Some(bindings) = policy.plugin_activation.get(plugin_id) else {
+        enforce_required_trigger_activation(manifest, definition, plugin_id)?;
         return Ok(ResolvedTriggerActivation::default());
     };
     if bindings.secret_bindings.is_empty() && bindings.allowed_origins.is_empty() {
+        enforce_required_trigger_activation(manifest, definition, plugin_id)?;
         return Ok(ResolvedTriggerActivation::default());
     }
 
@@ -708,6 +713,37 @@ fn resolve_trigger_activation(
             allowed_origins: bindings.allowed_origins.clone(),
         }),
         resolved_values: secrets,
+    })
+}
+
+fn enforce_required_trigger_activation(
+    manifest: &PluginManifest,
+    definition: &TriggerDefinition,
+    plugin_id: &str,
+) -> Result<(), ContractError> {
+    let Some(contract) = manifest.activation.as_ref() else {
+        return Ok(());
+    };
+    let mut requirements = Vec::new();
+    if !contract.required_secret_slots.is_empty() {
+        requirements.push(format!(
+            "secret_bindings must provide required slots: {}",
+            contract.required_secret_slots.join(", ")
+        ));
+    }
+    if contract.requires_allowed_origins {
+        requirements.push("allowed_origins must be configured".to_owned());
+    }
+    if requirements.is_empty() {
+        return Ok(());
+    }
+    Err(ContractError::InvalidTriggerDefinitionField {
+        trigger_id: definition.trigger_id.clone(),
+        field: "root_config.plugin_activation",
+        detail: format!(
+            "plugin `{plugin_id}` requires plugin_activation because {}",
+            requirements.join("; ")
+        ),
     })
 }
 

@@ -172,7 +172,8 @@ fn validate_plugin_activation_requirements(
     let activation = root_config.plugin_activation.get(&plugin.plugin_id);
 
     if activation.is_none() {
-        if contract.required_secret_slots.is_empty() {
+        let requirement = describe_missing_activation_requirement(contract);
+        if requirement.is_none() {
             return Ok(());
         }
         return Err(ContractError::InvalidWorkflowNodeField {
@@ -180,25 +181,22 @@ fn validate_plugin_activation_requirements(
             node_id: node.node_id.clone(),
             field: "root_config.plugin_activation",
             detail: format!(
-                "plugin `{}` requires plugin_activation with secret_bindings for slots: {}",
+                "plugin `{}` requires plugin_activation because {requirement}",
                 plugin.plugin_id,
-                contract.required_secret_slots.join(", ")
+                requirement = requirement.expect("checked above")
             ),
         });
     }
 
     let activation = activation.expect("checked above");
     validate_declared_activation_slots(workflow, node, plugin, contract, activation)?;
-    if contract.requires_allowed_origins
-        && !activation.secret_bindings.is_empty()
-        && activation.allowed_origins.is_empty()
-    {
+    if contract.requires_allowed_origins && activation.allowed_origins.is_empty() {
         return Err(ContractError::InvalidWorkflowNodeField {
             workflow_id: workflow.workflow_id.clone(),
             node_id: node.node_id.clone(),
             field: "root_config.plugin_activation.allowed_origins",
             detail: format!(
-                "plugin `{}` requires allowed_origins whenever secret_bindings are configured",
+                "plugin `{}` requires allowed_origins",
                 plugin.plugin_id
             ),
         });
@@ -258,16 +256,17 @@ fn validate_trigger_activation_requirements(
     let activation = root_config.plugin_activation.get(&plugin.plugin_id);
 
     if activation.is_none() {
-        if contract.required_secret_slots.is_empty() {
+        let requirement = describe_missing_activation_requirement(contract);
+        if requirement.is_none() {
             return Ok(());
         }
         return Err(ContractError::InvalidTriggerDefinitionField {
             trigger_id: trigger.trigger_id.clone(),
             field: "root_config.plugin_activation",
             detail: format!(
-                "plugin `{}` requires plugin_activation with secret_bindings for slots: {}",
+                "plugin `{}` requires plugin_activation because {requirement}",
                 plugin.plugin_id,
-                contract.required_secret_slots.join(", ")
+                requirement = requirement.expect("checked above")
             ),
         });
     }
@@ -302,20 +301,35 @@ fn validate_trigger_activation_requirements(
             });
         }
     }
-    if contract.requires_allowed_origins
-        && !activation.secret_bindings.is_empty()
-        && activation.allowed_origins.is_empty()
-    {
+    if contract.requires_allowed_origins && activation.allowed_origins.is_empty() {
         return Err(ContractError::InvalidTriggerDefinitionField {
             trigger_id: trigger.trigger_id.clone(),
             field: "root_config.plugin_activation.allowed_origins",
             detail: format!(
-                "plugin `{}` requires allowed_origins whenever secret_bindings are configured",
+                "plugin `{}` requires allowed_origins",
                 plugin.plugin_id
             ),
         });
     }
     Ok(())
+}
+
+fn describe_missing_activation_requirement(contract: &PluginActivationContract) -> Option<String> {
+    let mut parts = Vec::new();
+    if !contract.required_secret_slots.is_empty() {
+        parts.push(format!(
+            "secret_bindings must provide required slots: {}",
+            contract.required_secret_slots.join(", ")
+        ));
+    }
+    if contract.requires_allowed_origins {
+        parts.push("allowed_origins must be configured".to_owned());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
 }
 
 fn validate_package_identity(

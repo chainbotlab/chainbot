@@ -132,6 +132,38 @@ fn external_node_plugin_v2_roundtrip() {
 }
 
 #[test]
+fn external_node_plugin_rejects_missing_required_activation_envelope() {
+    let root = unique_test_root("node-plugin-missing-activation-envelope");
+    let plugins_root = root.join("plugins");
+    let executable = plugins_root.join("bin").join("node_missing_activation.sh");
+    write_plugin_script(
+        &executable,
+        "{\"contract_version\":\"1.0.0\",\"success\":true,\"output\":{\"decision\":\"hold\"}}",
+        None,
+    );
+
+    let host = ExternalNodePluginHost::new(plugins_root);
+    let mut manifest = external_node_manifest("node-required-activation", "bin/node_missing_activation.sh");
+    manifest.activation = Some(chainbot::plugin::PluginActivationContract {
+        required_secret_slots: vec!["signer".to_owned()],
+        optional_secret_slots: Vec::new(),
+        requires_allowed_origins: false,
+    });
+    let request = valid_request("node-required-activation", "node-required-1");
+
+    let error = host
+        .execute(&manifest, &request)
+        .expect_err("missing activation envelope must fail closed");
+    assert!(matches!(
+        error,
+        ContractError::NodePluginProtocolContractViolation { plugin_id, detail }
+            if plugin_id == "node-required-activation"
+                && detail.contains("activation is required")
+                && detail.contains("required activation secret slots: signer")
+    ));
+}
+
+#[test]
 fn external_node_plugin_v2_rejects_mismatched_response_id() {
     let root = unique_test_root("node-plugin-v2-id-mismatch");
     let plugins_root = root.join("plugins");

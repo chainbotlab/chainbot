@@ -1198,7 +1198,30 @@ fn validate_activation_envelope(
     activation: Option<&PluginActivationEnvelope>,
 ) -> Result<(), ContractError> {
     let plugin_id = manifest.plugin_id.as_str();
+    let contract = manifest.activation.as_ref();
     let Some(activation) = activation else {
+        if let Some(contract) = contract {
+            let requires_secrets = !contract.required_secret_slots.is_empty();
+            if requires_secrets || contract.requires_allowed_origins {
+                let mut requirements = Vec::new();
+                if requires_secrets {
+                    requirements.push(format!(
+                        "required activation secret slots: {}",
+                        contract.required_secret_slots.join(", ")
+                    ));
+                }
+                if contract.requires_allowed_origins {
+                    requirements.push("allowed_origins".to_owned());
+                }
+                return Err(ContractError::NodePluginProtocolContractViolation {
+                    plugin_id: manifest.plugin_id.clone(),
+                    detail: format!(
+                        "activation is required for this plugin ({})",
+                        requirements.join("; ")
+                    ),
+                });
+            }
+        }
         return Ok(());
     };
     for (slot, value) in &activation.secrets {
@@ -1218,7 +1241,7 @@ fn validate_activation_envelope(
         )?;
     }
 
-    if let Some(contract) = manifest.activation.as_ref() {
+    if let Some(contract) = contract {
         for slot in activation.secrets.keys() {
             let mut declared = contract
                 .required_secret_slots

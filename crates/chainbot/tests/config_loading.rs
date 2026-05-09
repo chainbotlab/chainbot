@@ -536,6 +536,55 @@ fn plugin_activation_rejects_missing_required_secret_slot() {
 }
 
 #[test]
+fn trigger_activation_rejects_missing_plugin_activation_when_allowed_origins_are_required() {
+    let root = unique_test_root("trigger-activation-missing-plugin-activation");
+    fs::create_dir_all(root.join("workflows").join("wf-chain"))
+        .expect("workflow directory should be creatable");
+    fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
+    fs::create_dir_all(root.join("triggers").join("eth-live"))
+        .expect("trigger directory should be creatable");
+    fs::create_dir_all(root.join("plugins").join("eth-trigger"))
+        .expect("plugin directory should be creatable");
+    fs::create_dir_all(root.join("secrets")).expect("secrets directory should be creatable");
+    fs::create_dir_all(root.join("state")).expect("state directory should be creatable");
+
+    fs::write(
+        root.join("chainbot.toml"),
+        &format!(
+            "manifest_version = \"2.0.0\"\nchainbot_version = \"{}\"\nprofile = \"trigger-activation\"\n\n[storage]\nmode = \"local\"\n\n[storage.local]\ndatabase_path = \"state/runtime.sqlite3\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("root config should be writable");
+    fs::write(
+        root.join("workflows").join("wf-chain").join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-chain\"\nname = \"Chain Workflow\"\n",
+    )
+    .expect("workflow config should be writable");
+    fs::write(
+        root.join("triggers").join("eth-live").join("config.toml"),
+        "manifest_version = \"2.0.0\"\ntrigger_id = \"eth-live\"\nkind = \"external_plugin\"\nplugin = \"eth-trigger\"\nsource = \"eth_log\"\nworkflow_id = \"wf-chain\"\nenabled = true\n\n[params]\nendpoint = \"wss://rpc.example\"\n",
+    )
+    .expect("trigger config should be writable");
+    fs::write(
+        root.join("plugins").join("eth-trigger").join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"eth-trigger\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/trigger.sh\"\n\n[activation]\noptional_secret_slots = [\"rpc_token\"]\nrequires_allowed_origins = true\n\n[trigger_runtime]\nlifecycle = \"process_short_lived\"\npush_callback = \"inline_response\"\ndurable_ack = \"caller_scope\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\n\n[event_schema]\nsummary = \"Ethereum listener payload\"\nfields = [\"event_id\"]\n",
+    )
+    .expect("plugin config should be writable");
+
+    let error = load_root_definition_bundle(&RootLayout::from_root(root))
+        .expect_err("missing trigger plugin activation should fail root validation");
+    assert!(matches!(
+        error,
+        ContractError::InvalidTriggerDefinitionField {
+            field: "root_config.plugin_activation",
+            ref detail,
+            ..
+        } if detail.contains("allowed_origins must be configured")
+    ), "unexpected error: {error:?}");
+}
+
+#[test]
 fn legacy_builtin_http_authoring_is_rejected() {
     let root = unique_test_root("legacy-builtin-http-authoring");
     fs::create_dir_all(root.join("workflows").join("wf-http"))
