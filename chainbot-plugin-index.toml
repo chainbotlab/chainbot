@@ -46,6 +46,16 @@ path = "official-plugins/binance-trigger"
 summary = "Official Binance market and user-stream trigger plugin"
 
 [[plugins]]
+plugin_id = "hyperliquid-node"
+path = "official-plugins/hyperliquid-node"
+summary = "Official Hyperliquid info API node plugin"
+
+[[plugins]]
+plugin_id = "hyperliquid-trigger"
+path = "official-plugins/hyperliquid-trigger"
+summary = "Official Hyperliquid market-stream trigger plugin"
+
+[[plugins]]
 plugin_id = "okx-node"
 path = "official-plugins/okx-node"
 summary = "Official OKX REST node toolkit plugin"

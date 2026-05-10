@@ -1,0 +1,50 @@
+manifest_version = "2.0.0"
+plugin_id = "hyperliquid-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/hyperliquid-node"
+
+[activation]
+optional_secret_slots = ["origin_binding"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "hyperliquid_get_all_mids"
+summary = "Fetch all mids from Hyperliquid info API"
+input_schema = []
+optional_input_schema = ["dex", "base_url"]
+output_schema = ["all_mids"]
+kind = "read"
+
+[[operations]]
+name = "hyperliquid_get_l2_book"
+summary = "Fetch L2 book snapshot from Hyperliquid info API"
+input_schema = ["coin"]
+optional_input_schema = ["nSigFigs", "mantissa", "base_url"]
+output_schema = ["l2_book"]
+kind = "read"
+
+[[operations]]
+name = "hyperliquid_get_candle_snapshot"
+summary = "Fetch candle snapshot from Hyperliquid info API"
+input_schema = ["coin", "interval", "startTime", "endTime"]
+optional_input_schema = ["base_url"]
+output_schema = ["candles"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/hyperliquid-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "hyperliquid_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/hyperliquid_node_official_plugin"
+to = "bin/hyperliquid-node"
