@@ -19,6 +19,8 @@
 - `eth-node/`: Official Ethereum node toolkit reference implementation.
 - `eth-trigger/`: Official Ethereum trigger toolkit reference implementation.
 - `http-node/`: Official outbound HTTP node plugin reference implementation.
+- `okx-node/`: Official OKX REST node toolkit for public market data and private account balance reads.
+- `okx-trigger/`: Official OKX public market-stream and private account-stream trigger toolkit.
 - `solana-node/`: Official Solana node toolkit reference implementation.
 - `solana-trigger/`: Official Solana trigger toolkit reference implementation.
 
