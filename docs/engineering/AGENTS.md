@@ -23,3 +23,4 @@
 - `CHAINBOT_DB_PRIMARY_RUNTIME_IMPLEMENTATION.md`: Records the storage-mode schema extension and DB-primary runtime cut for CLI and trigger execution paths.
 - `CHAINBOT_RUNTIME_HISTORY_IMPLEMENTATION.md`: Records the observe command, runtime history retention/archive contract, and stable guardrail coverage for hot-path runtime reads.
 - `builtin-http-to-official-http-node-plugin-migration.md`: Records the migration of the builtin HTTP node to an official external HTTP node plugin, covering removal strategy, plugin packaging, catalog registration, and compatibility guardrails.
+- `CHAINBOT_HYPERLIQUID_OFFICIAL_PLUGINS_IMPLEMENTATION.md`: Records the Hyperliquid official plugin rollout, scope boundaries, package registration, and validation coverage.

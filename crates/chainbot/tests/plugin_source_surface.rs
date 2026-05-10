@@ -119,7 +119,7 @@ fn plugin_source_list_json_reports_official_chain_packages() {
     assert!(output.status.success());
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("plugin source list json should decode");
-    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(4));
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(6));
     assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
         .iter()
         .any(|plugin| plugin["plugin_id"] == "eth-node")));
@@ -132,6 +132,12 @@ fn plugin_source_list_json_reports_official_chain_packages() {
     assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
         .iter()
         .any(|plugin| plugin["plugin_id"] == "solana-trigger")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "hyperliquid-node")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "hyperliquid-trigger")));
 }
 
 #[test]
@@ -374,13 +380,20 @@ fn create_multi_plugin_repo(root: &Path) {
 
 fn create_official_chain_repo(root: &Path) {
     let _ = fs::remove_dir_all(root);
-    for plugin_id in ["eth-node", "eth-trigger", "solana-node", "solana-trigger"] {
+    for plugin_id in [
+        "eth-node",
+        "eth-trigger",
+        "solana-node",
+        "solana-trigger",
+        "hyperliquid-node",
+        "hyperliquid-trigger",
+    ] {
         fs::create_dir_all(root.join("official-plugins").join(plugin_id).join("bin"))
             .expect("official plugin directory should be creatable");
     }
     fs::write(
         root.join("chainbot-plugin-index.toml"),
-        "manifest_version = \"1.0.0\"\n\n[[plugins]]\nplugin_id = \"eth-node\"\npath = \"official-plugins/eth-node\"\nsummary = \"Official Ethereum node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"eth-trigger\"\npath = \"official-plugins/eth-trigger\"\nsummary = \"Official Ethereum trigger toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-node\"\npath = \"official-plugins/solana-node\"\nsummary = \"Official Solana node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-trigger\"\npath = \"official-plugins/solana-trigger\"\nsummary = \"Official Solana trigger toolkit plugin\"\n",
+        "manifest_version = \"1.0.0\"\n\n[[plugins]]\nplugin_id = \"eth-node\"\npath = \"official-plugins/eth-node\"\nsummary = \"Official Ethereum node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"eth-trigger\"\npath = \"official-plugins/eth-trigger\"\nsummary = \"Official Ethereum trigger toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-node\"\npath = \"official-plugins/solana-node\"\nsummary = \"Official Solana node toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"solana-trigger\"\npath = \"official-plugins/solana-trigger\"\nsummary = \"Official Solana trigger toolkit plugin\"\n\n[[plugins]]\nplugin_id = \"hyperliquid-node\"\npath = \"official-plugins/hyperliquid-node\"\nsummary = \"Official Hyperliquid info API node plugin\"\n\n[[plugins]]\nplugin_id = \"hyperliquid-trigger\"\npath = \"official-plugins/hyperliquid-trigger\"\nsummary = \"Official Hyperliquid market-stream trigger plugin\"\n",
     )
     .expect("source index should be writable");
     write_official_chain_node_plugin(
@@ -408,6 +421,31 @@ fn create_official_chain_repo(root: &Path) {
         "solana-trigger",
         "Solana trigger payload",
         &["chain", "listener_kind", "slot_ref", "event_id", "payload"],
+    );
+    write_official_market_data_node_plugin(
+        root.join("official-plugins").join("hyperliquid-node"),
+        "hyperliquid-node",
+        &[
+            ("hyperliquid_get_all_mids", &[], &["dex", "base_url"], "all_mids"),
+            (
+                "hyperliquid_get_l2_book",
+                &["coin"],
+                &["nSigFigs", "mantissa", "base_url"],
+                "l2_book",
+            ),
+            (
+                "hyperliquid_get_candle_snapshot",
+                &["coin", "interval", "startTime", "endTime"],
+                &["base_url"],
+                "candles",
+            ),
+        ],
+    );
+    write_official_market_trigger_plugin(
+        root.join("official-plugins").join("hyperliquid-trigger"),
+        "hyperliquid-trigger",
+        "Hyperliquid market listener payload",
+        &["exchange", "listener_kind", "channel", "coin", "event_id", "payload"],
     );
     init_git_repo(root);
 }
@@ -468,6 +506,65 @@ fn write_official_chain_trigger_plugin(
     )
     .expect("trigger executable should be writable");
     set_executable(&root.join("bin").join("external_trigger.sh"));
+}
+
+fn write_official_market_data_node_plugin(
+    root: PathBuf,
+    plugin_id: &str,
+    operations: &[(&str, &[&str], &[&str], &str)],
+) {
+    let operations_block = operations
+        .iter()
+        .map(|(name, required_inputs, optional_inputs, output)| {
+            let required = required_inputs
+                .iter()
+                .map(|field| format!("\"{field}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let optional = optional_inputs
+                .iter()
+                .map(|field| format!("\"{field}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "[[operations]]\nname = \"{name}\"\nsummary = \"{name}\"\ninput_schema = [{required}]\noptional_input_schema = [{optional}]\noutput_schema = [\"{output}\"]\nkind = \"read\"\n"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        root.join("config.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nplugin_id = \"{plugin_id}\"\nkind = \"external_node\"\nentrypoint = \"node.exec.v2\"\ncapabilities = [\"node:execute\"]\nexecutable = \"bin/hyperliquid-node\"\n\n[activation]\noptional_secret_slots = [\"origin_binding\"]\nrequires_allowed_origins = true\n\n{operations_block}\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"bin/hyperliquid-node\"\nrelease_version = \"0.1.0\"\n"
+        ),
+    )
+    .expect("plugin config should be writable");
+    fs::write(root.join("bin").join("hyperliquid-node"), "#!/bin/sh\necho '{}'\n")
+        .expect("plugin executable should be writable");
+    set_executable(&root.join("bin").join("hyperliquid-node"));
+}
+
+fn write_official_market_trigger_plugin(
+    root: PathBuf,
+    plugin_id: &str,
+    summary: &str,
+    fields: &[&str],
+) {
+    let quoted_fields = fields
+        .iter()
+        .map(|field| format!("\"{field}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    fs::write(
+        root.join("config.toml"),
+        format!(
+            "manifest_version = \"2.0.0\"\nplugin_id = \"{plugin_id}\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\nexecutable = \"bin/hyperliquid-trigger\"\n\n[activation]\noptional_secret_slots = [\"origin_binding\"]\nrequires_allowed_origins = true\n\n[trigger_runtime]\nlifecycle = \"process_short_lived\"\npush_callback = \"inline_response\"\ndurable_ack = \"caller_scope\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\n\n[event_schema]\nsummary = \"{summary}\"\nfields = [{quoted_fields}]\nlistener_modes = [\"event_log\", \"state_change\"]\n\n[source]\nmanifest_version = \"1.0.0\"\ninstall_mode = \"direct\"\nruntime = \"bin\"\nentry_artifact = \"bin/hyperliquid-trigger\"\nrelease_version = \"0.1.0\"\n"
+        ),
+    )
+    .expect("trigger config should be writable");
+    fs::write(root.join("bin").join("hyperliquid-trigger"), "#!/bin/sh\nexit 0\n")
+        .expect("trigger executable should be writable");
+    set_executable(&root.join("bin").join("hyperliquid-trigger"));
 }
 
 fn create_mcp_http_repo_with_raw_source_entry_artifact(root: &Path) {

@@ -18,6 +18,8 @@
 - `echo-official-plugin/`: Direct-install reference package for source discovery and activation.
 - `eth-node/`: Official Ethereum node toolkit reference implementation.
 - `eth-trigger/`: Official Ethereum trigger toolkit reference implementation.
+- `hyperliquid-node/`: Official Hyperliquid info API node toolkit for read-only market data operations.
+- `hyperliquid-trigger/`: Official Hyperliquid market-stream trigger toolkit for trades and L2 book events.
 - `http-node/`: Official outbound HTTP node plugin reference implementation.
 - `solana-node/`: Official Solana node toolkit reference implementation.
 - `solana-trigger/`: Official Solana trigger toolkit reference implementation.

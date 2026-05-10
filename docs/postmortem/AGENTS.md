@@ -13,6 +13,7 @@
 
 ## Members
 - `AGENTS.md`: Folder manifest for postmortem naming, retained structure, and writing triggers.
+- `20260511-hyperliquid-node-origin-binding-not-enforced-en.md`: Records the pre-ship Hyperliquid node bug where manifest-declared origin binding was not enforced at runtime.
 
 ## Review Triggers
 - Add or update a postmortem when debugging takes non-trivial effort, reveals a broken assumption, or yields safeguards that should be reused.
