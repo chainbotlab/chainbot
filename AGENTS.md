@@ -24,6 +24,7 @@ docs/
 - `crates/AGENTS.md`: Workspace member inventory.
 - `crates/chainbot/AGENTS.md`: `chainbot` crate boundary and test surface.
 - `crates/chainbot/src/AGENTS.md`: Frozen source-tree module map and root Rust file constraints.
+- `official-plugins/AGENTS.md`: Official plugin package inventory and local source-package constraints.
 - `docs/postmortem/AGENTS.md`: Postmortem naming rules, retained structure, and writing triggers.
 
 ## Crates

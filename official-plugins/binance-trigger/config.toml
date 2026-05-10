@@ -1,0 +1,37 @@
+manifest_version = "2.0.0"
+plugin_id = "binance-trigger"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+executable = "bin/binance-trigger"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret"]
+requires_allowed_origins = true
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "Binance listener payload"
+fields = ["exchange", "product_line", "listener_kind", "stream", "event_id", "payload"]
+listener_modes = ["event_log", "state_change"]
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/binance-trigger"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "binance_trigger_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/binance_trigger_official_plugin"
+to = "bin/binance-trigger"
