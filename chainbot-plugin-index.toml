@@ -44,3 +44,13 @@ summary = "Official Binance REST node toolkit plugin"
 plugin_id = "binance-trigger"
 path = "official-plugins/binance-trigger"
 summary = "Official Binance market and user-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "okx-node"
+path = "official-plugins/okx-node"
+summary = "Official OKX REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "okx-trigger"
+path = "official-plugins/okx-trigger"
+summary = "Official OKX market and private-stream trigger plugin"
