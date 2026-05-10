@@ -21,6 +21,8 @@
 - `hyperliquid-node/`: Official Hyperliquid info API node toolkit for read-only market data operations.
 - `hyperliquid-trigger/`: Official Hyperliquid market-stream trigger toolkit for trades and L2 book events.
 - `http-node/`: Official outbound HTTP node plugin reference implementation.
+- `okx-node/`: Official OKX REST node toolkit for public market data and private account balance reads.
+- `okx-trigger/`: Official OKX public market-stream and private account-stream trigger toolkit.
 - `solana-node/`: Official Solana node toolkit reference implementation.
 - `solana-trigger/`: Official Solana trigger toolkit reference implementation.
 

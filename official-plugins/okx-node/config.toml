@@ -1,0 +1,58 @@
+manifest_version = "2.0.0"
+plugin_id = "okx-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/okx-node"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret", "passphrase"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "okx_get_server_time"
+summary = "Read OKX server time"
+input_schema = ["inst_type"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["server_time"]
+kind = "read"
+
+[[operations]]
+name = "okx_get_instruments"
+summary = "Read OKX instruments"
+input_schema = ["inst_type"]
+optional_input_schema = ["environment", "base_url", "inst_family", "inst_id"]
+output_schema = ["instruments"]
+kind = "read"
+
+[[operations]]
+name = "okx_get_ticker"
+summary = "Read OKX ticker payload"
+input_schema = ["inst_type", "inst_id"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["ticker"]
+kind = "read"
+
+[[operations]]
+name = "okx_get_account_balance"
+summary = "Read OKX account balances"
+input_schema = ["inst_type"]
+optional_input_schema = ["environment", "base_url", "ccy"]
+output_schema = ["balances"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/okx-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "okx_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/okx_node_official_plugin"
+to = "bin/okx-node"
