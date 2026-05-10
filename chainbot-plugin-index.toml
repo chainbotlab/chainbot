@@ -64,3 +64,13 @@ summary = "Official OKX REST node toolkit plugin"
 plugin_id = "okx-trigger"
 path = "official-plugins/okx-trigger"
 summary = "Official OKX market and private-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "aster-node"
+path = "official-plugins/aster-node"
+summary = "Official Aster public REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "aster-trigger"
+path = "official-plugins/aster-trigger"
+summary = "Official Aster public market-stream trigger plugin"

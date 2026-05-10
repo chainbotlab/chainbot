@@ -12,6 +12,8 @@
 - External node packages must honor the `node.exec.v2` request/response contract. External trigger packages must honor the `trigger.exec.v1` start/ready/event protocol.
 
 ## Members
+- `aster-node/`: Official Aster public REST node toolkit reference implementation.
+- `aster-trigger/`: Official Aster public market-stream trigger toolkit.
 - `binance-node/`: Official Binance REST node toolkit for spot, USDⓈ-M, and COIN-M operations.
 - `binance-trigger/`: Official Binance market-stream and user-stream trigger toolkit.
 - `build-official-plugin/`: Build-required reference package for source install flow.
