@@ -1,0 +1,136 @@
+manifest_version = "2.0.0"
+plugin_id = "bybit-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/bybit-node"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "bybit_get_server_time"
+summary = "Read Bybit server time"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["server_time"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_exchange_info"
+summary = "Read Bybit instrument metadata"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "base_url"]
+output_schema = ["exchange_info"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_ticker"
+summary = "Read Bybit ticker"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "base_url"]
+output_schema = ["ticker"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_depth"
+summary = "Read Bybit order book depth"
+input_schema = ["product_line", "symbol"]
+optional_input_schema = ["environment", "limit", "base_url"]
+output_schema = ["depth"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_klines"
+summary = "Read Bybit kline series"
+input_schema = ["product_line", "symbol", "interval"]
+optional_input_schema = ["environment", "start_time", "end_time", "limit", "base_url"]
+output_schema = ["klines"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_account"
+summary = "Read Bybit account state"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "recv_window", "base_url"]
+output_schema = ["account"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_balances"
+summary = "Read Bybit wallet balances"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "recv_window", "base_url"]
+output_schema = ["balances"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_open_orders"
+summary = "Read Bybit open orders"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "recv_window", "base_url"]
+output_schema = ["orders"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_order"
+summary = "Read a Bybit order"
+input_schema = ["product_line", "symbol"]
+optional_input_schema = ["environment", "order_id", "order_link_id", "recv_window", "base_url"]
+output_schema = ["order"]
+kind = "read"
+
+[[operations]]
+name = "bybit_get_positions"
+summary = "Read Bybit positions"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "settle_coin", "recv_window", "base_url"]
+output_schema = ["positions"]
+kind = "read"
+
+[[operations]]
+name = "bybit_place_order"
+summary = "Place a Bybit order"
+input_schema = ["product_line", "symbol", "side", "type", "qty", "confirmation_mode"]
+optional_input_schema = ["environment", "price", "time_in_force", "order_link_id", "reduce_only", "recv_window", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "bybit_cancel_order"
+summary = "Cancel a Bybit order"
+input_schema = ["product_line", "symbol", "confirmation_mode"]
+optional_input_schema = ["environment", "order_id", "order_link_id", "recv_window", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "bybit_cancel_all_orders"
+summary = "Cancel all Bybit open orders"
+input_schema = ["product_line", "confirmation_mode"]
+optional_input_schema = ["environment", "symbol", "settle_coin", "base_coin", "recv_window", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/bybit-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "bybit_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/bybit_node_official_plugin"
+to = "bin/bybit-node"
