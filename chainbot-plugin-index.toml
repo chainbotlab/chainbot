@@ -41,9 +41,19 @@ path = "official-plugins/binance-node"
 summary = "Official Binance REST node toolkit plugin"
 
 [[plugins]]
+plugin_id = "bybit-node"
+path = "official-plugins/bybit-node"
+summary = "Official Bybit v5 REST node toolkit plugin"
+
+[[plugins]]
 plugin_id = "binance-trigger"
 path = "official-plugins/binance-trigger"
 summary = "Official Binance market and user-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "bybit-trigger"
+path = "official-plugins/bybit-trigger"
+summary = "Official Bybit market and private user-stream trigger plugin"
 
 [[plugins]]
 plugin_id = "hyperliquid-node"
