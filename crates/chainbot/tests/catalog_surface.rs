@@ -478,6 +478,61 @@ fields = ["exchange", "listener_kind", "channel", "coin", "event_id", "payload"]
 listener_modes = ["event_log", "state_change"]
 "#,
             ),
+            (
+                "gate-node",
+                r#"manifest_version = "2.0.0"
+plugin_id = "gate-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/plugin.sh"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "gate_get_server_time"
+summary = "Get Gate server time"
+input_schema = []
+output_schema = ["server_time"]
+kind = "raw_read"
+
+[[operations]]
+name = "gate_place_order"
+summary = "Place Gate spot order"
+input_schema = ["currency_pair", "side", "amount", "price", "confirmation_mode"]
+output_schema = ["status", "order_id"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+"#,
+            ),
+            (
+                "gate-trigger",
+                r#"manifest_version = "2.0.0"
+plugin_id = "gate-trigger"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+executable = "bin/external_trigger.sh"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret"]
+requires_allowed_origins = true
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "Gate trigger payload"
+fields = ["exchange", "product_line", "listener_kind", "stream", "event_id", "payload"]
+listener_modes = ["event_log", "state_change"]
+"#,
+            ),
         ],
     );
 
@@ -490,7 +545,7 @@ listener_modes = ["event_log", "state_change"]
     assert!(list_output.status.success());
     let payload = serde_json::from_slice::<serde_json::Value>(&list_output.stdout)
         .expect("catalog list json should decode");
-    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(4));
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(6));
     assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
         .iter()
         .any(|plugin| plugin["plugin_id"] == "eth-node")));
@@ -503,6 +558,12 @@ listener_modes = ["event_log", "state_change"]
     assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
         .iter()
         .any(|plugin| plugin["plugin_id"] == "hyperliquid-trigger")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "gate-node")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "gate-trigger")));
 
     let show_output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", &root)
@@ -528,6 +589,26 @@ listener_modes = ["event_log", "state_change"]
         show_payload["detail"]["operations"][1]["default_confirmation"],
         "safe"
     );
+
+    let gate_show_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:gate-node", "--json"])
+        .output()
+        .expect("catalog show gate node should execute");
+    assert!(gate_show_output.status.success());
+    let gate_show_payload = serde_json::from_slice::<serde_json::Value>(&gate_show_output.stdout)
+        .expect("catalog show gate node json should decode");
+    assert_eq!(gate_show_payload["detail"]["plugin_kind"], "external_node");
+    assert!(gate_show_payload["detail"]["operations"]
+        .as_array()
+        .is_some_and(|operations| operations
+            .iter()
+            .any(|operation| operation["name"] == "gate_place_order" && operation["kind"] == "raw_write")));
+    assert!(gate_show_payload["detail"]["operations"]
+        .as_array()
+        .is_some_and(|operations| operations
+            .iter()
+            .any(|operation| operation["name"] == "gate_place_order" && operation["requires_managed_signing"] == true && operation["default_confirmation"] == "safe")));
 
     let trigger_show_output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", &root)
@@ -590,6 +671,26 @@ listener_modes = ["event_log", "state_change"]
     assert_eq!(
         hyperliquid_trigger_payload["detail"]["event_schema"]["fields"][2],
         "channel"
+    );
+
+    let gate_trigger_show_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:gate-trigger", "--json"])
+        .output()
+        .expect("catalog show gate trigger should execute");
+    assert!(gate_trigger_show_output.status.success());
+    let gate_trigger_payload =
+        serde_json::from_slice::<serde_json::Value>(&gate_trigger_show_output.stdout)
+            .expect("catalog show gate trigger json should decode");
+    assert_eq!(gate_trigger_payload["detail"]["plugin_kind"], "external_trigger");
+    assert_eq!(gate_trigger_payload["detail"]["event_schema"]["fields"][0], "exchange");
+    assert_eq!(
+        gate_trigger_payload["detail"]["event_schema"]["listener_modes"][0],
+        "event_log"
+    );
+    assert_eq!(
+        gate_trigger_payload["detail"]["event_schema"]["listener_modes"][1],
+        "state_change"
     );
 }
 

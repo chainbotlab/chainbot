@@ -22,7 +22,8 @@ use chainbot::domain::workflow::{
 };
 use chainbot::plugin::{
     PluginManifest, PluginOperationDescriptor, PluginOperationKind,
-    EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, NODE_PLUGIN_EXECUTE_CAPABILITY, PLUGIN_KIND_EXTERNAL_NODE,
+    EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, EXTERNAL_NODE_ENTRYPOINT_EXEC_V2,
+    NODE_PLUGIN_EXECUTE_CAPABILITY, PLUGIN_KIND_EXTERNAL_NODE,
 };
 use chainbot::secrets::SecretReference;
 use serde_json::json;
@@ -326,6 +327,150 @@ fn chain_node_runtime_executes_http_node_with_allowed_origins_activation() {
     );
 }
 
+#[test]
+fn chain_node_runtime_executes_gate_node_with_activation_bindings() {
+    let root = unique_test_root("gate-node-activation-runtime");
+    let plugins_root = root.join("plugins");
+    let secrets_root = root.join("secrets");
+    let plugin_root = plugins_root.join("gate-node");
+    let captured_request = root.join("captured-gate-request.json");
+    let executable = plugin_root.join("bin").join("node.sh");
+    write_plugin_script(
+        &executable,
+        &format!(
+            "#!/bin/sh\ncat > \"{}\"\nprintf '%s' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"contract_version\":\"1.0.0\",\"output\":{{\"accounts\":[{{\"currency\":\"BTC\",\"available\":\"1.0\"}}]}}}}}}'\n",
+            captured_request.display()
+        ),
+    );
+    write_gate_secret_file(&secrets_root, "api_key_slot", "gate-api-key");
+    write_gate_secret_file(&secrets_root, "api_secret_slot", "gate-api-secret");
+
+    let workflow = WorkflowDefinition {
+        api_version: "2.0.0".to_owned(),
+        workflow_id: "wf-gate-node".to_owned(),
+        name: "wf-gate-node".to_owned(),
+        runtime: RuntimeVariableLayers::default(),
+        nodes: vec![NodeDefinition {
+            api_version: "2.0.0".to_owned(),
+            node_id: "place-order".to_owned(),
+            kind: "plugin".to_owned(),
+            plugin_id: "gate-node".to_owned(),
+            operation: "gate_get_accounts".to_owned(),
+            depends_mode: DependsMode::All,
+            depends_on: Vec::new(),
+            inputs: Vec::new(),
+            when: None,
+            subflow: None,
+        }],
+        package_root: PathBuf::new(),
+    };
+
+    let manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "gate-node".to_owned(),
+        kind: PLUGIN_KIND_EXTERNAL_NODE.to_owned(),
+        entrypoint: EXTERNAL_NODE_ENTRYPOINT_EXEC_V2.to_owned(),
+        capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
+        executable: Some("bin/node.sh".to_owned()),
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        trigger_runtime: None,
+        operations: vec![PluginOperationDescriptor {
+            name: "gate_get_accounts".to_owned(),
+            summary: Some("Get Gate spot accounts".to_owned()),
+            input_schema: Vec::new(),
+            optional_input_schema: Vec::new(),
+            output_schema: vec!["accounts".to_owned()],
+            kind: PluginOperationKind::Read,
+            requires_managed_signing: false,
+            default_confirmation: None,
+        }],
+        event_schema: None,
+        activation: Some(chainbot::plugin::PluginActivationContract {
+            required_secret_slots: Vec::new(),
+            optional_secret_slots: vec!["api_key".to_owned(), "api_secret".to_owned()],
+            requires_allowed_origins: true,
+        }),
+        mcp: None,
+        manifest_path: plugin_root.join("config.toml"),
+    };
+
+    let execution_plane = ExecutionPlane::with_plugin_runtime(
+        vec![workflow],
+        BTreeMap::new(),
+        BuiltinNodeRegistry::with_test_handlers(),
+        vec![manifest],
+        BTreeMap::from([(
+            String::from("gate-node"),
+            PluginActivationRuntime {
+                secret_bindings: BTreeMap::from([
+                    (
+                        String::from("api_key"),
+                        SecretReference::parse("secret://providers/gate/mainnet#api_key_slot")
+                            .expect("secret ref should parse"),
+                    ),
+                    (
+                        String::from("api_secret"),
+                        SecretReference::parse("secret://providers/gate/mainnet#api_secret_slot")
+                            .expect("secret ref should parse"),
+                    ),
+                ]),
+                allowed_origins: vec![String::from("https://api.gateio.ws")],
+            },
+        )]),
+        plugins_root,
+        secrets_root,
+        SecretDecryptMode::Plaintext,
+    )
+    .expect("execution plane should build");
+
+    let request = NormalizedRunRequest::new("run-gate-node", "wf-gate-node");
+
+    let report = execution_plane
+        .execute(&request)
+        .expect("gate-node workflow should execute");
+    assert!(
+        report.node_failures.is_empty(),
+        "unexpected gate-node failures: {:?}",
+        report.node_failures
+    );
+    assert_eq!(
+        report.status,
+        chainbot::domain::runtime::WorkflowRunStatus::Succeeded
+    );
+
+    let captured_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&captured_request).expect("captured request should exist"),
+    )
+    .expect("captured request should decode");
+    assert_eq!(captured_json.get("jsonrpc"), Some(&json!("2.0")));
+    assert_eq!(captured_json.get("id"), Some(&json!(1)));
+    assert_eq!(captured_json.get("method"), Some(&json!("node.execute")));
+    assert_eq!(
+        captured_json
+            .get("params")
+            .and_then(|value| value.get("activation"))
+            .and_then(|value| value.get("allowed_origins")),
+        Some(&json!(["https://api.gateio.ws"]))
+    );
+    assert_eq!(
+        captured_json
+            .get("params")
+            .and_then(|value| value.get("activation"))
+            .and_then(|value| value.get("secrets"))
+            .and_then(|value| value.get("api_key")),
+        Some(&json!("gate-api-key"))
+    );
+    assert_eq!(
+        captured_json
+            .get("params")
+            .and_then(|value| value.get("activation"))
+            .and_then(|value| value.get("secrets"))
+            .and_then(|value| value.get("api_secret")),
+        Some(&json!("gate-api-secret"))
+    );
+}
+
 fn write_plugin_script(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("plugin script parent should be creatable");
@@ -355,6 +500,21 @@ fn write_plaintext_secret(root: &Path, secret_ref: &str, value: &str) {
         _ => format!("{value}\n"),
     };
     fs::write(path, payload).expect("secret should be writable");
+}
+
+fn write_gate_secret_file(root: &Path, key: &str, value: &str) {
+    let path = root.join("providers").join("gate").join("mainnet.gpg");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("gate secret parent should be creatable");
+    }
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("gate secret should be writable");
+    file.write_all(format!("{key}={value}\n").as_bytes())
+        .expect("gate secret should be appendable");
 }
 
 fn unique_test_root(prefix: &str) -> PathBuf {

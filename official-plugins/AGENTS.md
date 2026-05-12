@@ -16,6 +16,7 @@
 - `aster-trigger/`: Official Aster public market-stream trigger toolkit.
 - `binance-node/`: Official Binance REST node toolkit for spot, USDⓈ-M, and COIN-M operations.
 - `bybit-node/`: Official Bybit v5 REST node toolkit for spot, linear, inverse, and option operations.
+- `gate-node/`: Official Gate REST node toolkit for spot operations.
 - `binance-trigger/`: Official Binance market-stream and user-stream trigger toolkit.
 - `bitget-node/`: Official Bitget REST node toolkit for spot and futures operations.
 - `bitget-trigger/`: Official Bitget market-stream and user-stream trigger toolkit.
@@ -26,6 +27,7 @@
 - `eth-trigger/`: Official Ethereum trigger toolkit reference implementation.
 - `hyperliquid-node/`: Official Hyperliquid info API node toolkit for read-only market data operations.
 - `hyperliquid-trigger/`: Official Hyperliquid market-stream trigger toolkit for trades and L2 book events.
+- `gate-trigger/`: Official Gate spot market-stream and user-stream trigger toolkit.
 - `http-node/`: Official outbound HTTP node plugin reference implementation.
 - `okx-node/`: Official OKX REST node toolkit for public market data and private account balance reads.
 - `okx-trigger/`: Official OKX public market-stream and private account-stream trigger toolkit.

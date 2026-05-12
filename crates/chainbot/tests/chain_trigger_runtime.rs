@@ -19,6 +19,7 @@ use chainbot::domain::trigger::{
 };
 use chainbot::plugin::{
     ExternalTriggerRuntimeContract, PluginEventSchemaDescriptor, PluginManifest,
+    PluginTriggerListenerMode,
     TriggerDurableAckSemantics, TriggerHostErrorCategory, TriggerPushCallbackSemantics,
     TriggerRuntimeLifecycle,
 };
@@ -265,6 +266,153 @@ fn chain_trigger_runtime_rejects_missing_required_allowed_origins_activation() {
 }
 
 #[test]
+fn chain_trigger_runtime_injects_gate_activation_secrets_into_start_message() {
+    let previous_secret_mode = std::env::var_os("CHAINBOT_SECRET_DECRYPTOR");
+    unsafe {
+        std::env::set_var("CHAINBOT_SECRET_DECRYPTOR", "plaintext");
+    }
+
+    let root = unique_test_root("gate-trigger-activation-runtime");
+    let plugin_root = root.join("plugins");
+    let secrets_root = root.join("secrets");
+    let capture_path = root.join("captured-gate-start.json");
+    let executable = plugin_root
+        .join("gate-trigger")
+        .join("bin")
+        .join("trigger.sh");
+    write_script(
+        &executable,
+        &format!(
+            "#!/bin/sh\nIFS= read -r line\nprintf '%s' \"$line\" > \"{}\"\nprintf '%s\\n' '{{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}}'\n",
+            capture_path.display()
+        ),
+    );
+    write_gate_secret_file(&secrets_root, "api_key_slot", "gate-live-api-key");
+    write_gate_secret_file(&secrets_root, "api_secret_slot", "gate-live-api-secret");
+
+    let manifest = PluginManifest {
+        api_version: "2.0.0".to_owned(),
+        plugin_id: "gate-trigger".to_owned(),
+        kind: "external_trigger".to_owned(),
+        entrypoint: "trigger.exec.v1".to_owned(),
+        capabilities: vec![REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()],
+        executable: Some("bin/trigger.sh".to_owned()),
+        input_schema: Vec::new(),
+        output_schema: Vec::new(),
+        trigger_runtime: Some(ExternalTriggerRuntimeContract {
+            lifecycle: Some(TriggerRuntimeLifecycle::ProcessShortLived),
+            push_callback: Some(TriggerPushCallbackSemantics::InlineResponse),
+            durable_ack: Some(TriggerDurableAckSemantics::CallerScope),
+            host_error_categories: vec![
+                TriggerHostErrorCategory::Transport,
+                TriggerHostErrorCategory::ProtocolContract,
+                TriggerHostErrorCategory::PluginFatal,
+            ],
+            module: None,
+        }),
+        operations: Vec::new(),
+        event_schema: Some(PluginEventSchemaDescriptor {
+            summary: Some("Gate trigger payload".to_owned()),
+            fields: vec!["event_id".to_owned()],
+            listener_modes: vec![PluginTriggerListenerMode::EventLog],
+        }),
+        activation: Some(chainbot::plugin::PluginActivationContract {
+            required_secret_slots: Vec::new(),
+            optional_secret_slots: vec!["api_key".to_owned(), "api_secret".to_owned()],
+            requires_allowed_origins: true,
+        }),
+        mcp: None,
+        manifest_path: plugin_root.join("gate-trigger").join("config.toml"),
+    };
+    let definition = TriggerDefinition {
+        api_version: "2.0.0".to_owned(),
+        trigger_id: "gate-live".to_owned(),
+        kind: "external_plugin".to_owned(),
+        source: "gate_spot_user_stream".to_owned(),
+        plugin: Some("gate-trigger".to_owned()),
+        workflow_id: "wf-gate".to_owned(),
+        enabled: true,
+        params: BTreeMap::from([
+            (
+                String::from("endpoint"),
+                serde_json::json!("wss://api.gateio.ws/ws/v4/"),
+            ),
+            (
+                String::from("channel"),
+                serde_json::json!("spot.orders"),
+            ),
+        ]),
+        input_mapping: BTreeMap::new(),
+        package_root: PathBuf::new(),
+    };
+    let state_layout =
+        chainbot::infrastructure::state::StateLayout::from_state_root(root.join("state"));
+    let policy = TriggerPluginHostPolicy {
+        allowlisted_plugin_ids: BTreeSet::from([String::from("gate-trigger")]),
+        allowed_capabilities: BTreeSet::from([REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()]),
+        plugin_root_dir: plugin_root.clone(),
+        plugin_activation: BTreeMap::from([(
+            String::from("gate-trigger"),
+            TriggerPluginActivationBindings {
+                secret_bindings: BTreeMap::from([
+                    (
+                        String::from("api_key"),
+                        SecretReference::parse("secret://providers/gate/mainnet#api_key_slot")
+                            .expect("secret ref should parse"),
+                    ),
+                    (
+                        String::from("api_secret"),
+                        SecretReference::parse("secret://providers/gate/mainnet#api_secret_slot")
+                            .expect("secret ref should parse"),
+                    ),
+                ]),
+                allowed_origins: vec![String::from("wss://api.gateio.ws")],
+            },
+        )]),
+        secrets_root_dir: secrets_root,
+    };
+
+    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
+        state_layout,
+        vec![definition],
+        vec![manifest],
+        policy,
+        BTreeMap::new(),
+        1_710_100_000_000,
+    )
+    .expect("trigger plane should open");
+
+    let _ = plane
+        .collect_run_requests(1_710_100_000_010)
+        .expect("collect_run_requests should succeed");
+
+    let captured_activation = captured_start_activation(&capture_path);
+    assert_eq!(
+        captured_activation
+            .get("secrets")
+            .and_then(|value| value.get("api_key")),
+        Some(&serde_json::json!("gate-live-api-key"))
+    );
+    assert_eq!(
+        captured_activation
+            .get("secrets")
+            .and_then(|value| value.get("api_secret")),
+        Some(&serde_json::json!("gate-live-api-secret"))
+    );
+    assert_eq!(
+        captured_activation.get("allowed_origins"),
+        Some(&serde_json::json!(["wss://api.gateio.ws"]))
+    );
+
+    unsafe {
+        match previous_secret_mode {
+            Some(value) => std::env::set_var("CHAINBOT_SECRET_DECRYPTOR", value),
+            None => std::env::remove_var("CHAINBOT_SECRET_DECRYPTOR"),
+        }
+    }
+}
+
+#[test]
 fn chain_trigger_runtime_stages_event_before_ack_and_accepts_same_cycle() {
     let root = unique_test_root("chain-trigger-stage-before-ack");
     let plugin_root = root.join("plugins");
@@ -387,6 +535,22 @@ fn write_plaintext_secret(root: &Path, secret_ref: &str, value: &str) {
         _ => format!("{value}\n"),
     };
     fs::write(path, payload).expect("secret should be writable");
+}
+
+fn write_gate_secret_file(root: &Path, key: &str, value: &str) {
+    use std::io::Write as _;
+
+    let path = root.join("providers").join("gate").join("mainnet.gpg");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("gate secret parent should be creatable");
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("gate secret should be writable");
+    file.write_all(format!("{key}={value}\n").as_bytes())
+        .expect("gate secret should be appendable");
 }
 
 fn captured_start_activation(path: &Path) -> serde_json::Map<String, serde_json::Value> {
