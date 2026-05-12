@@ -17,6 +17,8 @@
 - `binance-node/`: Official Binance REST node toolkit for spot, USDⓈ-M, and COIN-M operations.
 - `bybit-node/`: Official Bybit v5 REST node toolkit for spot, linear, inverse, and option operations.
 - `binance-trigger/`: Official Binance market-stream and user-stream trigger toolkit.
+- `bitget-node/`: Official Bitget REST node toolkit for spot and futures operations.
+- `bitget-trigger/`: Official Bitget market-stream and user-stream trigger toolkit.
 - `bybit-trigger/`: Official Bybit market-stream and private user-stream trigger toolkit.
 - `build-official-plugin/`: Build-required reference package for source install flow.
 - `echo-official-plugin/`: Direct-install reference package for source discovery and activation.

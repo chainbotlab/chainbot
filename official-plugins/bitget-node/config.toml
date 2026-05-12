@@ -1,0 +1,128 @@
+manifest_version = "2.0.0"
+plugin_id = "bitget-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/bitget-node"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret", "passphrase"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "bitget_get_server_time"
+summary = "Read Bitget server time"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["server_time"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_ticker"
+summary = "Read Bitget ticker"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "product_type", "base_url"]
+output_schema = ["ticker"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_depth"
+summary = "Read Bitget depth"
+input_schema = ["product_line", "symbol"]
+optional_input_schema = ["environment", "limit", "product_type", "base_url"]
+output_schema = ["depth"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_klines"
+summary = "Read Bitget klines"
+input_schema = ["product_line", "symbol", "interval"]
+optional_input_schema = ["environment", "start_time", "end_time", "limit", "product_type", "base_url"]
+output_schema = ["klines"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_account"
+summary = "Read Bitget account"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "product_type", "base_url"]
+output_schema = ["account"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_balances"
+summary = "Read Bitget balances"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["balances"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_open_orders"
+summary = "Read Bitget open orders"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "product_type", "base_url"]
+output_schema = ["orders"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_order"
+summary = "Read Bitget order detail"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "order_id", "client_order_id", "symbol", "product_type", "base_url"]
+output_schema = ["order"]
+kind = "read"
+
+[[operations]]
+name = "bitget_get_positions"
+summary = "Read Bitget positions"
+input_schema = ["product_line"]
+optional_input_schema = ["environment", "symbol", "product_type", "base_url"]
+output_schema = ["positions"]
+kind = "read"
+
+[[operations]]
+name = "bitget_place_order"
+summary = "Place a Bitget order"
+input_schema = ["product_line", "symbol", "side", "type", "confirmation_mode"]
+optional_input_schema = ["environment", "quantity", "price", "product_type", "margin_mode", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "bitget_cancel_order"
+summary = "Cancel a Bitget order"
+input_schema = ["product_line", "confirmation_mode"]
+optional_input_schema = ["environment", "order_id", "client_order_id", "symbol", "product_type", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "bitget_cancel_all_orders"
+summary = "Cancel all Bitget open orders"
+input_schema = ["product_line", "confirmation_mode"]
+optional_input_schema = ["environment", "symbol", "product_type", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/bitget-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "bitget_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/bitget_node_official_plugin"
+to = "bin/bitget-node"

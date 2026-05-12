@@ -51,6 +51,16 @@ path = "official-plugins/binance-trigger"
 summary = "Official Binance market and user-stream trigger plugin"
 
 [[plugins]]
+plugin_id = "bitget-node"
+path = "official-plugins/bitget-node"
+summary = "Official Bitget REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "bitget-trigger"
+path = "official-plugins/bitget-trigger"
+summary = "Official Bitget market and user-stream trigger plugin"
+
+[[plugins]]
 plugin_id = "bybit-trigger"
 path = "official-plugins/bybit-trigger"
 summary = "Official Bybit market and private user-stream trigger plugin"
