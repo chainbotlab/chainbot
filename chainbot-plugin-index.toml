@@ -41,6 +41,11 @@ path = "official-plugins/binance-node"
 summary = "Official Binance REST node toolkit plugin"
 
 [[plugins]]
+plugin_id = "bybit-node"
+path = "official-plugins/bybit-node"
+summary = "Official Bybit v5 REST node toolkit plugin"
+
+[[plugins]]
 plugin_id = "binance-trigger"
 path = "official-plugins/binance-trigger"
 summary = "Official Binance market and user-stream trigger plugin"
@@ -54,3 +59,38 @@ summary = "Official Bitget REST node toolkit plugin"
 plugin_id = "bitget-trigger"
 path = "official-plugins/bitget-trigger"
 summary = "Official Bitget market and user-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "bybit-trigger"
+path = "official-plugins/bybit-trigger"
+summary = "Official Bybit market and private user-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "hyperliquid-node"
+path = "official-plugins/hyperliquid-node"
+summary = "Official Hyperliquid info API node plugin"
+
+[[plugins]]
+plugin_id = "hyperliquid-trigger"
+path = "official-plugins/hyperliquid-trigger"
+summary = "Official Hyperliquid market-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "okx-node"
+path = "official-plugins/okx-node"
+summary = "Official OKX REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "okx-trigger"
+path = "official-plugins/okx-trigger"
+summary = "Official OKX market and private-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "aster-node"
+path = "official-plugins/aster-node"
+summary = "Official Aster public REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "aster-trigger"
+path = "official-plugins/aster-trigger"
+summary = "Official Aster public market-stream trigger plugin"

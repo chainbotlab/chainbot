@@ -423,6 +423,61 @@ fields = ["chain", "listener_kind", "slot_ref", "event_id", "payload"]
 listener_modes = ["event_log", "state_change"]
 "#,
             ),
+            (
+                "hyperliquid-node",
+                r#"manifest_version = "2.0.0"
+plugin_id = "hyperliquid-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/hyperliquid-node"
+
+[activation]
+optional_secret_slots = ["origin_binding"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "hyperliquid_get_all_mids"
+summary = "Fetch all mids from Hyperliquid info API"
+input_schema = []
+optional_input_schema = ["dex", "base_url"]
+output_schema = ["all_mids"]
+kind = "read"
+
+[[operations]]
+name = "hyperliquid_get_l2_book"
+summary = "Fetch L2 book snapshot from Hyperliquid info API"
+input_schema = ["coin"]
+optional_input_schema = ["nSigFigs", "mantissa", "base_url"]
+output_schema = ["l2_book"]
+kind = "read"
+"#,
+            ),
+            (
+                "hyperliquid-trigger",
+                r#"manifest_version = "2.0.0"
+plugin_id = "hyperliquid-trigger"
+kind = "external_trigger"
+entrypoint = "trigger.exec.v1"
+capabilities = ["trigger.listen.event"]
+executable = "bin/hyperliquid-trigger"
+
+[activation]
+optional_secret_slots = ["origin_binding"]
+requires_allowed_origins = true
+
+[trigger_runtime]
+lifecycle = "process_short_lived"
+push_callback = "inline_response"
+durable_ack = "caller_scope"
+host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
+
+[event_schema]
+summary = "Hyperliquid market listener payload"
+fields = ["exchange", "listener_kind", "channel", "coin", "event_id", "payload"]
+listener_modes = ["event_log", "state_change"]
+"#,
+            ),
         ],
     );
 
@@ -435,13 +490,19 @@ listener_modes = ["event_log", "state_change"]
     assert!(list_output.status.success());
     let payload = serde_json::from_slice::<serde_json::Value>(&list_output.stdout)
         .expect("catalog list json should decode");
-    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(2));
+    assert_eq!(payload["plugins"].as_array().map(Vec::len), Some(4));
     assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
         .iter()
         .any(|plugin| plugin["plugin_id"] == "eth-node")));
     assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
         .iter()
         .any(|plugin| plugin["plugin_id"] == "solana-trigger")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "hyperliquid-node")));
+    assert!(payload["plugins"].as_array().is_some_and(|plugins| plugins
+        .iter()
+        .any(|plugin| plugin["plugin_id"] == "hyperliquid-trigger")));
 
     let show_output = Command::new(chainbot_bin())
         .env("CHAINBOT_CONFIG_DIR", &root)
@@ -485,6 +546,50 @@ listener_modes = ["event_log", "state_change"]
     assert_eq!(
         trigger_payload["detail"]["event_schema"]["listener_modes"][1],
         "state_change"
+    );
+
+    let hyperliquid_show_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:hyperliquid-node", "--json"])
+        .output()
+        .expect("catalog show hyperliquid node plugin should execute");
+
+    assert!(hyperliquid_show_output.status.success());
+    let hyperliquid_payload =
+        serde_json::from_slice::<serde_json::Value>(&hyperliquid_show_output.stdout)
+            .expect("catalog show hyperliquid node json should decode");
+    assert_eq!(hyperliquid_payload["detail"]["plugin_kind"], "external_node");
+    assert_eq!(
+        hyperliquid_payload["detail"]["operations"][0]["name"],
+        "hyperliquid_get_all_mids"
+    );
+    assert_eq!(
+        hyperliquid_payload["detail"]["operations"][0]["optional_input_schema"][0],
+        "dex"
+    );
+    assert_eq!(
+        hyperliquid_payload["detail"]["operations"][1]["optional_input_schema"][2],
+        "base_url"
+    );
+
+    let hyperliquid_trigger_show_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .args(["catalog", "show", "plugin:hyperliquid-trigger", "--json"])
+        .output()
+        .expect("catalog show hyperliquid trigger plugin should execute");
+
+    assert!(hyperliquid_trigger_show_output.status.success());
+    let hyperliquid_trigger_payload =
+        serde_json::from_slice::<serde_json::Value>(&hyperliquid_trigger_show_output.stdout)
+            .expect("catalog show hyperliquid trigger json should decode");
+    assert_eq!(hyperliquid_trigger_payload["detail"]["plugin_kind"], "external_trigger");
+    assert_eq!(
+        hyperliquid_trigger_payload["detail"]["event_schema"]["fields"][0],
+        "exchange"
+    );
+    assert_eq!(
+        hyperliquid_trigger_payload["detail"]["event_schema"]["fields"][2],
+        "channel"
     );
 }
 

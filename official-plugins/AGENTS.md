@@ -12,15 +12,23 @@
 - External node packages must honor the `node.exec.v2` request/response contract. External trigger packages must honor the `trigger.exec.v1` start/ready/event protocol.
 
 ## Members
+- `aster-node/`: Official Aster public REST node toolkit reference implementation.
+- `aster-trigger/`: Official Aster public market-stream trigger toolkit.
 - `binance-node/`: Official Binance REST node toolkit for spot, USDⓈ-M, and COIN-M operations.
+- `bybit-node/`: Official Bybit v5 REST node toolkit for spot, linear, inverse, and option operations.
 - `binance-trigger/`: Official Binance market-stream and user-stream trigger toolkit.
 - `bitget-node/`: Official Bitget REST node toolkit for spot and futures operations.
 - `bitget-trigger/`: Official Bitget market-stream and user-stream trigger toolkit.
+- `bybit-trigger/`: Official Bybit market-stream and private user-stream trigger toolkit.
 - `build-official-plugin/`: Build-required reference package for source install flow.
 - `echo-official-plugin/`: Direct-install reference package for source discovery and activation.
 - `eth-node/`: Official Ethereum node toolkit reference implementation.
 - `eth-trigger/`: Official Ethereum trigger toolkit reference implementation.
+- `hyperliquid-node/`: Official Hyperliquid info API node toolkit for read-only market data operations.
+- `hyperliquid-trigger/`: Official Hyperliquid market-stream trigger toolkit for trades and L2 book events.
 - `http-node/`: Official outbound HTTP node plugin reference implementation.
+- `okx-node/`: Official OKX REST node toolkit for public market data and private account balance reads.
+- `okx-trigger/`: Official OKX public market-stream and private account-stream trigger toolkit.
 - `solana-node/`: Official Solana node toolkit reference implementation.
 - `solana-trigger/`: Official Solana trigger toolkit reference implementation.
 
