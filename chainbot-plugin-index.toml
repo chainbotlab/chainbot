@@ -94,3 +94,13 @@ summary = "Official Aster public REST node toolkit plugin"
 plugin_id = "aster-trigger"
 path = "official-plugins/aster-trigger"
 summary = "Official Aster public market-stream trigger plugin"
+
+[[plugins]]
+plugin_id = "gate-node"
+path = "official-plugins/gate-node"
+summary = "Official Gate REST node toolkit plugin"
+
+[[plugins]]
+plugin_id = "gate-trigger"
+path = "official-plugins/gate-trigger"
+summary = "Official Gate spot market and user-stream trigger plugin"

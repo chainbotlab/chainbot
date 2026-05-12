@@ -1,0 +1,120 @@
+manifest_version = "2.0.0"
+plugin_id = "gate-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/gate-node"
+
+[activation]
+optional_secret_slots = ["api_key", "api_secret"]
+requires_allowed_origins = true
+
+[[operations]]
+name = "gate_get_server_time"
+summary = "Read Gate server time"
+input_schema = []
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["server_time"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_currency_pairs"
+summary = "Read Gate spot currency pairs"
+input_schema = []
+optional_input_schema = ["environment", "base_url"]
+output_schema = ["currency_pairs"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_ticker"
+summary = "Read Gate spot ticker"
+input_schema = []
+optional_input_schema = ["environment", "currency_pair", "base_url"]
+output_schema = ["ticker"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_depth"
+summary = "Read Gate spot order book depth"
+input_schema = ["currency_pair"]
+optional_input_schema = ["environment", "limit", "base_url"]
+output_schema = ["depth"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_klines"
+summary = "Read Gate spot candlesticks"
+input_schema = ["currency_pair", "interval"]
+optional_input_schema = ["environment", "from", "to", "limit", "base_url"]
+output_schema = ["klines"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_accounts"
+summary = "Read Gate spot accounts"
+input_schema = []
+optional_input_schema = ["environment", "currency", "base_url"]
+output_schema = ["accounts"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_open_orders"
+summary = "Read Gate spot open orders"
+input_schema = []
+optional_input_schema = ["environment", "currency_pair", "status", "page", "limit", "base_url"]
+output_schema = ["orders"]
+kind = "read"
+
+[[operations]]
+name = "gate_get_order"
+summary = "Read a Gate spot order"
+input_schema = ["order_id"]
+optional_input_schema = ["environment", "currency_pair", "account", "base_url"]
+output_schema = ["order"]
+kind = "read"
+
+[[operations]]
+name = "gate_place_order"
+summary = "Place a Gate spot order"
+input_schema = ["currency_pair", "side", "amount", "price", "confirmation_mode"]
+optional_input_schema = ["environment", "account", "text", "time_in_force", "iceberg", "auto_borrow", "auto_repay", "stp_act", "action_mode", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "gate_cancel_order"
+summary = "Cancel a Gate spot order"
+input_schema = ["order_id", "currency_pair", "confirmation_mode"]
+optional_input_schema = ["environment", "account", "action_mode", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "gate_cancel_all_orders"
+summary = "Cancel all open Gate spot orders for a pair"
+input_schema = ["currency_pair", "confirmation_mode"]
+optional_input_schema = ["environment", "side", "account", "action_mode", "base_url"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "raw_write"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/gate-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "gate_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/gate_node_official_plugin"
+to = "bin/gate-node"
