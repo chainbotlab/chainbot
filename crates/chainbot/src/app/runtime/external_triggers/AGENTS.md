@@ -1,12 +1,15 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
 - Position: External-trigger runtime hosting subtree.
-- Logic: Owns process or Wasmtime trigger host supervision, listener loops, and emission bridging to trigger-plane contracts.
-- Constraints: Keep domain trigger acceptance in `../../../domain/trigger/`.
+- Owns: Process and Wasmtime host supervision, listener loops, and emission bridging for external triggers.
+- Excludes: Domain trigger acceptance semantics.
+
+## Constraints
+- Keep acceptance logic in `../../../domain/trigger/`.
 
 ## Members
-- `mod.rs`: External-trigger runtime module boundary.
-- `process_listener.rs`: Process-backed external trigger listener loop.
-- `supervisor.rs`: External trigger host supervision and lifecycle control.
-- `wasmtime.rs`: Wasmtime-backed runtime host integration.
+- `mod.rs`: External-trigger runtime exports.
+- `process_listener.rs`: Process-backed listener runtime.
+- `supervisor.rs`: Supervision orchestration.
+- `wasmtime.rs`: Wasmtime-backed trigger hosting.

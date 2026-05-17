@@ -1,13 +1,16 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
-- Position: Domain workflow contracts subtree.
-- Logic: Owns workflow definitions, variable namespace contracts, subflow linkage, and conditional semantics.
-- Constraints: Keep runtime orchestration in `../../app/runtime/`.
+- Position: Workflow contracts subtree.
+- Owns: Workflow definitions, variable namespaces, subflow linkage, and conditional semantics.
+- Excludes: Runtime orchestration.
+
+## Constraints
+- Keep orchestration in `../../app/runtime/`.
 
 ## Members
-- `mod.rs`: Workflow domain module boundary.
-- `contract.rs`: Core workflow manifest and graph contracts.
-- `variables.rs`: Runtime variable namespace and reference contracts.
-- `subflow.rs`: Parent-child subflow import and export contracts.
-- `when.rs`: Conditional expression contracts for execution gating.
+- `mod.rs`: Workflow-domain exports.
+- `contract.rs`: Workflow definitions and contracts.
+- `variables.rs`: Variable namespace semantics.
+- `subflow.rs`: Subflow linkage contracts.
+- `when.rs`: Conditional execution semantics.

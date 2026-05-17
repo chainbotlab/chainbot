@@ -1,12 +1,15 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
-- Position: Infrastructure configuration adapter subtree.
-- Logic: Owns root layout resolution, root config decoding, and package loading adapters.
-- Constraints: Keep backend-agnostic configuration contracts in `../../domain/`.
+- Position: Configuration adapter subtree.
+- Owns: Root layout resolution, root config decoding, package loading, and plugin activation parsing/validation.
+- Excludes: Backend-agnostic configuration contracts.
+
+## Constraints
+- Keep pure contracts in `../../domain/`.
 
 ## Members
-- `mod.rs`: Config adapter module boundary plus root-level plugin activation parsing and validation.
-- `root_layout.rs`: Workspace root layout discovery adapter.
-- `loader.rs`: Root config decoding and assembly adapter.
-- `package_loader.rs`: Package-level loading and integration adapter.
+- `mod.rs`: Config-adapter exports.
+- `root_layout.rs`: Root layout resolution.
+- `loader.rs`: Root config loading.
+- `package_loader.rs`: Package discovery and loading.

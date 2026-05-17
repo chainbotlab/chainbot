@@ -1,9 +1,12 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
+## Scope
 - Position: Leaf fixture folder for pass-style encrypted secret files.
-- Logic: Holds encrypted-file placeholders mapped from secret references.
-- Constraints: Keep filenames aligned with `secret://` lookup semantics (`<name>.gpg`).
+- Owns: Encrypted placeholder files mapped from `secret://ops/slack/...` references.
+- Excludes: Arbitrary filenames and plaintext payloads.
+
+## Constraints
+- Filenames must follow secret lookup semantics as `<name>.gpg`.
 
 ## Members
-- `webhook.gpg`: Placeholder encrypted file for runtime provider path resolution tests.
+- `webhook.gpg`: Placeholder encrypted secret used by Slack-oriented tests.

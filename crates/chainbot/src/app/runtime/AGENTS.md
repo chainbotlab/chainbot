@@ -1,12 +1,16 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
 - Position: Application runtime orchestration subtree.
-- Logic: Owns daemon lifecycle, workflow execution entrypoints, and runtime-side supervision composition.
-- Constraints: Keep backend-agnostic contracts in `../../domain/` and adapter implementations in `../../infrastructure/`.
+- Owns: Daemon lifecycle, workflow execution entrypoints, and supervision composition.
+- Excludes: Pure domain contracts and concrete infrastructure adapters.
+
+## Constraints
+- Keep contracts in `../../domain/`.
+- Keep concrete adapters in `../../infrastructure/`.
 
 ## Members
-- `mod.rs`: Runtime module boundary and shared runtime exports.
-- `daemon.rs`: Daemon lifecycle orchestration and loop management.
-- `execution.rs`: Workflow runtime execution composition.
-- `external_triggers/`: External-trigger runtime hosting and supervision.
+- `mod.rs`: Runtime orchestration exports.
+- `daemon.rs`: Process-lifecycle and daemon orchestration.
+- `execution.rs`: Workflow execution entrypoints.
+- `external_triggers/`: External-trigger host supervision and listener orchestration.

@@ -1,13 +1,16 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
 - Position: CLI read-model rendering subtree.
-- Logic: Owns user-facing output models for status, observe, and catalog style command responses.
-- Constraints: Keep data acquisition outside this folder; this folder formats already-computed view payloads.
+- Owns: User-facing output shaping for status, observe, catalog, and plugin-source views.
+- Excludes: Data acquisition, orchestration, and runtime computation.
+
+## Constraints
+- Only format already-computed payloads.
 
 ## Members
-- `mod.rs`: View rendering module boundary.
-- `status.rs`: Status-oriented CLI output shaping.
-- `observe.rs`: Observation stream and run-progress output shaping.
-- `catalog.rs`: Builtin capability catalog output shaping.
-- `plugin_source.rs`: Remote plugin source list/show/install output shaping.
+- `mod.rs`: Shared view exports.
+- `status.rs`: Status-oriented CLI output.
+- `observe.rs`: Observation/readout formatting.
+- `catalog.rs`: Catalog and discovery formatting.
+- `plugin_source.rs`: Plugin-source-specific presentation.

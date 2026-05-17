@@ -1,49 +1,34 @@
 # AGENTS.md
 
 ## Scope
-- Repository-local official plugin packages and their install/build manifests.
-- Standalone plugin crates under each package `crate/` subtree.
-- Source-catalog entries that make official packages discoverable through `chainbot-plugin-index.toml`.
+- Position: Repository-local official plugin package catalog.
+- Owns: Standalone plugin crates under package `crate/`, install/build manifests, and source-catalog discoverability.
+- Excludes: Protocol-specific behavior leaking into generic runtime paths.
 
 ## Constraints
 - Packages under `official-plugins/` are standalone Cargo crates, not root workspace members.
-- Keep provider, exchange, and chain semantics inside the plugin packages; do not move protocol-specific behavior into `crates/chainbot` generic runtime paths.
-- Each package must keep `config.toml`, `crate/Cargo.toml`, source entrypoints, tests, and declared build outputs aligned.
-- External node packages must honor the `node.exec.v2` request/response contract. External trigger packages must honor the `trigger.exec.v1` start/ready/event protocol.
+- Keep provider, exchange, and chain semantics inside the plugin packages.
+- Align `config.toml`, `crate/Cargo.toml`, source entrypoints, tests, and declared build outputs.
+- External node packages honor the `node.exec.v2` request/response contract.
+- External trigger packages honor the `trigger.exec.v1` start/ready/event protocol.
+- Re-check the top-level source catalog whenever a package path or summary changes.
 
 ## Members
-- `aster-node/`: Official Aster public REST node toolkit reference implementation.
-- `aster-trigger/`: Official Aster public market-stream trigger toolkit.
-- `binance-node/`: Official Binance REST node toolkit for spot, USDⓈ-M, and COIN-M operations.
-- `bybit-node/`: Official Bybit v5 REST node toolkit for spot, linear, inverse, and option operations.
-- `gate-node/`: Official Gate REST node toolkit for spot operations.
-- `binance-trigger/`: Official Binance market-stream and user-stream trigger toolkit.
-- `bitget-node/`: Official Bitget REST node toolkit for spot and futures operations.
-- `bitget-trigger/`: Official Bitget market-stream and user-stream trigger toolkit.
-- `bybit-trigger/`: Official Bybit market-stream and private user-stream trigger toolkit.
-- `build-official-plugin/`: Build-required reference package for source install flow.
-- `echo-official-plugin/`: Direct-install reference package for source discovery and activation.
-- `eth-node/`: Official Ethereum node toolkit reference implementation.
-- `eth-trigger/`: Official Ethereum trigger toolkit reference implementation.
-- `hyperliquid-node/`: Official Hyperliquid info API node toolkit for read-only market data operations.
-- `hyperliquid-trigger/`: Official Hyperliquid market-stream trigger toolkit for trades and L2 book events.
-- `gate-trigger/`: Official Gate spot market-stream and user-stream trigger toolkit.
-- `http-node/`: Official outbound HTTP node plugin reference implementation.
-- `okx-node/`: Official OKX REST node toolkit for public market data and private account balance reads.
-- `okx-trigger/`: Official OKX public market-stream and private account-stream trigger toolkit.
-- `solana-node/`: Official Solana node toolkit reference implementation.
-- `solana-trigger/`: Official Solana trigger toolkit reference implementation.
+- `aster-node/`, `aster-trigger/`: Aster official plugin packages.
+- `binance-node/`, `binance-trigger/`: Binance official plugin packages.
+- `bitget-node/`, `bitget-trigger/`: Bitget official plugin packages.
+- `bybit-node/`, `bybit-trigger/`: Bybit official plugin packages.
+- `gate-node/`, `gate-trigger/`: Gate official plugin packages.
+- `okx-node/`, `okx-trigger/`: OKX official plugin packages.
+- `hyperliquid-node/`, `hyperliquid-trigger/`: Hyperliquid official plugin packages.
+- `eth-node/`, `eth-trigger/`: Ethereum official plugin packages.
+- `solana-node/`, `solana-trigger/`: Solana official plugin packages.
+- `http-node/`: Outbound HTTP node reference implementation.
+- `build-official-plugin/`, `echo-official-plugin/`: Source-install reference packages.
 
-## Dependencies
+## Docs
 - `../chainbot-plugin-index.toml`: Top-level plugin source catalog.
 - `../docs/decisions/CHAINBOT_OFFICIAL_PLUGIN_DESIGN.md`: Official-plugin/runtime ownership boundary.
 - `../docs/decisions/CHAINBOT_PLUGIN_ACTIVATION_CONFIG_DESIGN.md`: Activation secret contract for external plugins.
-
-## Docs
 - `../docs/archive/2026-03-31-001-feat-eth-solana-official-plugins-plan.md`: Prior official-plugin rollout precedent.
 - `../docs/archive/2026-04-01-001-feat-eth-solana-sdk-plugins-plan.md`: SDK-backed plugin implementation precedent.
-
-## Review Triggers
-- Update this file when a package is added, removed, or materially changes responsibility.
-- Update package manifests and this directory map when build artifact names, activation slots, or runtime entrypoints change.
-- Re-check `chainbot-plugin-index.toml` whenever a package path or summary changes.
