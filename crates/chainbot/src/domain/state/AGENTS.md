@@ -1,12 +1,15 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
-- Position: Domain runtime-state schema subtree.
-- Logic: Owns persisted state record schemas, lease snapshots, and schema validation helpers.
-- Constraints: Keep storage backend behavior in `../../infrastructure/state/`.
+- Position: Runtime-state schema domain subtree.
+- Owns: Persisted record schemas, lease snapshots, and schema validation helpers.
+- Excludes: Storage backend behavior.
+
+## Constraints
+- Keep backend persistence behavior in `../../infrastructure/state/`.
 
 ## Members
-- `mod.rs`: State domain module boundary.
-- `lease.rs`: Daemon lease result and snapshot domain types.
-- `model.rs`: Runtime-state schema model and validation helpers.
-- `records.rs`: Persisted run, trigger, inbox, and snapshot record types.
+- `mod.rs`: State-domain exports.
+- `lease.rs`: Lease-related domain models.
+- `model.rs`: Persisted state models.
+- `records.rs`: Runtime-state record schemas.

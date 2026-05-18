@@ -1,17 +1,18 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
+## Scope
 - Position: Repository documentation root.
-- Logic: Root policies -> category documents -> folder-local manifests.
-- Constraints: Keep docs concise, durable, and linked from root context.
+- Owns: Documentation bucket taxonomy and routing for durable project knowledge.
+- Excludes: Source-code ownership, runtime implementation, and workspace member boundaries.
+
+## Constraints
+- Keep docs concise, durable, and linked from root context.
+- Add new durable knowledge to the narrowest suitable bucket.
+- Update root `AGENTS.md` when a new top-level documentation area appears.
 
 ## Members
-- `decisions/`: Long-lived architectural decisions and invariants.
-- `engineering/`: Execution notes, validation expectations, and bootstrapping details.
-- `research/`: Exploration notes and discarded options when they become necessary.
+- `decisions/`: Stable architectural decisions, invariants, and settled interfaces.
+- `engineering/`: Implementation records, execution details, and validation notes.
+- `research/`: Exploratory notes, option analysis, and interim conclusions.
 - `postmortem/`: Durable incident records and debugging learnings.
 - `archive/`: Retired docs and tombstones.
-
-## Conventions
-- Add new durable knowledge to the narrowest suitable bucket.
-- Update root `AGENTS.md` when a new top-level doc area is introduced.

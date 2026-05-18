@@ -1,15 +1,18 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
-- Position: Per-kind builtin node handler implementations.
-- Logic: Owns concrete execution behavior for builtin flow, data, identity, subflow-output, and script node kinds.
-- Constraints: Keep shared contracts and dispatch wiring in `../`.
+- Position: Per-kind builtin node handlers.
+- Owns: Concrete data, assertion, identity, script, fail, and subflow-output behaviors.
+- Excludes: Shared node contracts and dispatch wiring.
+
+## Constraints
+- Keep shared contracts and dispatch in `../`.
 
 ## Members
-- `mod.rs`: Handler module boundary.
-- `assert.rs`: Assertion semantics for flow-control checks.
-- `data_*.rs`: Data transformation, selection, merge, parse, and template behaviors.
-- `script.rs`: Script worker-backed node execution behavior.
-- `identity.rs`: Pass-through node behavior.
-- `emit_subflow_output.rs`: Subflow output forwarding behavior.
+- `mod.rs`: Handler exports.
+- `assert.rs`: Assertion node behavior.
+- `data_*.rs`: Data transformation and movement nodes.
+- `identity.rs`: Pass-through identity behavior.
+- `script.rs`: Script node behavior.
+- `emit_subflow_output.rs`: Subflow-output emission behavior.
 - `fail.rs`: Explicit failure node behavior.

@@ -1,11 +1,14 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
-- Position: Domain runtime contracts subtree.
-- Logic: Owns runtime scheduling contracts and run-report domain models.
-- Constraints: Keep runtime execution side effects in `../../app/`.
+- Position: Runtime domain contracts.
+- Owns: Scheduling contracts and run-report models.
+- Excludes: Runtime execution side effects.
+
+## Constraints
+- Keep runtime side effects in `../../app/`.
 
 ## Members
-- `mod.rs`: Runtime domain module boundary.
-- `contract.rs`: Scheduling and node execution contract types.
-- `report.rs`: Workflow run report domain models.
+- `mod.rs`: Runtime-domain exports.
+- `contract.rs`: Scheduling and runtime contracts.
+- `report.rs`: Run-report models.

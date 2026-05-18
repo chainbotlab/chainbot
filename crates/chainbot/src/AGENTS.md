@@ -1,25 +1,22 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
+## Scope
 - Position: Rust source tree for the `chainbot` binary crate.
-- Logic: Source files define the executable entrypoint and the V2-line public module boundary (app/domain/infrastructure + facade subtrees).
-- Constraints: Keep Rust file headers aligned with actual inputs, outputs, and architectural position.
+- Owns: The executable entrypoint, frozen public module boundary, and internal runtime/domain/adapter subtrees.
+- Excludes: Crate manifest concerns and integration-test fixtures.
 
-## Public Module Map
-The frozen public surface is defined in `lib.rs`:
-- `app/` — CLI dispatch, CLI view read-models, root-definition assembly, and runtime execution orchestration
-- `domain/` — backend-agnostic workflow, trigger, runtime, and state contracts
-- `infrastructure/` — root-layout resolution, package loading, and state persistence backends
-- `builtins/` — unified builtin namespace (facade subtree, preserved)
-- `ingress/` — listener-backed trigger ingress runtime (facade subtree, preserved)
-- `plugin/` — encapsulated plugin subsystem (facade subtree, preserved)
-- `errors/`, `script_protocol/`, `secrets/` — shared utility contracts
-
-## Legacy Root Shims
-- Retired root shim files are removed from `src/`.
-- Runtime execution helpers now live under `app::cli` and `app::runtime`.
-- Trigger-plane compatibility constructors are implemented under `app::runtime` while domain acceptance remains in `domain::trigger`.
+## Constraints
+- Keep Rust file headers aligned with actual inputs, outputs, and architectural role.
+- Preserve the frozen public boundary exposed by `lib.rs`.
+- Retired root shim files stay removed from `src/`; runtime helpers live under `app`, and trigger compatibility constructors stay in `app::runtime` while acceptance remains in `domain::trigger`.
 
 ## Members
 - `main.rs`: Binary entrypoint that routes CLI stdout/stderr and explicit process exit codes.
-- `lib.rs`: Public module map that freezes the V2 boundary for MVP contracts.
+- `lib.rs`: Public module map that freezes the supported `chainbot` crate surface.
+- `app/`: Process-facing orchestration for CLI, definition loading, and runtime execution.
+- `domain/`: Backend-agnostic workflow, trigger, runtime, and state contracts.
+- `infrastructure/`: Root-layout resolution, package loading, and state persistence backends.
+- `builtins/`: Unified builtin node and trigger namespace.
+- `ingress/`: Listener-backed trigger ingress runtime.
+- `plugin/`: Encapsulated plugin contract, host, and source-install subsystem.
+- `errors/`, `script_protocol/`, `secrets/`: Shared utility contracts used across subtrees.

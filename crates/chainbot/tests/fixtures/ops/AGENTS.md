@@ -1,9 +1,13 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
-- Position: Namespace fixture root for pass-style secret resolution tests.
-- Logic: Mirrors `secret://ops/...` references used by integration tests.
-- Constraints: Treat files as placeholders only; never store plaintext secrets.
+## Scope
+- Position: Pass-style secret fixture namespace root.
+- Owns: Filesystem trees that mirror `secret://ops/...` lookups in tests.
+- Excludes: Plaintext secrets.
+
+## Constraints
+- Only placeholder fixture material belongs here.
 
 ## Members
-- `slack/`: Nested provider-path fixture for `secret://ops/slack/webhook` resolution.
+- `slack/`: Slack-oriented fake secret material.
+- `chain/`: Reserved chain-oriented secret fixture namespace.

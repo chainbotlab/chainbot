@@ -1,22 +1,22 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
-- Position: ChainBot marketing surface built with Astro and app-local frontend tooling.
-- Logic: `interface/AGENTS.md` -> `land-page/AGENTS.md` -> page/layout/section composition.
-- Constraints: Keep content centralized, keep UI primitives reusable, avoid dependencies on the Cargo workspace, and preserve the established warm-light + green-accent palette defined in `src/styles/global.css` unless the user explicitly asks for a rebrand.
+## Scope
+- Position: Astro marketing surface for the ChainBot product.
+- Owns: Product narrative, call-to-action surface, and reusable UI/content structure for the landing site.
+- Excludes: Cargo workspace coupling and shared repo tooling outside this app.
+
+## Constraints
+- Keep content centralized and UI primitives reusable.
+- Preserve the established warm-light and green-accent palette unless an explicit rebrand says otherwise.
+- Avoid dependencies on Cargo workspace internals.
 
 ## Members
-- `src/pages/`: Route entrypoints.
-- `src/layouts/`: Shared document shell and metadata.
-- `src/components/sections/`: Narrative sections used by the landing page.
-- `src/components/ui/`: Reusable UI primitives compatible with the chosen stack.
-- `src/content/`: Structured copy and section data.
-- `public/`: Static branded assets.
+- `src/pages/`: Route-level marketing pages.
+- `src/layouts/`: Shared Astro layouts.
+- `src/components/sections/`: Section-level page composition.
+- `src/components/ui/`: Reusable visual primitives.
+- `src/content/`: Centralized copy and content payloads.
+- `public/`: Static assets.
 
-## Dependencies
-- `src/styles/global.css`: Canonical color tokens and typography direction for the landing page.
-
-## Review Triggers
-- Change the navigation contract or outbound CTAs.
-- Add a new route or major section.
-- Replace shared branding tokens or visual hierarchy.
+## Docs
+- `src/styles/global.css`: Canonical brand, color, and typography tokens for this app.

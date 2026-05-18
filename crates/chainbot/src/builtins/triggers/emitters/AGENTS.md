@@ -1,14 +1,17 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
-- Position: Per-kind builtin trigger emitter implementations.
-- Logic: Owns validation and emission logic for cron, manual, market-tick, webhook, and websocket trigger kinds.
-- Constraints: Keep shared trigger contracts and fan-out orchestration in `../`.
+- Position: Per-kind builtin trigger emitters.
+- Owns: Validation and emission logic for cron, manual, market-tick, webhook, and websocket triggers.
+- Excludes: Shared trigger contracts and fan-out orchestration.
+
+## Constraints
+- Keep shared trigger contracts in `../`.
 
 ## Members
-- `mod.rs`: Emitter module boundary.
-- `cron.rs`: Cron schedule emitter implementation.
-- `manual.rs`: Manual trigger emitter implementation.
-- `market_tick.rs`: Market-tick trigger emitter implementation.
-- `webhook.rs`: Webhook trigger adapter emitter implementation.
-- `websocket.rs`: WebSocket trigger adapter emitter implementation.
+- `mod.rs`: Emitter exports.
+- `cron.rs`: Cron trigger behavior.
+- `manual.rs`: Manual trigger behavior.
+- `market_tick.rs`: Market-tick trigger behavior.
+- `webhook.rs`: Webhook trigger behavior.
+- `websocket.rs`: Websocket trigger behavior.

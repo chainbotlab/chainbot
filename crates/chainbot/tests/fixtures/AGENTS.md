@@ -1,11 +1,14 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
-- Position: Integration-test fixture assets for the `chainbot` crate.
-- Logic: Fixture files model filesystem inputs consumed by runtime tests.
-- Constraints: Keep fixtures deterministic and free of real credentials.
+## Scope
+- Position: Integration-test fixture asset root.
+- Owns: Deterministic filesystem inputs copied into test roots.
+- Excludes: Real credentials and nondeterministic data.
+
+## Constraints
+- Fixtures must stay deterministic and credential-free.
 
 ## Members
-- `ops/`: Pass-style fixture hierarchy for secret-provider runtime tests.
-- `workers/`: Deterministic script worker fixtures for subprocess worker-host tests.
-- `e2e/`: Full root-layout snapshots for task-11 end-to-end vertical-slice validation.
+- `ops/`: Pass-style secret fixture namespace.
+- `workers/`: Worker fixture payloads used by host/runtime tests.
+- `e2e/`: Full root-layout vertical-slice fixture roots.

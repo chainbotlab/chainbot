@@ -1,9 +1,12 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
-- Position: Reserved chain-oriented secret fixture namespace for integration tests.
-- Logic: Keeps future official-chain activation fixtures under one deterministic subtree.
-- Constraints: Store only fake test material and directory placeholders here.
+## Scope
+- Position: Reserved chain-oriented secret fixture namespace.
+- Owns: Future official-chain activation fixtures under a deterministic subtree.
+- Excludes: Real secret material.
+
+## Constraints
+- Only fake test material or directory placeholders belong here.
 
 ## Members
-- `AGENTS.md`: Documents the reserved fixture purpose for chain activation coverage.
+- `AGENTS.md`: Local boundary marker until chain fixture files are added.

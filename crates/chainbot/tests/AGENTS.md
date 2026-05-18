@@ -1,29 +1,25 @@
-# Local Rules
+# AGENTS.md
 
-## Architecture
+## Scope
 - Position: Integration test boundary for the `chainbot` crate.
-- Logic: Validate contract compatibility plus workflow-semantic DAG/namespace boundaries, runtime-state persistence behavior, and subprocess worker-host safety boundaries.
-- Constraints: Keep tests deterministic and scoped to contract/runtime-state boundaries plus execution-plane scheduler semantics without external side-effect dependencies.
+- Owns: Contract compatibility, workflow semantics, runtime-state persistence, scheduler behavior, and host/runtime guardrail tests.
+- Excludes: Flaky or external side-effect-dependent test coverage.
+
+## Constraints
+- Keep tests deterministic.
+- Focus coverage on contract, runtime-state, and execution semantics.
 
 ## Members
-- `contract_versions.rs`: Verifies accepted current versions and rejects unsupported future majors.
-- `catalog_surface.rs`: Verifies the catalog list/show CLI surface, JSON payload stability, and plugin metadata fallback behavior.
-- `cli_surface.rs`: Verifies help output, validate/list-runs success paths, and bounded user-facing failures for unimplemented commands.
-- `config_loading.rs`: Verifies v2.1 root layout resolution plus package-manifest loader behavior for valid fixtures, missing paths, and invalid TOML.
-- `runtime_state_parity.rs`: Verifies DB-primary runtime-state semantics stay aligned between SQLite local mode and PostgreSQL mode for leases, run summaries, trigger snapshots/checkpoints, and trigger history visibility.
-- `runtime_guardrails.rs`: Guards SQLite runtime read-query plans and repeated read-only observation loops for status/observe hot paths.
-- `state_runtime_persistence.rs`: Verifies legacy file-backed runtime persistence plus SQLite coordination behavior that remains available outside the DB-primary main runtime path.
-- `workflow_dag_semantics.rs`: Verifies DAG cycle/dependency validation, deterministic runtime variable precedence, and explicit subflow import/export boundary enforcement.
-- `execution_scheduler.rs`: Verifies Rust-owned scheduler wave planning, `depends_mode`/`when` behavior, and builtin node registry typed dispatch failures.
-- `mcp_plugin_host.rs`: Verifies stdio-backed MCP host startup, tool invocation success, and deterministic fail-closed transport errors at the plugin boundary.
-- `node_plugin_host.rs`: Verifies external node plugin manifest guards, stdin/stdout roundtrip contract, and capability/version rejection before spawn.
-- `chain_node_plugin_host.rs`: Verifies chain-node activation secret injection and secret-redacted failure surfacing.
-- `trigger_plane.rs`: Verifies trigger package manifest policy checks, builtin/external run-request normalization, workflow binding, dedup/cooldown persistence, and DB-backed trigger records.
-- `chain_trigger_runtime.rs`: Verifies chain-trigger start envelopes receive execution-time activation secrets without host-side chain branches.
-- `secrets_runtime.rs`: Verifies pass-style secret resolution, decryption-failure redaction, and non-persistence guarantees for secret material.
-- `fixtures/`: Deterministic pass-style filesystem fixtures consumed by runtime secret-provider tests.
-- `fixtures/ops/chain/`: Reserved chain-secret fixture namespace for official activation-binding coverage.
-- `worker_host.rs`: Verifies subprocess worker protocol negotiation, Python/JavaScript roundtrip behavior, timeout cleanup, malformed output handling, and stdout/stderr size limits.
-- `end_to_end_vertical_slice.rs`: Verifies the task-11 runnable vertical slice for `validate`/`run`/`serve`/`list-runs`, persisted artifacts, bounded failure-mode behavior, and task-12 restart-hardening flows.
-- `fixtures/workers/`: Deterministic Python and JavaScript worker scripts used by worker-host integration tests.
-- `fixtures/e2e/`: Deterministic v2.1 package-layout fixture roots used by task-11 end-to-end vertical-slice tests and e2e root bootstrapping.
+- `contract_versions.rs`: Versioned contract compatibility checks.
+- `catalog_surface.rs`: Catalog surface behavior.
+- `cli_surface.rs`: CLI integration expectations.
+- `config_loading.rs`: Root and package loading behavior.
+- `runtime_state_parity.rs`: Runtime-state parity guarantees.
+- `runtime_guardrails.rs`: Runtime guardrail assertions.
+- `state_runtime_persistence.rs`: Persistence round-trip behavior.
+- `workflow_dag_semantics.rs`: Workflow graph semantics.
+- `execution_scheduler.rs`: Scheduler execution semantics.
+- `mcp_plugin_host.rs`, `node_plugin_host.rs`, `chain_node_plugin_host.rs`: Plugin host boundaries.
+- `trigger_plane.rs`, `chain_trigger_runtime.rs`: Trigger-plane runtime behavior.
+- `secrets_runtime.rs`, `worker_host.rs`, `end_to_end_vertical_slice.rs`: Secrets, worker host, and vertical-slice coverage.
+- `fixtures/`: Deterministic fixture roots and secret placeholders.

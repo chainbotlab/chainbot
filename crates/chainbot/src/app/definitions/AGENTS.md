@@ -1,11 +1,14 @@
-# Local Rules
+# AGENTS.md
 
 ## Scope
 - Position: Application definition-loading and validation boundary.
-- Logic: Owns root bundle assembly from workspace packages and cross-package contract validation.
-- Constraints: Keep storage and path adapter concerns in `../../infrastructure/`.
+- Owns: Root bundle assembly and cross-package validation for workspace definitions.
+- Excludes: Filesystem and storage adapter concerns.
+
+## Constraints
+- Keep storage and path adapters in `../../infrastructure/`.
 
 ## Members
-- `mod.rs`: Definition-loading module boundary.
-- `root_bundle.rs`: Root workspace bundle loading and assembly.
-- `validate.rs`: Cross-package validation for workflows, triggers, and plugin manifests.
+- `mod.rs`: Definition-loading boundary root.
+- `root_bundle.rs`: Root workspace bundle assembly.
+- `validate.rs`: Cross-package validation flows.
