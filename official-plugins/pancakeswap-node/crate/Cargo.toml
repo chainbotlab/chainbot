@@ -1,0 +1,22 @@
+[package]
+name = "pancakeswap_node_official_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "pancakeswap_node_official_plugin"
+path = "src/main.rs"
+
+[dependencies]
+alloy = { version = "1", features = ["full"] }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }

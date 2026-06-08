@@ -1,0 +1,48 @@
+manifest_version = "2.0.0"
+plugin_id = "uniswap-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/uniswap-node"
+
+[activation]
+required_secret_slots = ["signer"]
+
+[[operations]]
+name = "uniswap_get_amounts_out"
+summary = "Quote output amounts through a Uniswap V2 Router02-compatible router"
+input_schema = ["endpoint", "router", "amount_in", "path", "block_tag"]
+output_schema = ["amounts", "amount_out", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "uniswap_watch_price"
+summary = "Poll a Router02-compatible quote and evaluate it against an output threshold"
+input_schema = ["endpoint", "router", "amount_in", "path", "threshold_out", "comparison", "block_tag"]
+output_schema = ["triggered", "amount_out", "threshold_out", "comparison", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "uniswap_swap_exact_tokens_for_tokens"
+summary = "Submit a Router02-compatible swapExactTokensForTokens transaction"
+input_schema = ["endpoint", "router", "amount_in", "amount_out_min", "path", "recipient", "deadline", "confirmation_mode"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "swap"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/uniswap-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "uniswap_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/uniswap_node_official_plugin"
+to = "bin/uniswap-node"

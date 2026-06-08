@@ -1,0 +1,54 @@
+manifest_version = "2.0.0"
+plugin_id = "jupiter-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/jupiter-node"
+
+[activation]
+required_secret_slots = []
+optional_secret_slots = ["api_key"]
+
+[[operations]]
+name = "jupiter_get_quote"
+summary = "Fetch a Jupiter swap quote"
+input_schema = ["base_url", "input_mint", "output_mint", "amount", "slippage_bps", "swap_mode", "dexes", "exclude_dexes", "restrict_intermediate_tokens", "only_direct_routes", "as_legacy_transaction", "platform_fee_bps", "max_accounts", "instruction_version", "dynamic_slippage", "for_jito_bundle"]
+output_schema = ["quote_response", "input_mint", "output_mint", "in_amount", "out_amount", "other_amount_threshold", "price_impact_pct", "route_plan", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "jupiter_build_swap"
+summary = "Build an unsigned Jupiter swap transaction from a quote response"
+input_schema = ["base_url", "quote_response", "user_public_key", "dynamic_compute_unit_limit", "dynamic_slippage", "prioritization_fee_lamports", "wrap_and_unwrap_sol", "use_shared_accounts", "fee_account", "tracking_account", "as_legacy_transaction", "destination_token_account"]
+output_schema = ["status", "swap_transaction", "last_valid_block_height", "swap_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "jupiter_send_swap_transaction"
+summary = "Submit an externally signed Jupiter swap transaction through a Solana RPC endpoint"
+input_schema = ["endpoint", "signed_transaction", "encoding", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "jupiter_get_signature_status"
+summary = "Read a Solana signature status for a Jupiter swap"
+input_schema = ["endpoint", "signature"]
+output_schema = ["signature", "status"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/jupiter-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "jupiter_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/jupiter_node_official_plugin"
+to = "bin/jupiter-node"

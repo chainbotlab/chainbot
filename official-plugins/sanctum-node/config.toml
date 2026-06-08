@@ -1,0 +1,68 @@
+manifest_version = "2.0.0"
+plugin_id = "sanctum-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/sanctum-node"
+
+[activation]
+required_secret_slots = []
+optional_secret_slots = ["api_key"]
+
+[[operations]]
+name = "sanctum_get_lsts"
+summary = "Fetch Sanctum LST metadata"
+input_schema = ["base_url"]
+output_schema = ["lsts", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "sanctum_get_lst"
+summary = "Fetch a single Sanctum LST by mint or symbol"
+input_schema = ["base_url", "mint_or_symbol"]
+output_schema = ["lst", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "sanctum_create_swap_order"
+summary = "Create a Sanctum token swap order and unsigned transaction"
+input_schema = ["base_url", "input_mint", "output_mint", "amount", "mode", "signer", "slippage_bps"]
+output_schema = ["status", "order_response", "swap_transaction", "input_amount", "output_amount", "source", "fee_amount", "fee_mint", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "sanctum_execute_swap_order"
+summary = "Submit an externally signed Sanctum swap order through Sanctum API"
+input_schema = ["base_url", "signed_transaction", "order_response"]
+output_schema = ["status", "transaction_id", "execute_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "sanctum_send_swap_transaction"
+summary = "Submit an externally signed Sanctum swap transaction through a Solana RPC endpoint"
+input_schema = ["endpoint", "signed_transaction", "encoding", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "sanctum_get_signature_status"
+summary = "Read a Solana signature status for a Sanctum swap"
+input_schema = ["endpoint", "signature"]
+output_schema = ["signature", "status"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/sanctum-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "sanctum_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/sanctum_node_official_plugin"
+to = "bin/sanctum-node"

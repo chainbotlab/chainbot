@@ -31,6 +31,36 @@ path = "official-plugins/solana-trigger"
 summary = "Official Solana trigger toolkit plugin"
 
 [[plugins]]
+plugin_id = "jupiter-node"
+path = "official-plugins/jupiter-node"
+summary = "Official Jupiter swap API node plugin"
+
+[[plugins]]
+plugin_id = "uniswap-node"
+path = "official-plugins/uniswap-node"
+summary = "Official Uniswap V2 Router-compatible swap node plugin"
+
+[[plugins]]
+plugin_id = "uniswap-trigger"
+path = "official-plugins/uniswap-trigger"
+summary = "Official Uniswap V2 Router-compatible price threshold trigger plugin"
+
+[[plugins]]
+plugin_id = "pancakeswap-node"
+path = "official-plugins/pancakeswap-node"
+summary = "Official PancakeSwap V3 exact-input swap node plugin"
+
+[[plugins]]
+plugin_id = "raydium-node"
+path = "official-plugins/raydium-node"
+summary = "Official Raydium Trade API swap node plugin"
+
+[[plugins]]
+plugin_id = "sanctum-node"
+path = "official-plugins/sanctum-node"
+summary = "Official Sanctum LST metadata and swap order node plugin"
+
+[[plugins]]
 plugin_id = "http-node"
 path = "official-plugins/http-node"
 summary = "Official outbound HTTP node plugin"

@@ -1,0 +1,43 @@
+manifest_version = "2.0.0"
+plugin_id = "pancakeswap-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/pancakeswap-node"
+
+[activation]
+required_secret_slots = ["signer"]
+
+[[operations]]
+name = "pancakeswap_v3_swap_exact_input_single"
+summary = "Submit a PancakeSwap V3 exactInputSingle transaction"
+input_schema = ["endpoint", "router", "token_in", "token_out", "fee", "recipient", "deadline", "amount_in", "amount_out_minimum", "sqrt_price_limit_x96", "confirmation_mode"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "swap"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[[operations]]
+name = "pancakeswap_v3_swap_exact_input"
+summary = "Submit a PancakeSwap V3 exactInput transaction with an encoded path"
+input_schema = ["endpoint", "router", "encoded_path", "recipient", "deadline", "amount_in", "amount_out_minimum", "confirmation_mode"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "swap"
+requires_managed_signing = true
+default_confirmation = "safe"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/pancakeswap-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "pancakeswap_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/pancakeswap_node_official_plugin"
+to = "bin/pancakeswap-node"
