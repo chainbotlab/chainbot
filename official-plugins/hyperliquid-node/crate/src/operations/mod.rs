@@ -184,14 +184,18 @@ fn bridge2_prepare_withdraw3(request: &PluginRequest) -> Result<PluginResponse, 
 
 fn bridge2_prepare_deposit_with_permit(request: &PluginRequest) -> Result<PluginResponse, PluginError> {
     let chain_id = bridge2_chain_id(request)?;
-    let bridge = bridge2_address(request)?;
-    let owner = required_string(request, "owner")?;
+    let bridge = validate_eth_address(bridge2_address(request)?, "bridge")?;
+    let owner = validate_eth_address(required_string(request, "owner")?, "owner")?;
     let value = required_string(request, "value")?;
     let nonce = required_string(request, "nonce")?;
     let deadline = required_string(request, "deadline")?;
-    let usdc = request
-        .input_string("usdc")
-        .unwrap_or_else(|| default_usdc_address(chain_id));
+    let usdc = validate_eth_address(
+        request
+            .input_string("usdc")
+            .unwrap_or_else(|| default_usdc_address(chain_id)),
+        "usdc",
+    )?;
+    let call_data = optional_hex_data(request, "call_data", "0x")?;
     let output = BTreeMap::from([
         (
             String::from("permit_typed_data"),
@@ -229,7 +233,7 @@ fn bridge2_prepare_deposit_with_permit(request: &PluginRequest) -> Result<Plugin
                 "action_kind": "bridge2_batched_deposit_with_permit",
                 "chain_id": chain_id,
                 "to": bridge,
-                "data": request.input.get("call_data").cloned().unwrap_or_else(|| Value::String(String::from("0x"))),
+                "data": call_data,
                 "value": "0",
                 "calldata_format": "caller_supplied",
                 "parameters": {
@@ -256,7 +260,7 @@ fn required_string<'a>(request: &'a PluginRequest, key: &str) -> Result<&'a str,
 }
 
 fn bridge2_chain_id(request: &PluginRequest) -> Result<i64, PluginError> {
-    let chain_id = request.input_i64("chain_id").unwrap_or(42161);
+    let chain_id = optional_i64_strict(request, "chain_id")?.unwrap_or(42161);
     if chain_id != 42161 && chain_id != 421614 {
         return Err(PluginError::InvalidInput(format!(
             "chain_id must be 42161 or 421614, got {chain_id}"
@@ -288,7 +292,74 @@ fn bridge2_amount_units(request: &PluginRequest, amount: &str) -> Result<String,
     if let Some(amount_units) = request.input_string("amount_units") {
         return normalize_uint_string(amount_units);
     }
-    decimal_to_units(amount, request.input_i64("decimals").unwrap_or(6))
+    let decimals = optional_i64_strict(request, "decimals")?.unwrap_or(6);
+    decimal_to_units(amount, decimals)
+}
+
+fn optional_i64_strict(request: &PluginRequest, key: &str) -> Result<Option<i64>, PluginError> {
+    match request.input.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
+            PluginError::InvalidInput(format!(
+                "input {key} must be an integer, got {} {value}",
+                value_type_name(value)
+            ))
+        }),
+    }
+}
+
+fn optional_hex_data<'a>(
+    request: &'a PluginRequest,
+    key: &str,
+    default: &'a str,
+) -> Result<&'a str, PluginError> {
+    let value = match request.input.get(key) {
+        None => default,
+        Some(Value::String(value)) => value.as_str(),
+        Some(value) => {
+            return Err(PluginError::InvalidInput(format!(
+                "input {key} must be a 0x-prefixed hex string, got {} {value}",
+                value_type_name(value)
+            )));
+        }
+    };
+    validate_hex_data(value, key)?;
+    Ok(value)
+}
+
+fn validate_hex_data(value: &str, key: &str) -> Result<(), PluginError> {
+    let raw = value.strip_prefix("0x").ok_or_else(|| {
+        PluginError::InvalidInput(format!("input {key} must be a 0x-prefixed hex string"))
+    })?;
+    if raw.len() % 2 != 0 || !raw.chars().all(|char| char.is_ascii_hexdigit()) {
+        return Err(PluginError::InvalidInput(format!(
+            "input {key} must contain valid hex bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_eth_address<'a>(address: &'a str, key: &str) -> Result<&'a str, PluginError> {
+    let raw = address.strip_prefix("0x").ok_or_else(|| {
+        PluginError::InvalidInput(format!("input {key} must be a 0x-prefixed 20-byte hex address"))
+    })?;
+    if raw.len() != 40 || !raw.chars().all(|char| char.is_ascii_hexdigit()) {
+        return Err(PluginError::InvalidInput(format!(
+            "input {key} must be a 0x-prefixed 20-byte hex address"
+        )));
+    }
+    Ok(address)
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn normalize_uint_string(value: &str) -> Result<String, PluginError> {

@@ -227,10 +227,12 @@ fn failure_jsonrpc_response(id: JsonRpcId, message: &str) -> String {
 }
 
 fn extract_jsonrpc_id(input: &str) -> Option<JsonRpcId> {
-    serde_json::from_str::<RequestEnvelope>(input).ok().and_then(|envelope| match envelope {
-        RequestEnvelope::Legacy(_) => None,
-        RequestEnvelope::JsonRpc(request) => Some(request.id),
-    })
+    let value: Value = serde_json::from_str(input).ok()?;
+    let object = value.as_object()?;
+    if object.get("jsonrpc")?.as_str()? != JSONRPC_VERSION {
+        return None;
+    }
+    serde_json::from_value(object.get("id")?.clone()).ok()
 }
 
 fn dispatch(request: PluginRequest, spec: &'static PluginSpec) -> Result<PluginResponse, PluginError> {
@@ -1205,6 +1207,30 @@ mod tests {
         provider: "test-provider",
         operations: OPERATIONS,
     };
+
+    #[tokio::test]
+    async fn malformed_jsonrpc_params_preserve_error_envelope() {
+        let response = handle_request_json(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "node.exec.v2",
+                "params": {
+                    "contract_version": 1
+                }
+            })
+            .to_string(),
+            &SPEC,
+        )
+        .await
+        .expect("error response should serialize");
+
+        let payload: Value = serde_json::from_str(&response).expect("json response");
+        assert_eq!(payload["jsonrpc"], json!("2.0"));
+        assert_eq!(payload["id"], json!(42));
+        assert!(payload.get("error").is_some(), "response should be a JSON-RPC error");
+        assert!(payload.get("success").is_none(), "legacy response shape should not be used");
+    }
 
     #[tokio::test]
     async fn jsonrpc_request_returns_unsigned_action() {

@@ -1,10 +1,13 @@
+use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard};
+
 use axum::{routing::get, Json, Router};
 use debridge_node_official_plugin::handle_request_json;
 use serial_test::serial;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn debridge_create_order_tx_returns_estimation_and_tx() {
     let _loopback = LoopbackGuard::set();
@@ -65,23 +68,42 @@ async fn create_tx_handler() -> Json<Value> {
     }))
 }
 
-struct LoopbackGuard;
+static LOOPBACK_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct LoopbackGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous_loopback: Option<OsString>,
+    previous_internal: Option<OsString>,
+}
 
 impl LoopbackGuard {
     fn set() -> Self {
+        let lock = LOOPBACK_ENV_LOCK.lock().expect("loopback env lock poisoned");
+        let previous_loopback = std::env::var_os("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS");
+        let previous_internal = std::env::var_os("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS");
         unsafe {
             std::env::set_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS", "1");
             std::env::set_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS", "1");
         }
-        Self
+        Self {
+            _lock: lock,
+            previous_loopback,
+            previous_internal,
+        }
     }
 }
 
 impl Drop for LoopbackGuard {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS");
-            std::env::remove_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS");
+            match self.previous_loopback.take() {
+                Some(value) => std::env::set_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS", value),
+                None => std::env::remove_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS"),
+            }
+            match self.previous_internal.take() {
+                Some(value) => std::env::set_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS", value),
+                None => std::env::remove_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS"),
+            }
         }
     }
 }

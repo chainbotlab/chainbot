@@ -35,7 +35,7 @@ The bridge-action plugins intentionally do not sign, broadcast, or custody keys.
 - Axelar and Hyperlane generate calldata for Interchain Token Service, GMP Gateway, Warp Route, and Mailbox dispatch entrypoints.
 - CCIP generates calldata for Router `ccipSend(uint64, Client.EVM2AnyMessage)`. CCIP TokenPool admin remains caller-supplied because pool administration is not a single stable cross-pool entrypoint.
 - Wormhole generates calldata for NTT Manager `transfer` basic/advanced overloads and Core Bridge `publishMessage`.
-- Hyperliquid Bridge2 support adds Arbitrum USDC deposit calldata generation, withdraw3 typed-data preparation, and deposit-with-permit typed-data preparation to the existing `hyperliquid-node`. The deposit-with-permit unsigned action still accepts caller-supplied calldata for the final batched bridge call because the plugin's stable contribution is the permit typed data, not a protocol-wide batch ABI.
+- Hyperliquid Bridge2 support adds Arbitrum USDC deposit calldata generation, withdraw3 typed-data preparation, and deposit-with-permit typed-data preparation to the existing `hyperliquid-node`. The deposit-with-permit unsigned action still accepts caller-supplied calldata for the final batched bridge call because the plugin's stable contribution is the permit-typed-data, not a protocol-wide batch ABI.
 
 ## ABI Sources
 

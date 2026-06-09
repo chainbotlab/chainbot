@@ -283,10 +283,12 @@ fn failure_jsonrpc_response(id: JsonRpcId, message: &str) -> String {
 }
 
 fn extract_jsonrpc_id(input: &str) -> Option<JsonRpcId> {
-    serde_json::from_str::<RequestEnvelope>(input).ok().and_then(|envelope| match envelope {
-        RequestEnvelope::Legacy(_) => None,
-        RequestEnvelope::JsonRpc(request) => Some(request.id),
-    })
+    let value: Value = serde_json::from_str(input).ok()?;
+    let object = value.as_object()?;
+    if object.get("jsonrpc")?.as_str()? != JSONRPC_VERSION {
+        return None;
+    }
+    serde_json::from_value(object.get("id")?.clone()).ok()
 }
 
 async fn dispatch(request: PluginRequest, spec: &'static PluginSpec) -> Result<PluginResponse, PluginError> {
@@ -340,10 +342,10 @@ async fn execute_api_operation(
         .input_string("base_url")
         .unwrap_or(spec.default_base_url);
     let mut url = base_url_with_slash(base_url)?;
-    let path = request
+    let raw_path = request
         .input_string("path")
-        .unwrap_or(operation.default_path)
-        .trim_start_matches('/');
+        .unwrap_or(operation.default_path);
+    let path = relative_operation_path(raw_path)?;
     url = url
         .join(path)
         .map_err(|error| PluginError::InvalidInput(format!("invalid operation path: {error}")))?;
@@ -388,24 +390,15 @@ async fn execute_api_operation(
         http_request = http_request.json(&Value::Object(body));
     }
 
-    let response = http_request.send().await?;
+    let mut response = http_request.send().await?;
     let status = response.status();
     if status.is_redirection() {
         return Err(PluginError::Api(String::from("redirect responses are not supported")));
     }
     if response.content_length().unwrap_or(0) > MAX_RESPONSE_BODY_BYTES as u64 {
-        return Err(PluginError::Api(format!(
-            "response body exceeds {} bytes",
-            MAX_RESPONSE_BODY_BYTES
-        )));
+        return Err(response_body_too_large_error());
     }
-    let body_bytes = response.bytes().await?;
-    if body_bytes.len() > MAX_RESPONSE_BODY_BYTES {
-        return Err(PluginError::Api(format!(
-            "response body exceeds {} bytes",
-            MAX_RESPONSE_BODY_BYTES
-        )));
-    }
+    let body_bytes = read_limited_response_body(&mut response).await?;
     let payload: Value = serde_json::from_slice(&body_bytes)?;
     if !status.is_success() {
         return Err(PluginError::Api(format!("http status {status}: {payload}")));
@@ -464,6 +457,41 @@ fn base_url_with_slash(raw: &str) -> Result<Url, PluginError> {
         url.set_path(&path);
     }
     Ok(url)
+}
+
+fn relative_operation_path(raw_path: &str) -> Result<&str, PluginError> {
+    if raw_path.contains("://") || raw_path.starts_with("//") {
+        return Err(PluginError::InvalidInput(String::from(
+            "path must be a relative path",
+        )));
+    }
+    Ok(raw_path.trim_start_matches('/'))
+}
+
+async fn read_limited_response_body(response: &mut reqwest::Response) -> Result<Vec<u8>, PluginError> {
+    let capacity = response
+        .content_length()
+        .map(|length| length.min(MAX_RESPONSE_BODY_BYTES as u64) as usize)
+        .unwrap_or(0);
+    let mut body = Vec::with_capacity(capacity);
+    while let Some(chunk) = response.chunk().await? {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(response_body_too_large_error)?;
+        if next_len > MAX_RESPONSE_BODY_BYTES {
+            return Err(response_body_too_large_error());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn response_body_too_large_error() -> PluginError {
+    PluginError::Api(format!(
+        "response body exceeds {} bytes",
+        MAX_RESPONSE_BODY_BYTES
+    ))
 }
 
 fn value_as_query_string(value: &Value) -> Result<String, PluginError> {
@@ -603,4 +631,49 @@ fn allow_loopback_for_tests() -> bool {
     cfg!(debug_assertions)
         && matches!(std::env::var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS").as_deref(), Ok("1"))
         && matches!(std::env::var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS").as_deref(), Ok("1"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SPEC: PluginSpec = PluginSpec {
+        plugin_id: "test-bridge-api-node",
+        provider: "test",
+        default_base_url: "https://api.example.test",
+        operations: &[],
+        api_key_header: None,
+        api_key_secret: None,
+    };
+
+    #[tokio::test]
+    async fn malformed_jsonrpc_params_preserve_error_envelope() {
+        let response = handle_request_json(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "request-1",
+                "method": "node.exec.v2",
+                "params": {
+                    "contract_version": 1
+                }
+            })
+            .to_string(),
+            &TEST_SPEC,
+        )
+        .await
+        .expect("error response should serialize");
+
+        let payload: Value = serde_json::from_str(&response).expect("json response");
+        assert_eq!(payload["jsonrpc"], json!("2.0"));
+        assert_eq!(payload["id"], json!("request-1"));
+        assert!(payload.get("error").is_some(), "response should be a JSON-RPC error");
+        assert!(payload.get("success").is_none(), "legacy response shape should not be used");
+    }
+
+    #[test]
+    fn operation_path_rejects_absolute_urls() {
+        assert!(relative_operation_path("https://attacker.example/path").is_err());
+        assert!(relative_operation_path("//attacker.example/path").is_err());
+        assert_eq!(relative_operation_path("/quote").expect("relative path"), "quote");
+    }
 }

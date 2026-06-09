@@ -1,10 +1,13 @@
+use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard};
+
 use axum::{extract::Json, routing::post, Router};
 use hyperliquid_node_official_plugin::handle_request_json;
 use serial_test::serial;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn get_all_mids_reads_info_endpoint() {
     let _loopback = LoopbackGuard::set();
@@ -42,7 +45,7 @@ async fn get_all_mids_reads_info_endpoint() {
     assert_eq!(payload["output"]["all_mids"]["BTC"], json!("64000.1"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn get_l2_book_returns_normalized_output() {
     let _loopback = LoopbackGuard::set();
@@ -118,7 +121,7 @@ async fn get_candle_snapshot_requires_loopback_guard() {
     assert!(error.contains("blocked"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn get_all_mids_rejects_non_allowlisted_base_url() {
     let _loopback = LoopbackGuard::set();
@@ -216,6 +219,113 @@ async fn bridge2_prepare_deposit_encodes_erc20_transfer() {
     );
 }
 
+#[tokio::test]
+async fn bridge2_prepare_deposit_rejects_bad_typed_chain_id() {
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "hyperliquid-node",
+            "node_id": "node-bridge2",
+            "operation": "hyperliquid_bridge2_prepare_deposit",
+            "input": {
+                "amount": "12.3",
+                "chain_id": "421614"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should return an error envelope");
+
+    let payload: Value = serde_json::from_str(&response).expect("json response");
+    assert_eq!(payload["success"], json!(false));
+    assert!(payload["error"]
+        .as_str()
+        .expect("error message")
+        .contains("input chain_id must be an integer"));
+}
+
+#[tokio::test]
+async fn bridge2_prepare_deposit_rejects_bad_typed_decimals() {
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "hyperliquid-node",
+            "node_id": "node-bridge2",
+            "operation": "hyperliquid_bridge2_prepare_deposit",
+            "input": {
+                "amount": "12.3",
+                "decimals": "6"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should return an error envelope");
+
+    let payload: Value = serde_json::from_str(&response).expect("json response");
+    assert_eq!(payload["success"], json!(false));
+    assert!(payload["error"]
+        .as_str()
+        .expect("error message")
+        .contains("input decimals must be an integer"));
+}
+
+#[tokio::test]
+async fn bridge2_prepare_deposit_with_permit_rejects_invalid_payloads() {
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "hyperliquid-node",
+            "node_id": "node-bridge2",
+            "operation": "hyperliquid_bridge2_prepare_deposit_with_permit",
+            "input": {
+                "owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": "1000000",
+                "nonce": "1",
+                "deadline": "2000000000",
+                "call_data": "0x1234"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should return an error envelope");
+
+    let payload: Value = serde_json::from_str(&response).expect("json response");
+    assert_eq!(payload["success"], json!(false));
+    assert!(payload["error"]
+        .as_str()
+        .expect("error message")
+        .contains("input owner must be a 0x-prefixed 20-byte hex address"));
+
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "hyperliquid-node",
+            "node_id": "node-bridge2",
+            "operation": "hyperliquid_bridge2_prepare_deposit_with_permit",
+            "input": {
+                "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": "1000000",
+                "nonce": "1",
+                "deadline": "2000000000",
+                "call_data": {"unexpected": true}
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should return an error envelope");
+
+    let payload: Value = serde_json::from_str(&response).expect("json response");
+    assert_eq!(payload["success"], json!(false));
+    assert!(payload["error"]
+        .as_str()
+        .expect("error message")
+        .contains("input call_data must be a 0x-prefixed hex string"));
+}
+
 async fn info_handler(Json(body): Json<Value>) -> Json<Value> {
     let response = match body["type"].as_str() {
         Some("allMids") => json!({"BTC": "64000.1", "ETH": "3200.5"}),
@@ -245,23 +355,42 @@ async fn info_handler(Json(body): Json<Value>) -> Json<Value> {
     Json(response)
 }
 
-struct LoopbackGuard;
+static LOOPBACK_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct LoopbackGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous_loopback: Option<OsString>,
+    previous_internal: Option<OsString>,
+}
 
 impl LoopbackGuard {
     fn set() -> Self {
+        let lock = LOOPBACK_ENV_LOCK.lock().expect("loopback env lock poisoned");
+        let previous_loopback = std::env::var_os("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS");
+        let previous_internal = std::env::var_os("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS");
         unsafe {
             std::env::set_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS", "1");
             std::env::set_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS", "1");
         }
-        Self
+        Self {
+            _lock: lock,
+            previous_loopback,
+            previous_internal,
+        }
     }
 }
 
 impl Drop for LoopbackGuard {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS");
-            std::env::remove_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS");
+            match self.previous_loopback.take() {
+                Some(value) => std::env::set_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS", value),
+                None => std::env::remove_var("CHAINBOT_HTTP_NODE_ALLOW_LOOPBACK_FOR_TESTS"),
+            }
+            match self.previous_internal.take() {
+                Some(value) => std::env::set_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS", value),
+                None => std::env::remove_var("CHAINBOT_INTERNAL_ALLOW_TEST_DESTINATIONS"),
+            }
         }
     }
 }
