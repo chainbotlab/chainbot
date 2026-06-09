@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "base-bridge-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/base-bridge-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "base_prepare_l1_standard_bridge_deposit"
+summary = "Prepare an unsigned Base OP Stack L1 standard bridge deposit action"
+input_schema = ["l1_chain_id", "l1_standard_bridge", "l1_token", "l2_token", "to", "amount", "min_gas_limit"]
+optional_input_schema = ["extra_data", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "base_prepare_l2_standard_bridge_withdraw"
+summary = "Prepare an unsigned Base OP Stack L2 standard bridge withdrawal action"
+input_schema = ["l2_chain_id", "l2_standard_bridge", "l2_token", "to", "amount", "min_gas_limit"]
+optional_input_schema = ["extra_data", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/base-bridge-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "base_bridge_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/base_bridge_node_official_plugin"
+to = "bin/base-bridge-node"

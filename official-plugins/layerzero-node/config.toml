@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "layerzero-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/layerzero-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "layerzero_prepare_oft_send"
+summary = "Prepare an unsigned LayerZero OFT send action"
+input_schema = ["source_chain_id", "oft", "dstEid", "to", "amountLD", "minAmountLD", "nativeFee", "lzTokenFee", "refundAddress"]
+optional_input_schema = ["extraOptions", "composeMsg", "oftCmd", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "layerzero_prepare_set_peer"
+summary = "Prepare an unsigned LayerZero OApp setPeer configuration action"
+input_schema = ["chain_id", "oapp", "eid", "peer"]
+optional_input_schema = []
+output_schema = ["unsigned_action", "metadata"]
+kind = "write"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/layerzero-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "layerzero_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/layerzero_node_official_plugin"
+to = "bin/layerzero-node"

@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "arbitrum-bridge-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/arbitrum-bridge-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "arbitrum_prepare_l1_erc20_deposit"
+summary = "Prepare an unsigned Arbitrum canonical L1 ERC-20 gateway deposit action"
+input_schema = ["l1_chain_id", "l1_gateway_router", "l1_token", "to", "amount", "max_gas", "gas_price_bid"]
+optional_input_schema = ["refund_to", "gateway_data", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "arbitrum_prepare_l2_erc20_withdraw"
+summary = "Prepare an unsigned Arbitrum canonical L2 ERC-20 gateway withdrawal action"
+input_schema = ["l2_chain_id", "l2_gateway_router", "l2_token", "to", "amount"]
+optional_input_schema = ["gateway_data", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/arbitrum-bridge-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "arbitrum_bridge_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/arbitrum_bridge_node_official_plugin"
+to = "bin/arbitrum-bridge-node"
