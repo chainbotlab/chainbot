@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "axelar-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/axelar-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "axelar_prepare_interchain_transfer"
+summary = "Prepare an unsigned Axelar ITS interchainTransfer action"
+input_schema = ["source_chain_id", "interchain_token_service", "tokenId", "destinationChain", "destinationAddress", "amount"]
+optional_input_schema = ["metadata", "gasValue", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "axelar_prepare_call_contract"
+summary = "Prepare an unsigned Axelar GMP callContract action"
+input_schema = ["source_chain_id", "gateway", "destinationChain", "destinationContractAddress", "payload"]
+optional_input_schema = ["gasService", "gasValue", "refundAddress", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "write"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/axelar-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "axelar_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/axelar_node_official_plugin"
+to = "bin/axelar-node"
