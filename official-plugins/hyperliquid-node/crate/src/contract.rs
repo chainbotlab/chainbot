@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const EXECUTE_METHOD: &str = "node.execute";
+pub const EXECUTE_METHOD: &str = "node.exec.v2";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginRequest {

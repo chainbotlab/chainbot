@@ -57,7 +57,7 @@ async fn get_l2_book_returns_normalized_output() {
         &json!({
             "jsonrpc": "2.0",
             "id": 7,
-            "method": "node.execute",
+            "method": "node.exec.v2",
             "params": {
                 "contract_version": "1.0.0",
                 "plugin_id": "hyperliquid-node",
@@ -149,6 +149,71 @@ async fn get_all_mids_rejects_non_allowlisted_base_url() {
     assert_eq!(payload["success"], json!(false));
     let error = payload["error"].as_str().expect("error message");
     assert!(error.contains("not allowlisted"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn bridge2_prepare_withdraw3_returns_typed_data() {
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "hyperliquid-node",
+            "node_id": "node-bridge2",
+            "operation": "hyperliquid_bridge2_prepare_withdraw3",
+            "input": {
+                "destination": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "amount": "12.3",
+                "time": 1698693262,
+                "signatureChainId": "0xa4b1",
+                "hyperliquidChain": "Mainnet"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request succeeds");
+
+    let payload: Value = serde_json::from_str(&response).expect("json response");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["result_state"], json!("prepared"));
+    assert_eq!(
+        payload["output"]["hyperliquid_action"]["action"]["type"],
+        json!("withdraw3")
+    );
+    assert_eq!(payload["output"]["hyperliquid_action"]["nonce"], json!(1698693262));
+}
+
+#[tokio::test]
+async fn bridge2_prepare_deposit_encodes_erc20_transfer() {
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "hyperliquid-node",
+            "node_id": "node-bridge2",
+            "operation": "hyperliquid_bridge2_prepare_deposit",
+            "input": {
+                "amount": "12.3"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request succeeds");
+
+    let payload: Value = serde_json::from_str(&response).expect("json response");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["result_state"], json!("prepared"));
+    assert_eq!(
+        payload["output"]["unsigned_action"]["calldata_format"],
+        json!("erc20_transfer(address,uint256)")
+    );
+    assert_eq!(
+        payload["output"]["unsigned_action"]["parameters"]["amount_units"],
+        json!("12300000")
+    );
+    assert_eq!(
+        payload["output"]["unsigned_action"]["data"],
+        json!("0xa9059cbb0000000000000000000000002df1c51e09aecf9cacb7bc98cb1742757f163df70000000000000000000000000000000000000000000000000000000000bbaee0")
+    );
 }
 
 async fn info_handler(Json(body): Json<Value>) -> Json<Value> {
