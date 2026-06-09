@@ -36,6 +36,81 @@ path = "official-plugins/jupiter-node"
 summary = "Official Jupiter swap API node plugin"
 
 [[plugins]]
+plugin_id = "lifi-node"
+path = "official-plugins/lifi-node"
+summary = "Official LI.FI cross-chain route and quote API node plugin"
+
+[[plugins]]
+plugin_id = "squid-node"
+path = "official-plugins/squid-node"
+summary = "Official Squid cross-chain route and status API node plugin"
+
+[[plugins]]
+plugin_id = "rango-node"
+path = "official-plugins/rango-node"
+summary = "Official Rango multi-step route transaction API node plugin"
+
+[[plugins]]
+plugin_id = "across-node"
+path = "official-plugins/across-node"
+summary = "Official Across Swap API quote and transaction-preparation node plugin"
+
+[[plugins]]
+plugin_id = "debridge-node"
+path = "official-plugins/debridge-node"
+summary = "Official deBridge DLN order creation and status node plugin"
+
+[[plugins]]
+plugin_id = "stargate-node"
+path = "official-plugins/stargate-node"
+summary = "Official Stargate V2 bridge action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "layerzero-node"
+path = "official-plugins/layerzero-node"
+summary = "Official LayerZero OFT and OApp action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "wormhole-node"
+path = "official-plugins/wormhole-node"
+summary = "Official Wormhole NTT and messaging action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "ccip-node"
+path = "official-plugins/ccip-node"
+summary = "Official Chainlink CCIP token transfer and TokenPool action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "usdt0-node"
+path = "official-plugins/usdt0-node"
+summary = "Official USDT0 and XAUt0 OFT action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "axelar-node"
+path = "official-plugins/axelar-node"
+summary = "Official Axelar GMP and ITS action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "hyperlane-node"
+path = "official-plugins/hyperlane-node"
+summary = "Official Hyperlane Warp Route and messaging action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "arbitrum-bridge-node"
+path = "official-plugins/arbitrum-bridge-node"
+summary = "Official Arbitrum canonical bridge action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "base-bridge-node"
+path = "official-plugins/base-bridge-node"
+summary = "Official Base bridge action-preparation node plugin"
+
+[[plugins]]
+plugin_id = "polygon-bridge-node"
+path = "official-plugins/polygon-bridge-node"
+summary = "Official Polygon PoS bridge and state-transfer action-preparation node plugin"
+
+[[plugins]]
 plugin_id = "uniswap-node"
 path = "official-plugins/uniswap-node"
 summary = "Official Uniswap V2 Router-compatible swap node plugin"
@@ -98,7 +173,7 @@ summary = "Official Bybit market and private user-stream trigger plugin"
 [[plugins]]
 plugin_id = "hyperliquid-node"
 path = "official-plugins/hyperliquid-node"
-summary = "Official Hyperliquid info API node plugin"
+summary = "Official Hyperliquid info API and Bridge2 node plugin"
 
 [[plugins]]
 plugin_id = "hyperliquid-trigger"

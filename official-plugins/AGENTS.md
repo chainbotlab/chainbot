@@ -24,12 +24,19 @@
 - `eth-node/`, `eth-trigger/`: Ethereum official plugin packages.
 - `solana-node/`, `solana-trigger/`: Solana official plugin packages.
 - `jupiter-node/`: Jupiter swap API and Solana swap transaction helper plugin package.
+- `lifi-node/`, `squid-node/`, `rango-node/`: Cross-chain route/quote API plugin packages.
+- `across-node/`, `debridge-node/`: Intent/DLN bridge quote and transaction-preparation plugin packages.
+- `stargate-node/`, `layerzero-node/`, `usdt0-node/`: LayerZero/OFT bridge action-preparation plugin packages.
+- `wormhole-node/`, `ccip-node/`, `axelar-node/`, `hyperlane-node/`: Cross-chain messaging and token-transfer action-preparation plugin packages.
+- `arbitrum-bridge-node/`, `base-bridge-node/`, `polygon-bridge-node/`: Canonical bridge action-preparation plugin packages.
 - `uniswap-node/`: Uniswap V2 Router02-compatible quote, price polling, and swap plugin package.
 - `uniswap-trigger/`: Uniswap V2 Router02-compatible price-threshold listener plugin package.
 - `pancakeswap-node/`: PancakeSwap V3 exact-input swap plugin package; V2/fork-compatible routing stays in `uniswap-node/`.
 - `raydium-node/`: Raydium Trade API quote and swap transaction helper plugin package.
 - `sanctum-node/`: Sanctum LST metadata and swap order helper plugin package.
 - `http-node/`: Outbound HTTP node reference implementation.
+- `bridge-node-core/`: Shared internal crate for bridge API node contract and HTTP safety utilities; not a standalone plugin package.
+- `bridge-action-core/`: Shared internal crate for unsigned bridge action-preparation plugins; not a standalone plugin package.
 - `build-official-plugin/`, `echo-official-plugin/`: Source-install reference packages.
 
 ## Docs
