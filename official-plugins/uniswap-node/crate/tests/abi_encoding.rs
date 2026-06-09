@@ -1,6 +1,6 @@
-use alloy::primitives::U256;
+use alloy::primitives::{Bytes, U256};
 use uniswap_node_official_plugin::provider::{
-    encode_get_amounts_out, encode_swap_exact_tokens_for_tokens, parse_address,
+    decode_u256_array, encode_get_amounts_out, encode_swap_exact_tokens_for_tokens, parse_address,
 };
 
 #[test]
@@ -55,6 +55,17 @@ fn swap_exact_tokens_for_tokens_calldata_has_dynamic_path_offset() {
     );
     assert_eq!(&hex[264..328], &word(1_800_000_000));
     assert_eq!(&hex[328..392], &word(2));
+}
+
+#[test]
+fn decode_u256_array_rejects_overflowing_lengths() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&U256::from(32).to_be_bytes::<32>());
+    bytes.extend_from_slice(&U256::from(u64::MAX).to_be_bytes::<32>());
+
+    let error = decode_u256_array(&Bytes::from(bytes)).expect_err("overflowing length should fail");
+
+    assert!(error.to_string().contains("overflows"));
 }
 
 fn word(value: u64) -> String {

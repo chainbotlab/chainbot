@@ -161,10 +161,15 @@ pub fn decode_u256_array(data: &Bytes) -> Result<Vec<U256>, PluginError> {
             "unexpected uint256[] offset {offset}"
         )));
     }
-    let len = decode_word(&bytes[32..64])?
+    let len: usize = decode_word(&bytes[32..64])?
         .try_into()
         .map_err(|_| PluginError::Rpc(String::from("uint256[] length does not fit usize")))?;
-    let expected_len = 64 + len * 32;
+    let tail_len = len
+        .checked_mul(32)
+        .ok_or_else(|| PluginError::Rpc(String::from("uint256[] length overflows usize")))?;
+    let expected_len = 64usize
+        .checked_add(tail_len)
+        .ok_or_else(|| PluginError::Rpc(String::from("uint256[] encoded length overflows usize")))?;
     if bytes.len() < expected_len {
         return Err(PluginError::Rpc(String::from(
             "encoded uint256[] result is truncated",
@@ -172,8 +177,15 @@ pub fn decode_u256_array(data: &Bytes) -> Result<Vec<U256>, PluginError> {
     }
     let mut values = Vec::with_capacity(len);
     for index in 0..len {
-        let start = 64 + index * 32;
-        values.push(decode_word(&bytes[start..start + 32])?);
+        let start = 64usize
+            .checked_add(index.checked_mul(32).ok_or_else(|| {
+                PluginError::Rpc(String::from("uint256[] item offset overflows usize"))
+            })?)
+            .ok_or_else(|| PluginError::Rpc(String::from("uint256[] item offset overflows usize")))?;
+        let end = start
+            .checked_add(32)
+            .ok_or_else(|| PluginError::Rpc(String::from("uint256[] item end overflows usize")))?;
+        values.push(decode_word(&bytes[start..end])?);
     }
     Ok(values)
 }

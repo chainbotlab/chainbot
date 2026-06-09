@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use alloy::network::TransactionBuilder;
 use alloy::providers::Provider;
@@ -13,9 +14,13 @@ use crate::provider::{
     parse_address, parse_path, parse_u256_dec, provider_with_wallet, signer_address,
 };
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub async fn dispatch(request: PluginRequest) -> Result<PluginResponse, PluginError> {
     validate_request(&request)?;
-    let client = Client::new();
+    let client = http_client()?;
     match request.operation.as_str() {
         "uniswap_get_amounts_out" => get_amounts_out(&client, &request).await,
         "uniswap_watch_price" => watch_price(&client, &request).await,
@@ -24,6 +29,14 @@ pub async fn dispatch(request: PluginRequest) -> Result<PluginResponse, PluginEr
             "operation {other} is not supported"
         ))),
     }
+}
+
+fn http_client() -> Result<Client, PluginError> {
+    Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .map_err(PluginError::from)
 }
 
 fn validate_request(request: &PluginRequest) -> Result<(), PluginError> {
@@ -108,7 +121,7 @@ async fn swap_exact_tokens_for_tokens(request: &PluginRequest) -> Result<PluginR
         None => signer_address(signer_secret)?,
     };
     let deadline = parse_u256_dec(required_string(request, "deadline")?, "deadline")?;
-    let confirmation_mode = request.input_string("confirmation_mode").unwrap_or("safe");
+    let confirmation_mode = confirmation_mode(request)?;
     let data = encode_swap_exact_tokens_for_tokens(
         amount_in,
         amount_out_min,
@@ -159,10 +172,17 @@ async fn send_transaction(
         ));
     }
 
-    let _receipt = pending
+    let receipt = pending
+        .with_timeout(Some(RECEIPT_TIMEOUT))
         .get_receipt()
         .await
         .map_err(|error| PluginError::Rpc(error.to_string()))?;
+    if !receipt.status() {
+        return Ok(PluginResponse::success(
+            write_output("failed", tx_hash, confirmation_mode),
+            Some("failed"),
+        ));
+    }
 
     Ok(PluginResponse::success(
         write_output("confirmed", tx_hash, confirmation_mode),
@@ -174,6 +194,16 @@ fn required_string<'a>(request: &'a PluginRequest, key: &str) -> Result<&'a str,
     request
         .input_string(key)
         .ok_or_else(|| PluginError::InvalidInput(format!("{key} is required")))
+}
+
+fn confirmation_mode(request: &PluginRequest) -> Result<&str, PluginError> {
+    let confirmation_mode = request.input_string("confirmation_mode").unwrap_or("safe");
+    match confirmation_mode {
+        "submit_only" | "safe" => Ok(confirmation_mode),
+        other => Err(PluginError::InvalidInput(format!(
+            "confirmation_mode must be submit_only or safe, got {other}"
+        ))),
+    }
 }
 
 fn amounts_output(amounts: Vec<alloy::primitives::U256>) -> BTreeMap<String, Value> {

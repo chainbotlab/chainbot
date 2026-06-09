@@ -6,6 +6,15 @@ use crate::errors::PluginError;
 
 pub const DEFAULT_SWAP_BASE_URL: &str = "https://api.jup.ag/swap/v1";
 
+pub fn api_key_for_url<'a>(request: &'a PluginRequest, url: &Url) -> Option<&'a str> {
+    let api_key = request.activation_secret("api_key")?;
+    if is_default_origin(url) || is_allowed_origin(request, url) {
+        Some(api_key)
+    } else {
+        None
+    }
+}
+
 pub fn swap_base_url(request: &PluginRequest) -> Result<Url, PluginError> {
     let raw = request.input_string("base_url").unwrap_or(DEFAULT_SWAP_BASE_URL);
     let mut url = Url::parse(raw)
@@ -56,4 +65,38 @@ async fn parse_api_response(response: reqwest::Response) -> Result<Value, Plugin
         return Err(PluginError::Api(error.to_string()));
     }
     Ok(payload)
+}
+
+fn is_default_origin(url: &Url) -> bool {
+    Url::parse(DEFAULT_SWAP_BASE_URL)
+        .ok()
+        .and_then(|default| normalize_origin(&default).ok())
+        .as_deref()
+        == normalize_origin(url).ok().as_deref()
+}
+
+fn is_allowed_origin(request: &PluginRequest, url: &Url) -> bool {
+    let Some(activation) = request.activation.as_ref() else {
+        return false;
+    };
+    let Ok(request_origin) = normalize_origin(url) else {
+        return false;
+    };
+    activation.allowed_origins.iter().any(|origin| {
+        Url::parse(origin)
+            .ok()
+            .and_then(|origin| normalize_origin(&origin).ok())
+            .as_deref()
+            == Some(request_origin.as_str())
+    })
+}
+
+fn normalize_origin(url: &Url) -> Result<String, PluginError> {
+    let port = url.port_or_known_default().ok_or_else(|| {
+        PluginError::InvalidInput(String::from("base_url must use a known port for its scheme"))
+    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| PluginError::InvalidInput(String::from("base_url must include a host")))?;
+    Ok(format!("{}://{}:{}", url.scheme(), host, port))
 }

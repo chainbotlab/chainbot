@@ -67,6 +67,35 @@ async fn uniswap_watch_price_evaluates_threshold() {
     assert_eq!(payload["output"]["amount_out"], "250");
 }
 
+#[tokio::test]
+async fn uniswap_jsonrpc_error_preserves_request_id() {
+    let response = handle_request_json(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "request-1",
+            "method": "node.execute",
+            "params": {
+                "contract_version": "1.0.0",
+                "plugin_id": "uniswap-node",
+                "node_id": "node-3",
+                "operation": "uniswap_get_amounts_out",
+                "input": {}
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should return an error envelope");
+
+    let payload: Value = serde_json::from_str(&response).expect("response should decode");
+    assert_eq!(payload["jsonrpc"], "2.0");
+    assert_eq!(payload["id"], "request-1");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("message should be a string")
+        .contains("node.exec.v2"));
+}
+
 #[derive(Clone)]
 struct RpcState;
 

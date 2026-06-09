@@ -13,6 +13,9 @@ use crate::provider::{
     parse_address, parse_path, parse_u256_dec, quote_amounts_out,
 };
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceCheck {
     pub amount_out: U256,
@@ -22,11 +25,12 @@ pub struct PriceCheck {
 }
 
 pub async fn run_listener(command: TriggerStartCommand) -> Result<(), String> {
+    validate_command(&command)?;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{}", ready_message()).map_err(|error| error.to_string())?;
     stdout.flush().map_err(|error| error.to_string())?;
 
-    let client = Client::new();
+    let client = http_client()?;
     let max_polls = command
         .params
         .get("max_polls")
@@ -51,6 +55,39 @@ pub async fn run_listener(command: TriggerStartCommand) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn http_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn validate_command(command: &TriggerStartCommand) -> Result<(), String> {
+    if command.source != "uniswap_price_threshold" {
+        return Err(format!("unsupported Uniswap trigger source {}", command.source));
+    }
+    let _endpoint = param_string(command, "endpoint")?;
+    let _router = parse_address(param_string(command, "router")?, "params.router")?;
+    let _amount_in = parse_u256_dec(param_string(command, "amount_in")?, "params.amount_in")?;
+    let _threshold_out = parse_u256_dec(param_string(command, "threshold_out")?, "params.threshold_out")?;
+    let comparison = command
+        .params
+        .get("comparison")
+        .and_then(Value::as_str)
+        .unwrap_or("gte");
+    match comparison {
+        "gte" | "lte" => {}
+        other => return Err(format!("comparison must be gte or lte, got {other}")),
+    }
+    command
+        .params
+        .get("path")
+        .ok_or_else(|| String::from("params.path is required"))
+        .and_then(parse_path)?;
     Ok(())
 }
 

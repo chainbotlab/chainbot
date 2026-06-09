@@ -41,8 +41,9 @@ pub fn failure_jsonrpc_response(id: contract::JsonRpcId, message: &str) -> Strin
 }
 
 fn extract_jsonrpc_id(input: &str) -> Option<contract::JsonRpcId> {
-    match serde_json::from_str::<contract::RequestEnvelope>(input).ok()? {
-        contract::RequestEnvelope::Legacy(_) => None,
-        contract::RequestEnvelope::JsonRpc(envelope) => Some(envelope.id),
-    }
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value
+        .get("id")
+        .cloned()
+        .and_then(|id| serde_json::from_value::<contract::JsonRpcId>(id).ok())
 }

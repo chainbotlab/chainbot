@@ -104,14 +104,28 @@ pub fn decode_u256_array(data: &Bytes) -> Result<Vec<U256>, String> {
     let len: usize = U256::from_be_slice(&bytes[32..64])
         .try_into()
         .map_err(|_| String::from("uint256[] length does not fit usize"))?;
-    let expected_len = 64 + len * 32;
+    let tail_len = len
+        .checked_mul(32)
+        .ok_or_else(|| String::from("uint256[] length overflows usize"))?;
+    let expected_len = 64usize
+        .checked_add(tail_len)
+        .ok_or_else(|| String::from("uint256[] encoded length overflows usize"))?;
     if bytes.len() < expected_len {
         return Err(String::from("encoded uint256[] result is truncated"));
     }
     let mut values = Vec::with_capacity(len);
     for index in 0..len {
-        let start = 64 + index * 32;
-        values.push(U256::from_be_slice(&bytes[start..start + 32]));
+        let start = 64usize
+            .checked_add(
+                index
+                    .checked_mul(32)
+                    .ok_or_else(|| String::from("uint256[] item offset overflows usize"))?,
+            )
+            .ok_or_else(|| String::from("uint256[] item offset overflows usize"))?;
+        let end = start
+            .checked_add(32)
+            .ok_or_else(|| String::from("uint256[] item end overflows usize"))?;
+        values.push(U256::from_be_slice(&bytes[start..end]));
     }
     Ok(values)
 }

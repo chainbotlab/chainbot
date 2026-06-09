@@ -48,7 +48,7 @@ kind = "swap"
 name = "sanctum_get_signature_status"
 summary = "Read a Solana signature status for a Sanctum swap"
 input_schema = ["endpoint", "signature"]
-output_schema = ["signature", "status"]
+output_schema = ["signature", "status", "metadata"]
 kind = "read"
 
 [source]

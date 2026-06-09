@@ -73,6 +73,9 @@ fn exact_input_calldata_encodes_dynamic_path_tail() {
     assert_eq!(&hex[200..264], &word(100));
     assert_eq!(&hex[264..328], &word(90));
     assert_eq!(&hex[328..392], &word(path.len() as u64));
+    assert_eq!(&hex[392..478], &hex::encode(path.as_ref()));
+    assert_eq!(&hex[478..520], &"0".repeat(42));
+    assert_eq!(hex.len(), 520);
 }
 
 fn word(value: u64) -> String {

@@ -110,6 +110,59 @@ async fn sanctum_send_swap_transaction_submit_only_returns_signature() {
     assert_eq!(payload["output"]["transaction_id"], "test-signature");
 }
 
+#[tokio::test]
+async fn sanctum_send_swap_transaction_finalized_returns_settled() {
+    let server = TestServer::spawn().await;
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "sanctum-node",
+            "node_id": "node-5",
+            "operation": "sanctum_send_swap_transaction",
+            "input": {
+                "endpoint": server.rpc_url,
+                "signed_transaction": "AQIDBA==",
+                "confirmation_mode": "finalized",
+                "preflight": true
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should succeed");
+
+    let payload: Value = serde_json::from_str(&response).expect("response should decode");
+    assert_eq!(payload["success"], true);
+    assert_eq!(payload["result_state"], "settled");
+    assert_eq!(payload["output"]["transaction_id"], "test-signature");
+}
+
+#[tokio::test]
+async fn sanctum_get_signature_status_returns_metadata() {
+    let server = TestServer::spawn().await;
+    let response = handle_request_json(
+        &json!({
+            "contract_version": "1.0.0",
+            "plugin_id": "sanctum-node",
+            "node_id": "node-6",
+            "operation": "sanctum_get_signature_status",
+            "input": {
+                "endpoint": server.rpc_url,
+                "signature": "test-signature"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .expect("request should succeed");
+
+    let payload: Value = serde_json::from_str(&response).expect("response should decode");
+    assert_eq!(payload["success"], true);
+    assert_eq!(payload["output"]["signature"], "test-signature");
+    assert_eq!(payload["output"]["status"]["confirmation_status"], "finalized");
+    assert_eq!(payload["output"]["metadata"]["provider"], "sanctum");
+}
+
 #[derive(Clone)]
 struct TestState;
 
@@ -161,9 +214,9 @@ async fn handle_rpc(State(_state): State<TestState>, Json(payload): Json<Value>)
         "getSignatureStatuses" => json!({
             "value": [{
                 "slot": 99,
-                "confirmations": 1,
+                "confirmations": null,
                 "err": null,
-                "confirmationStatus": "confirmed"
+                "confirmationStatus": "finalized"
             }]
         }),
         _ => json!(null),

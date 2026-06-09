@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const EXECUTE_METHOD: &str = "node.execute";
+pub const CONTRACT_VERSION: &str = "1.0.0";
+pub const EXECUTE_METHOD: &str = "node.exec.v2";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginRequest {
@@ -109,7 +110,7 @@ impl PluginRequest {
 impl PluginResponse {
     pub fn success(output: BTreeMap<String, Value>, result_state: Option<&'static str>) -> Self {
         Self {
-            contract_version: String::from("1.0.0"),
+            contract_version: String::from(CONTRACT_VERSION),
             success: true,
             result_state,
             output,
@@ -141,7 +142,7 @@ impl JsonRpcResponse {
             jsonrpc: JSONRPC_VERSION,
             id,
             result: Some(JsonRpcSuccessResult {
-                contract_version: "1.0.0",
+                contract_version: CONTRACT_VERSION,
                 result_state: response.result_state,
                 output: response.output,
             }),
@@ -164,4 +165,48 @@ impl JsonRpcResponse {
 
 pub fn metadata(provider: &str) -> Value {
     json!({"provider": provider})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> PluginRequest {
+        PluginRequest {
+            contract_version: String::from(CONTRACT_VERSION),
+            plugin_id: String::from("jupiter-node"),
+            node_id: String::from("node-1"),
+            operation: String::from("jupiter_get_quote"),
+            input: BTreeMap::new(),
+            activation: None,
+        }
+    }
+
+    #[test]
+    fn jsonrpc_envelope_accepts_node_exec_v2() {
+        let envelope = RequestEnvelope::JsonRpc(JsonRpcRequest {
+            jsonrpc: String::from(JSONRPC_VERSION),
+            id: JsonRpcId::Number(1),
+            method: String::from(EXECUTE_METHOD),
+            params: request(),
+        });
+
+        let (_request, id) = envelope.into_request().expect("envelope should be valid");
+
+        assert!(matches!(id, Some(JsonRpcId::Number(1))));
+    }
+
+    #[test]
+    fn jsonrpc_envelope_rejects_legacy_node_execute_method() {
+        let envelope = RequestEnvelope::JsonRpc(JsonRpcRequest {
+            jsonrpc: String::from(JSONRPC_VERSION),
+            id: JsonRpcId::Number(1),
+            method: String::from("node.execute"),
+            params: request(),
+        });
+
+        let error = envelope.into_request().expect_err("legacy method should be rejected");
+
+        assert!(error.contains(EXECUTE_METHOD));
+    }
 }

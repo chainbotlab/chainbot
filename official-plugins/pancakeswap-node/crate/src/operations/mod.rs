@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use alloy::network::TransactionBuilder;
 use alloy::providers::Provider;
@@ -11,6 +12,8 @@ use crate::provider::{
     bytes_from_hex, encode_exact_input, encode_exact_input_single, parse_address, parse_u24_dec,
     parse_u256_dec, provider_with_wallet, signer_address,
 };
+
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub async fn dispatch(request: PluginRequest) -> Result<PluginResponse, PluginError> {
     validate_request(&request)?;
@@ -82,11 +85,7 @@ async fn swap_exact_input_single(request: &PluginRequest) -> Result<PluginRespon
 async fn swap_exact_input(request: &PluginRequest) -> Result<PluginResponse, PluginError> {
     let router = parse_address(required_string(request, "router")?, "router")?;
     let encoded_path = bytes_from_hex(required_string(request, "encoded_path")?, "encoded_path")?;
-    if encoded_path.len() < 43 {
-        return Err(PluginError::InvalidInput(String::from(
-            "encoded_path must contain at least tokenIn, fee, tokenOut",
-        )));
-    }
+    validate_encoded_path(&encoded_path)?;
     let recipient = recipient(request)?;
     let deadline = parse_u256_dec(required_string(request, "deadline")?, "deadline")?;
     let amount_in = parse_u256_dec(required_string(request, "amount_in")?, "amount_in")?;
@@ -118,7 +117,7 @@ async fn send_router_transaction(
         .with_from(from)
         .with_to(router)
         .with_input(data);
-    let confirmation_mode = request.input_string("confirmation_mode").unwrap_or("safe");
+    let confirmation_mode = confirmation_mode(request)?;
     send_transaction(endpoint, signer_secret, tx, confirmation_mode).await
 }
 
@@ -142,10 +141,17 @@ async fn send_transaction(
         ));
     }
 
-    let _receipt = pending
+    let receipt = pending
+        .with_timeout(Some(RECEIPT_TIMEOUT))
         .get_receipt()
         .await
         .map_err(|error| PluginError::Rpc(error.to_string()))?;
+    if !receipt.status() {
+        return Ok(PluginResponse::success(
+            write_output("failed", tx_hash, confirmation_mode),
+            Some("failed"),
+        ));
+    }
 
     Ok(PluginResponse::success(
         write_output("confirmed", tx_hash, confirmation_mode),
@@ -167,6 +173,32 @@ fn required_string<'a>(request: &'a PluginRequest, key: &str) -> Result<&'a str,
     request
         .input_string(key)
         .ok_or_else(|| PluginError::InvalidInput(format!("{key} is required")))
+}
+
+fn confirmation_mode(request: &PluginRequest) -> Result<&str, PluginError> {
+    let confirmation_mode = request.input_string("confirmation_mode").unwrap_or("safe");
+    match confirmation_mode {
+        "submit_only" | "safe" => Ok(confirmation_mode),
+        other => Err(PluginError::InvalidInput(format!(
+            "confirmation_mode must be submit_only or safe, got {other}"
+        ))),
+    }
+}
+
+fn validate_encoded_path(encoded_path: &[u8]) -> Result<(), PluginError> {
+    const ADDRESS_LEN: usize = 20;
+    const FEE_LEN: usize = 3;
+    if encoded_path.len() < ADDRESS_LEN + FEE_LEN + ADDRESS_LEN {
+        return Err(PluginError::InvalidInput(String::from(
+            "encoded_path must contain at least tokenIn, fee, tokenOut",
+        )));
+    }
+    if (encoded_path.len() - ADDRESS_LEN) % (FEE_LEN + ADDRESS_LEN) != 0 {
+        return Err(PluginError::InvalidInput(String::from(
+            "encoded_path must follow token(20) + fee(3) + token(20) segments",
+        )));
+    }
+    Ok(())
 }
 
 fn write_output(status: &str, transaction_id: String, confirmation_mode: &str) -> BTreeMap<String, Value> {

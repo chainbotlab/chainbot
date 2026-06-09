@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Map, Value};
@@ -7,9 +8,12 @@ use crate::contract::{metadata, PluginRequest, PluginResponse};
 use crate::errors::PluginError;
 use crate::{provider, rpc};
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn dispatch(request: PluginRequest) -> Result<PluginResponse, PluginError> {
     validate_request(&request)?;
-    let client = Client::new();
+    let client = http_client()?;
     match request.operation.as_str() {
         "raydium_compute_swap" => compute_swap(&client, &request).await,
         "raydium_build_swap" => build_swap(&client, &request).await,
@@ -19,6 +23,14 @@ pub async fn dispatch(request: PluginRequest) -> Result<PluginResponse, PluginEr
             "operation {other} is not supported"
         ))),
     }
+}
+
+fn http_client() -> Result<Client, PluginError> {
+    Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .map_err(PluginError::from)
 }
 
 fn validate_request(request: &PluginRequest) -> Result<(), PluginError> {
@@ -75,7 +87,8 @@ async fn compute_swap(client: &Client, request: &PluginRequest) -> Result<Plugin
         }
     }
 
-    let quote = provider::get_json(client, url, request.activation_secret("api_key")).await?;
+    let api_key = provider::api_key_for_url(request, &url);
+    let quote = provider::get_json(client, url, api_key).await?;
     let output = compute_output(quote);
     Ok(PluginResponse::success(output, None))
 }
@@ -118,11 +131,12 @@ async fn build_swap(client: &Client, request: &PluginRequest) -> Result<PluginRe
     let url = provider::swap_base_url(request)?.join(endpoint).map_err(|error| {
         PluginError::InvalidInput(format!("invalid Raydium transaction endpoint: {error}"))
     })?;
+    let api_key = provider::api_key_for_url(request, &url);
     let swap = provider::post_json(
         client,
         url,
         Value::Object(body),
-        request.activation_secret("api_key"),
+        api_key,
     )
     .await?;
     let output = swap_output(swap)?;
@@ -141,7 +155,7 @@ async fn send_swap_transaction(
             "encoding must be base64 or base58, got {encoding}"
         )));
     }
-    let confirmation_mode = request.input_string("confirmation_mode").unwrap_or("confirmed");
+    let confirmation_mode = confirmation_mode(request)?;
     let preflight = request.input_bool("preflight").unwrap_or(true);
     let signature = rpc::send_transaction(
         client,
@@ -159,7 +173,7 @@ async fn send_swap_transaction(
         ));
     }
 
-    let _status = rpc::wait_for_signature_status(client, endpoint, &signature).await?;
+    let _status = rpc::wait_for_signature_status(client, endpoint, &signature, confirmation_mode).await?;
     Ok(PluginResponse::success(
         write_output("settled", signature, confirmation_mode),
         Some("settled"),
@@ -188,6 +202,16 @@ fn required_string<'a>(request: &'a PluginRequest, key: &str) -> Result<&'a str,
     request
         .input_string(key)
         .ok_or_else(|| PluginError::InvalidInput(format!("{key} is required")))
+}
+
+fn confirmation_mode(request: &PluginRequest) -> Result<&str, PluginError> {
+    let confirmation_mode = request.input_string("confirmation_mode").unwrap_or("confirmed");
+    match confirmation_mode {
+        "submit_only" | "processed" | "confirmed" | "finalized" => Ok(confirmation_mode),
+        other => Err(PluginError::InvalidInput(format!(
+            "confirmation_mode must be submit_only, processed, confirmed, or finalized, got {other}"
+        ))),
+    }
 }
 
 fn append_optional_query(
