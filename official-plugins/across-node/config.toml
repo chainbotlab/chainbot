@@ -1,0 +1,49 @@
+manifest_version = "2.0.0"
+plugin_id = "across-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/across-node"
+
+[activation]
+optional_secret_slots = ["api_key"]
+
+[[operations]]
+name = "across_get_swap_approval"
+summary = "Request Across Swap API approval and swap transaction data"
+input_schema = ["tradeType", "amount", "inputToken", "outputToken", "originChainId", "destinationChainId", "depositor"]
+optional_input_schema = ["recipient", "integratorId", "slippage", "refundAddress", "refundOnOrigin", "appFee", "appFeeRecipient", "skipOriginTxEstimation", "strictTradeType", "excludeSources", "includeSources", "base_url", "path"]
+output_schema = ["swap_approval_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "across_get_deposit_status"
+summary = "Read Across deposit execution status"
+input_schema = ["originChainId", "depositId"]
+optional_input_schema = ["destinationChainId", "depositTxHash", "base_url", "path"]
+output_schema = ["deposit_status_response", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "across_get_available_routes"
+summary = "List available Across origin and destination routes"
+input_schema = []
+optional_input_schema = ["originChainId", "destinationChainId", "inputToken", "outputToken", "base_url", "path"]
+output_schema = ["available_routes_response", "metadata"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/across-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "across_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/across_node_official_plugin"
+to = "bin/across-node"

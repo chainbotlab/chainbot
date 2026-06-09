@@ -1,0 +1,49 @@
+manifest_version = "2.0.0"
+plugin_id = "lifi-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/lifi-node"
+
+[activation]
+optional_secret_slots = ["api_key"]
+
+[[operations]]
+name = "lifi_get_routes"
+summary = "Request LI.FI smart-routing route candidates"
+input_schema = ["fromChainId", "toChainId", "fromTokenAddress", "toTokenAddress", "fromAmount"]
+optional_input_schema = ["fromAddress", "toAddress", "fromAmountForGas", "options", "base_url", "path"]
+output_schema = ["routes_response", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "lifi_get_quote"
+summary = "Request the best LI.FI quote with executable transaction data"
+input_schema = ["fromChain", "toChain", "fromToken", "toToken", "fromAddress"]
+optional_input_schema = ["fromAmount", "toAmount", "toAddress", "fromAmountForGas", "integrator", "fee", "slippage", "referrer", "allowBridges", "denyBridges", "preferBridges", "allowExchanges", "denyExchanges", "preferExchanges", "allowProtocols", "denyProtocols", "base_url", "path"]
+output_schema = ["quote_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "lifi_get_contract_calls_quote"
+summary = "Request a LI.FI quote for destination contract-call execution"
+input_schema = ["fromAddress", "fromChain", "fromToken", "toAmount", "toChain", "toToken", "contractCalls"]
+optional_input_schema = ["integrator", "fee", "slippage", "referrer", "base_url", "path"]
+output_schema = ["contract_calls_quote_response", "metadata"]
+kind = "swap"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/lifi-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "lifi_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/lifi_node_official_plugin"
+to = "bin/lifi-node"

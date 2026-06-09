@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "squid-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/squid-node"
+
+[activation]
+optional_secret_slots = ["integrator_id"]
+
+[[operations]]
+name = "squid_get_route"
+summary = "Request a Squid v2 route with transaction request data"
+input_schema = ["fromAddress", "fromChain", "fromToken", "fromAmount", "toChain", "toToken", "toAddress"]
+optional_input_schema = ["slippage", "quoteOnly", "enableForecall", "prefer", "receiveGasOnDestination", "base_url", "path"]
+output_schema = ["route_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "squid_get_status"
+summary = "Track Squid route execution status"
+input_schema = ["transactionId", "requestId", "fromChainId", "toChainId"]
+optional_input_schema = ["quoteId", "base_url", "path"]
+output_schema = ["status_response", "metadata"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/squid-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "squid_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/squid_node_official_plugin"
+to = "bin/squid-node"
