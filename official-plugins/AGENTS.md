@@ -23,6 +23,12 @@
 - `hyperliquid-node/`, `hyperliquid-trigger/`: Hyperliquid official plugin packages.
 - `eth-node/`, `eth-trigger/`: Ethereum official plugin packages.
 - `solana-node/`, `solana-trigger/`: Solana official plugin packages.
+- `jupiter-node/`: Jupiter swap API and Solana swap transaction helper plugin package.
+- `uniswap-node/`: Uniswap V2 Router02-compatible quote, price polling, and swap plugin package.
+- `uniswap-trigger/`: Uniswap V2 Router02-compatible price-threshold listener plugin package.
+- `pancakeswap-node/`: PancakeSwap V3 exact-input swap plugin package; V2/fork-compatible routing stays in `uniswap-node/`.
+- `raydium-node/`: Raydium Trade API quote and swap transaction helper plugin package.
+- `sanctum-node/`: Sanctum LST metadata and swap order helper plugin package.
 - `http-node/`: Outbound HTTP node reference implementation.
 - `build-official-plugin/`, `echo-official-plugin/`: Source-install reference packages.
 

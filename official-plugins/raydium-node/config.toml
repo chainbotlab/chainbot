@@ -1,0 +1,54 @@
+manifest_version = "2.0.0"
+plugin_id = "raydium-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/raydium-node"
+
+[activation]
+required_secret_slots = []
+optional_secret_slots = ["api_key"]
+
+[[operations]]
+name = "raydium_compute_swap"
+summary = "Fetch a Raydium Trade API swap quote"
+input_schema = ["base_url", "swap_type", "input_mint", "output_mint", "amount", "slippage_bps", "tx_version", "referrer"]
+output_schema = ["swap_response", "input_mint", "output_mint", "input_amount", "output_amount", "other_amount_threshold", "price_impact_pct", "route_plan", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "raydium_build_swap"
+summary = "Build unsigned Raydium swap transactions from a compute response"
+input_schema = ["base_url", "swap_type", "swap_response", "wallet", "tx_version", "compute_unit_price_micro_lamports", "wrap_sol", "unwrap_sol", "input_account", "output_account", "jito_info", "referrer_wallet"]
+output_schema = ["status", "transactions", "build_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "raydium_send_swap_transaction"
+summary = "Submit an externally signed Raydium swap transaction through a Solana RPC endpoint"
+input_schema = ["endpoint", "signed_transaction", "encoding", "confirmation_mode", "preflight"]
+output_schema = ["status", "transaction_id", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "raydium_get_signature_status"
+summary = "Read a Solana signature status for a Raydium swap"
+input_schema = ["endpoint", "signature"]
+output_schema = ["signature", "status"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/raydium-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "raydium_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/raydium_node_official_plugin"
+to = "bin/raydium-node"
