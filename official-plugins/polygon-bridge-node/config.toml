@@ -1,0 +1,49 @@
+manifest_version = "2.0.0"
+plugin_id = "polygon-bridge-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/polygon-bridge-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "polygon_prepare_pos_deposit"
+summary = "Prepare an unsigned Polygon PoS bridge RootChainManager deposit action"
+input_schema = ["l1_chain_id", "root_chain_manager", "user", "root_token", "deposit_data"]
+optional_input_schema = ["value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "polygon_prepare_pos_exit"
+summary = "Prepare an unsigned Polygon PoS bridge exit action"
+input_schema = ["l1_chain_id", "root_chain_manager", "exit_payload"]
+optional_input_schema = ["value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "polygon_prepare_state_sync"
+summary = "Prepare an unsigned Polygon StateSender syncState action"
+input_schema = ["l1_chain_id", "state_sender", "receiver", "data"]
+optional_input_schema = ["value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "write"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/polygon-bridge-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "polygon_bridge_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/polygon_bridge_node_official_plugin"
+to = "bin/polygon-bridge-node"

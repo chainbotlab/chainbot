@@ -1,0 +1,21 @@
+[package]
+name = "rango_node_official_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "rango_node_official_plugin"
+path = "src/main.rs"
+
+[dependencies]
+bridge_node_core = { path = "../../bridge-node-core/crate" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[dev-dependencies]
+axum = "0.8"
+serde_json = "1"
+serial_test = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }

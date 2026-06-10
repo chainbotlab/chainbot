@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "hyperlane-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/hyperlane-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "hyperlane_prepare_warp_transfer"
+summary = "Prepare an unsigned Hyperlane Warp Route token transfer action"
+input_schema = ["source_chain_id", "warp_router", "destination_domain", "recipient", "amount"]
+optional_input_schema = ["hookMetadata", "interchainGasPayment", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "hyperlane_prepare_message"
+summary = "Prepare an unsigned Hyperlane Mailbox dispatch action"
+input_schema = ["source_chain_id", "mailbox", "destination_domain", "recipient", "messageBody"]
+optional_input_schema = ["hookMetadata", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "write"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/hyperlane-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "hyperlane_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/hyperlane_node_official_plugin"
+to = "bin/hyperlane-node"

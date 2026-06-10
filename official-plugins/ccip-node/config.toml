@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "ccip-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/ccip-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "ccip_prepare_token_transfer"
+summary = "Prepare an unsigned Chainlink CCIP token transfer action"
+input_schema = ["source_chain_id", "router", "destination_chain_selector", "receiver", "token", "amount"]
+optional_input_schema = ["fee_token", "message_data", "extra_args", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "ccip_prepare_token_pool_admin"
+summary = "Prepare an unsigned CCIP TokenPool configuration action"
+input_schema = ["chain_id", "token_pool"]
+optional_input_schema = ["remote_chain_selector", "remote_pool", "rate_limiter_config", "value", "call_data"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "write"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/ccip-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "ccip_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/ccip_node_official_plugin"
+to = "bin/ccip-node"

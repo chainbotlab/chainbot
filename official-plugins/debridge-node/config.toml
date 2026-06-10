@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "debridge-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/debridge-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "debridge_create_order_tx"
+summary = "Request a deBridge DLN quote and ready-to-sign order transaction"
+input_schema = ["srcChainId", "srcChainTokenIn", "srcChainTokenInAmount", "dstChainId", "dstChainTokenOut", "dstChainTokenOutAmount"]
+optional_input_schema = ["dstChainTokenOutRecipient", "srcChainOrderAuthorityAddress", "dstChainOrderAuthorityAddress", "affiliateFeePercent", "affiliateFeeRecipient", "prependOperatingExpenses", "referralCode", "allowedTaker", "base_url", "path"]
+output_schema = ["create_tx_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "debridge_get_order_status"
+summary = "Read deBridge DLN order status"
+input_schema = ["orderId"]
+optional_input_schema = ["base_url", "path"]
+output_schema = ["order_status_response", "metadata"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/debridge-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "debridge_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/debridge_node_official_plugin"
+to = "bin/debridge-node"

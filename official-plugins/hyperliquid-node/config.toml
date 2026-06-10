@@ -33,6 +33,30 @@ optional_input_schema = ["base_url"]
 output_schema = ["candles"]
 kind = "read"
 
+[[operations]]
+name = "hyperliquid_bridge2_prepare_deposit"
+summary = "Prepare an unsigned Arbitrum USDC transfer for Hyperliquid Bridge2 deposit"
+input_schema = ["amount"]
+optional_input_schema = ["amount_units", "decimals", "chain_id", "bridge", "usdc"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "hyperliquid_bridge2_prepare_withdraw3"
+summary = "Prepare the Hyperliquid Bridge2 withdraw3 typed-data payload"
+input_schema = ["destination", "amount", "time"]
+optional_input_schema = ["signatureChainId", "hyperliquidChain"]
+output_schema = ["typed_data", "hyperliquid_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "hyperliquid_bridge2_prepare_deposit_with_permit"
+summary = "Prepare Bridge2 deposit-with-permit typed data and unsigned Arbitrum action"
+input_schema = ["owner", "value", "nonce", "deadline"]
+optional_input_schema = ["chain_id", "bridge", "usdc", "call_data"]
+output_schema = ["permit_typed_data", "unsigned_action", "metadata"]
+kind = "swap"
+
 [source]
 manifest_version = "1.0.0"
 install_mode = "build_required"

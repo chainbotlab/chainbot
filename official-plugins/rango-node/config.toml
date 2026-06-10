@@ -1,0 +1,49 @@
+manifest_version = "2.0.0"
+plugin_id = "rango-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/rango-node"
+
+[activation]
+optional_secret_slots = ["api_key"]
+
+[[operations]]
+name = "rango_best_route"
+summary = "Request a Rango route or quote candidate"
+input_schema = ["from", "to", "amount"]
+optional_input_schema = ["fromAddress", "toAddress", "slippage", "disableEstimate", "swappers", "excludeSwappers", "referrerAddress", "referrerFee", "base_url", "path"]
+output_schema = ["best_route_response", "metadata"]
+kind = "read"
+
+[[operations]]
+name = "rango_create_transaction"
+summary = "Create a Rango transaction for the current multi-step route step"
+input_schema = ["requestId", "step"]
+optional_input_schema = ["userSettings", "validationStatus", "wallets", "base_url", "path"]
+output_schema = ["transaction_response", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "rango_transaction_status"
+summary = "Read Rango transaction status for a route step"
+input_schema = ["requestId", "txId"]
+optional_input_schema = ["step", "base_url", "path"]
+output_schema = ["status_response", "metadata"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/rango-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "rango_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/rango_node_official_plugin"
+to = "bin/rango-node"

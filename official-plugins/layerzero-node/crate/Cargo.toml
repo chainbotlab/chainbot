@@ -1,0 +1,14 @@
+[package]
+name = "layerzero_node_official_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "layerzero_node_official_plugin"
+path = "src/main.rs"
+
+[dependencies]
+bridge_action_core = { path = "../../bridge-action-core/crate" }
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,0 +1,41 @@
+manifest_version = "2.0.0"
+plugin_id = "usdt0-node"
+kind = "external_node"
+entrypoint = "node.exec.v2"
+capabilities = ["node:execute"]
+executable = "bin/usdt0-node"
+
+[activation]
+optional_secret_slots = []
+
+[[operations]]
+name = "usdt0_prepare_oft_send"
+summary = "Prepare an unsigned USDT0 or XAUt0 OFT send action"
+input_schema = ["source_chain_id", "oft", "dstEid", "to", "amountLD", "minAmountLD", "nativeFee", "lzTokenFee", "refundAddress"]
+optional_input_schema = ["asset", "extraOptions", "composeMsg", "oftCmd", "value"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "swap"
+
+[[operations]]
+name = "usdt0_prepare_quote_send"
+summary = "Prepare an unsigned USDT0 or XAUt0 OFT quoteSend action"
+input_schema = ["source_chain_id", "oft", "dstEid", "to", "amountLD", "minAmountLD"]
+optional_input_schema = ["asset", "extraOptions", "composeMsg", "oftCmd", "payInLzToken"]
+output_schema = ["unsigned_action", "metadata"]
+kind = "read"
+
+[source]
+manifest_version = "1.0.0"
+install_mode = "build_required"
+runtime = "bin"
+entry_artifact = "bin/usdt0-node"
+release_version = "0.1.0"
+
+[source.build]
+kind = "cargo"
+command = ["cargo", "build", "--release", "--bin", "usdt0_node_official_plugin"]
+workdir = "crate"
+
+[[source.build.outputs]]
+from = "crate/target/release/usdt0_node_official_plugin"
+to = "bin/usdt0-node"
