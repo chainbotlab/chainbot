@@ -65,5 +65,5 @@ The structural docs validation remains in place so navigation and frontmatter ar
 ## Notes
 
 - `.gitignore` was updated so app-local `package.json` and `package-lock.json` files can be tracked.
-- `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, and `docs/decisions/CHAINBOT_WORKSPACE_DESIGN.md` were updated to acknowledge `interface/`.
+- `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, and `docs/archive/decisions/CHAINBOT_WORKSPACE_DESIGN.md` were updated to acknowledge `interface/`.
 - `docs/user/AGENTS.md` now points to the active Mintlify docs surface instead of claiming there are no active user-facing docs.

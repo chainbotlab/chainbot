@@ -1,4 +1,14 @@
+---
+type: archive
+status: superseded
+updated: 2026-06-10
+replacement:
+  - ../../../.agents/skills/decision-chainbot-plugin-activation-boundary/SKILL.md
+---
+
 # ChainBot Plugin Activation Config Design
+
+Archive Note: Active decision authority moved to `.agents/skills/decision-chainbot-plugin-activation-boundary/SKILL.md` on 2026-06-10. This file is retained as a historical snapshot.
 
 ## Goal
 

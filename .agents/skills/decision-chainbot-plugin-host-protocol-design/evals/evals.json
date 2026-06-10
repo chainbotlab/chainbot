@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-plugin-host-protocol-design",
+  "description": "Routing evals for external node, MCP, and trigger host protocols.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Change node.exec.v2 subprocess JSON-RPC to use a different method name.",
+      "expected_output": "Should load decision-chainbot-plugin-host-protocol-design.",
+      "files": [],
+      "expectations": [
+        "Distinguishes manifest entrypoint from JSON-RPC method",
+        "Preserves current host truth around node.execute"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Add a new remote source catalog entry to chainbot-plugin-index.toml.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-plugin-source-install if install/source policy changes.",
+      "files": [],
+      "expectations": [
+        "Does not route catalog-only changes to host protocol"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Change plugin install --force backup and rollback behavior.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-plugin-source-install.",
+      "files": [],
+      "expectations": [
+        "Keeps install lifecycle separate from execution protocol"
+      ]
+    }
+  ]
+}

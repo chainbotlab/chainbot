@@ -1,4 +1,16 @@
+---
+type: archive
+status: superseded
+updated: 2026-06-10
+replacement:
+  - ../../../.agents/skills/decision-chainbot-workflow-dag-design/SKILL.md
+  - ../../../.agents/skills/decision-chainbot-root-package-layout/SKILL.md
+  - ../../../.agents/skills/decision-chainbot-plugin-host-protocol-design/SKILL.md
+---
+
 # ChainBot Trigger Workflow Config Design
+
+Archive Note: Active decision authority moved to `.agents/skills/decision-chainbot-workflow-dag-design/SKILL.md`, `.agents/skills/decision-chainbot-root-package-layout/SKILL.md`, and `.agents/skills/decision-chainbot-plugin-host-protocol-design/SKILL.md` on 2026-06-10. This file is retained as a historical snapshot.
 
 ## 目标
 

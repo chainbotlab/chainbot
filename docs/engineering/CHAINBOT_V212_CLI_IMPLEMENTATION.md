@@ -9,7 +9,7 @@
 
 ## Files Changed
 
-- `docs/decisions/CHAINBOT_CLI_DESIGN.md`
+- `docs/archive/decisions/CHAINBOT_CLI_DESIGN.md`
 - `docs/research/CHAINBOT_V212_CLI_PROPOSAL.md`
 - `docs/engineering/CHAINBOT_V212_CLI_IMPLEMENTATION.md`
 - `AGENTS.md`

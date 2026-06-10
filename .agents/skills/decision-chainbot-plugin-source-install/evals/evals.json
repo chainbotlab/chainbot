@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-plugin-source-install",
+  "description": "Routing evals for plugin source discovery and install lifecycle.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Support a new multi-plugin source repo index format for plugin install.",
+      "expected_output": "Should load decision-chainbot-plugin-source-install.",
+      "files": [],
+      "expectations": [
+        "Protects source repo metadata contracts",
+        "Preserves install staging and revalidation semantics"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Change how node.exec.v2 serializes JSON-RPC responses.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-plugin-host-protocol-design.",
+      "files": [],
+      "expectations": [
+        "Does not route execution protocol changes to install policy"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Move chain-specific request shaping between runtime and official plugin packages.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-official-plugin-design.",
+      "files": [],
+      "expectations": [
+        "Keeps official package/runtime ownership separate from install mechanics"
+      ]
+    }
+  ]
+}

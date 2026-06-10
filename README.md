@@ -178,8 +178,9 @@ Current version: **2.2.0**
 ## Links
 
 - [Contributing Guide](CONTRIBUTING.md) — Development setup and architecture
-- [CLI Design](docs/decisions/CHAINBOT_CLI_DESIGN.md) — CLI command reference
-- [Workspace Design](docs/decisions/CHAINBOT_WORKSPACE_DESIGN.md) — Root layout specification
-- [Trigger & Workflow Design](docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md) — Workflow definition format
+- [CLI Contract](.agents/skills/decision-chainbot-cli-contract/SKILL.md) — CLI command reference
+- [Workspace Boundary](.agents/skills/decision-chainbot-workspace-boundary/SKILL.md) — Repository layout boundaries
+- [Root Package Layout](.agents/skills/decision-chainbot-root-package-layout/SKILL.md) — ChainBot root layout specification
+- [Workflow DAG Design](.agents/skills/decision-chainbot-workflow-dag-design/SKILL.md) — Workflow graph semantics
 - [Landing Page Source](interface/land-page/src/pages/index.astro) — Product-introduction interface
 - [User Docs Config](interface/user-docs/docs.json) — Mintlify navigation and branding surface

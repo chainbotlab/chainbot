@@ -41,7 +41,7 @@
 
 ## Docs
 - `../chainbot-plugin-index.toml`: Top-level plugin source catalog.
-- `../docs/decisions/CHAINBOT_OFFICIAL_PLUGIN_DESIGN.md`: Official-plugin/runtime ownership boundary.
-- `../docs/decisions/CHAINBOT_PLUGIN_ACTIVATION_CONFIG_DESIGN.md`: Activation secret contract for external plugins.
+- `../.agents/skills/decision-chainbot-official-plugin-design/SKILL.md`: Official-plugin/runtime ownership boundary.
+- `../.agents/skills/decision-chainbot-plugin-activation-boundary/SKILL.md`: Activation secret contract for external plugins.
 - `../docs/archive/2026-03-31-001-feat-eth-solana-official-plugins-plan.md`: Prior official-plugin rollout precedent.
 - `../docs/archive/2026-04-01-001-feat-eth-solana-sdk-plugins-plan.md`: SDK-backed plugin implementation precedent.

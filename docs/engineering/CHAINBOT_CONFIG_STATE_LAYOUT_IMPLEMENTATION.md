@@ -17,8 +17,8 @@
 - `crates/chainbot/tests/trigger_plane.rs`
 - `crates/chainbot/tests/cli_surface.rs`
 - `crates/chainbot/tests/end_to_end_vertical_slice.rs`
-- `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`
-- `docs/decisions/CHAINBOT_CLI_DESIGN.md`
+- `docs/archive/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`
+- `docs/archive/decisions/CHAINBOT_CLI_DESIGN.md`
 - `docs/engineering/CHAINBOT_CONFIG_STATE_LAYOUT_IMPLEMENTATION.md`
 - `docs/engineering/AGENTS.md`
 - `docs/research/CHAINBOT_LEGACY_LAYOUT_CONVERGENCE_PROPOSAL.md`

@@ -83,11 +83,11 @@ Documentation is organized by lifecycle stage:
 
 ```text
 docs/
-|- design/              # Architectural decisions and invariants
-|- implementation/      # Implementation records and validation notes
+|- decisions/           # Legacy redirect; active decisions live in .agents/skills/decision-*
+|- engineering/         # Implementation records and validation notes
 |- research/           # Exploration notes and discarded options
-|- interfaces/         # External contracts and adapters
-|- user/               # User-facing behavior documentation
+|- postmortem/         # Durable debugging and incident learnings
+|- specs/              # AI-generated task specifications
 `- archive/             # Retired documentation
 ```
 
@@ -95,9 +95,10 @@ docs/
 
 | Document | Purpose |
 |----------|---------|
-| `docs/decisions/CHAINBOT_WORKSPACE_DESIGN.md` | Root workspace layout and boundaries |
-| `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` | Workflow/node definitions, trigger kinds, plugin linkage |
-| `docs/decisions/CHAINBOT_CLI_DESIGN.md` | CLI command surface and semantics |
+| `.agents/skills/decision-chainbot-workspace-boundary/SKILL.md` | Repository workspace layout and boundaries |
+| `.agents/skills/decision-chainbot-root-package-layout/SKILL.md` | ChainBot root package layout and state authority |
+| `.agents/skills/decision-chainbot-workflow-dag-design/SKILL.md` | Workflow node graph and dependency semantics |
+| `.agents/skills/decision-chainbot-cli-contract/SKILL.md` | CLI command surface and semantics |
 
 ### Implementation Records
 
