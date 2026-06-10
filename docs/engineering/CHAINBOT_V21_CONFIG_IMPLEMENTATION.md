@@ -75,5 +75,5 @@ The loader now resolves the root in two phases:
 
 ## Follow-Up Constraints
 
-- Keep `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` as the final contract source.
+- Keep `.agents/skills/decision-chainbot-root-package-layout/SKILL.md` and `.agents/skills/decision-chainbot-workflow-dag-design/SKILL.md` as the final contract sources.
 - Record future implementation-only behavior changes here instead of expanding the design doc.

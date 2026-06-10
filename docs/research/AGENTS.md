@@ -7,7 +7,7 @@
 
 ## Constraints
 - Do not keep placeholder research docs without a real question.
-- Final design belongs in `docs/decisions/`; execution history belongs in `docs/engineering/`.
+- Final design authority belongs in `.agents/skills/decision-{slug}/SKILL.md`; execution history belongs in `docs/engineering/`.
 
 ## Members
 - CLI, catalog, and config-layout proposal docs retained as exploration context.

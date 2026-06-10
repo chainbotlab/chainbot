@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-root-package-layout",
+  "description": "Routing evals for ChainBot root package layout and runtime state authority.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Change the canonical ChainBot root from chainbot.toml to config/root.toml.",
+      "expected_output": "Should load decision-chainbot-root-package-layout.",
+      "files": [],
+      "expectations": [
+        "Protects canonical root entrypoint",
+        "Rejects legacy root-config reintroduction"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Adjust a text label in README.",
+      "expected_output": "Should not load this skill because no root layout, package identity, or state authority changes.",
+      "files": [],
+      "expectations": [
+        "Does not route ordinary documentation copy edits here"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Change chainbot status --json output fields without changing root layout.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-cli-contract.",
+      "files": [],
+      "expectations": [
+        "Keeps CLI output contracts separate from root package layout"
+      ]
+    }
+  ]
+}

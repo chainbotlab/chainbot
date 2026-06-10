@@ -11,8 +11,9 @@
 - Update root `AGENTS.md` when a new top-level documentation area appears.
 
 ## Members
-- `decisions/`: Stable architectural decisions, invariants, and settled interfaces.
+- `decisions/`: Migrated legacy redirect bucket; active decision authority lives in `.agents/skills/decision-{slug}/SKILL.md`.
 - `engineering/`: Implementation records, execution details, and validation notes.
 - `research/`: Exploratory notes, option analysis, and interim conclusions.
 - `postmortem/`: Durable incident records and debugging learnings.
-- `archive/`: Retired docs and tombstones.
+- `specs/`: AI-generated task specification docs.
+- `archive/`: Retired docs, historical decision snapshots, and tombstones.

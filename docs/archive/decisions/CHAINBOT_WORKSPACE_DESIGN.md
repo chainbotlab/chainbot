@@ -1,4 +1,14 @@
+---
+type: archive
+status: superseded
+updated: 2026-06-10
+replacement:
+  - ../../../.agents/skills/decision-chainbot-workspace-boundary/SKILL.md
+---
+
 # ChainBot Workspace Design
+
+Archive Note: Active decision authority moved to `.agents/skills/decision-chainbot-workspace-boundary/SKILL.md` on 2026-06-10. This file is retained as a historical snapshot.
 
 ## Goal
 

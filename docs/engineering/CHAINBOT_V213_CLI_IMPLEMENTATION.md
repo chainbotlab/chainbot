@@ -5,13 +5,13 @@
 - Add `chainbot init` to bootstrap a minimal, immediately valid ChainBot root.
 - Extend `chainbot trigger` with `list` alongside the existing `enable` and `disable` actions.
 - Bump the crate release version to `2.1.3`.
-- Align README and stable CLI design docs with the new operator surface.
+- Align README and the stable CLI contract with the new operator surface.
 
 ## Files Changed
 
 - `crates/chainbot/src/cli.rs`
 - `crates/chainbot/tests/cli_surface.rs`
-- `docs/decisions/CHAINBOT_CLI_DESIGN.md`
+- `docs/archive/decisions/CHAINBOT_CLI_DESIGN.md`
 - `docs/engineering/CHAINBOT_V213_CLI_IMPLEMENTATION.md`
 - `docs/engineering/AGENTS.md`
 - `AGENTS.md`
@@ -52,7 +52,7 @@ timezone = "UTC"
 ## Validation
 
 - CLI integration coverage in `crates/chainbot/tests/cli_surface.rs` for `help init`, `init`, idempotent `init`, and `trigger list`.
-- Stable CLI contract alignment in `docs/decisions/CHAINBOT_CLI_DESIGN.md`.
+- Stable CLI contract alignment in `.agents/skills/decision-chainbot-cli-contract/SKILL.md`.
 - Crate manifest and lockfile version alignment at `2.1.3`.
 
 ## Notes

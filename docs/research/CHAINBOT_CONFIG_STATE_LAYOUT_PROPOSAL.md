@@ -234,6 +234,6 @@ This proposal is ready to graduate into stable design only when all of the follo
 
 ## Recommended Follow-Up
 
-- amend `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md` once the target layout becomes the chosen stable contract
+- amend `.agents/skills/decision-chainbot-root-package-layout/SKILL.md` once the target layout becomes the chosen stable contract
 - add a dedicated implementation record when migration behavior is implemented
 - keep recovery, dedup, and checkpoint semantics verified by integration tests before promoting the design

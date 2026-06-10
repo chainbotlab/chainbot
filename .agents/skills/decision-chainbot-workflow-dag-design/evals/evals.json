@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-workflow-dag-design",
+  "description": "Routing evals for workflow DAG validation and scheduler semantics.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Change depends_mode any so it short-circuits after the first successful dependency.",
+      "expected_output": "Should load decision-chainbot-workflow-dag-design.",
+      "files": [],
+      "expectations": [
+        "Protects terminal-state based dependency semantics",
+        "Recognizes any is not short-circuit OR"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Update the CLI help text for chainbot status.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-cli-contract if the CLI contract changes.",
+      "files": [],
+      "expectations": [
+        "Does not route CLI-only text changes to DAG semantics"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Change trigger.exec.v1 stdout heartbeat handling for external trigger plugins.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-plugin-host-protocol-design.",
+      "files": [],
+      "expectations": [
+        "Does not steal plugin host protocol work"
+      ]
+    }
+  ]
+}

@@ -266,9 +266,9 @@ Each of those paths preserves ambiguity or weakens the boundary the migration wa
 ## Related
 
 - `docs/archive/2026-04-02-001-refactor-builtin-http-official-plugin-plan.md`
-- `docs/decisions/CHAINBOT_OFFICIAL_PLUGIN_DESIGN.md`
-- `docs/decisions/CHAINBOT_PLUGIN_ACTIVATION_CONFIG_DESIGN.md`
-- `docs/decisions/CHAINBOT_CONFIG_STATE_LAYOUT_DESIGN.md`
+- `.agents/skills/decision-chainbot-official-plugin-design/SKILL.md`
+- `.agents/skills/decision-chainbot-plugin-activation-boundary/SKILL.md`
+- `.agents/skills/decision-chainbot-root-package-layout/SKILL.md`
 - `docs/research/CHAINBOT_CLI_CATALOG_DISCOVERY_PROPOSAL.md`
 - `crates/chainbot/src/plugin/contract.rs`
 - `crates/chainbot/src/infrastructure/config/mod.rs`

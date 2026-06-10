@@ -20,7 +20,7 @@
 - `crates/chainbot/src/builtins/triggers/emitters/market_tick.rs`
 - `crates/chainbot/src/builtins/triggers/emitters/cron.rs`
 - `crates/chainbot/tests/trigger_plane.rs`
-- `docs/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`
+- `docs/archive/decisions/CHAINBOT_TRIGGER_WORKFLOW_CONFIG_DESIGN.md`
 - `docs/engineering/CHAINBOT_V21_CONFIG_IMPLEMENTATION.md`
 - `docs/engineering/CHAINBOT_TRIGGER_PARAMS_IMPLEMENTATION.md`
 - `docs/engineering/AGENTS.md`

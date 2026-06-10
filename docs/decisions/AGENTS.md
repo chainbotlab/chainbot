@@ -1,12 +1,14 @@
 # AGENTS.md
 
 ## Scope
-- Position: Stable design decision bucket.
-- Owns: Final goals, architectural boundaries, invariants, and settled interface choices.
-- Excludes: Recommendation history, migration plans, exploratory notes, and execution transcripts.
+- Position: Migrated legacy decision redirect bucket.
+- Owns: Routing agents away from legacy active decision docs.
+- Excludes: Current decision authority, historical snapshots, implementation records, and research notes.
 
 ## Constraints
-- Only stable final design belongs in `docs/decisions/`.
+- Do not add active decision docs here.
+- Active decision authority lives in `.agents/skills/decision-{slug}/SKILL.md`.
+- Historical decision snapshots live in `docs/archive/decisions/`.
 
 ## Members
-- Workspace, trigger/workflow config, CLI, config/state layout, plugin activation, and official-plugin design docs.
+- `AGENTS.md`: This redirect and ownership note.

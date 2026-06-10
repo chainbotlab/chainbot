@@ -10,4 +10,5 @@
 - Move obsolete or superseded material here rather than leaving it in active buckets.
 
 ## Members
+- `decisions/`: Archived decision snapshots and tombstones.
 - Official-plugin rollout plans and SDK migration records retained as historical context.

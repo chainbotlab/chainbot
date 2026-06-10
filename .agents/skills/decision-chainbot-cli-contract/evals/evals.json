@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-cli-contract",
+  "description": "Routing evals for ChainBot CLI command and output contracts.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Add a new flag to chainbot observe and change its JSON output.",
+      "expected_output": "Should load decision-chainbot-cli-contract.",
+      "files": [],
+      "expectations": [
+        "Protects CLI command surface",
+        "Protects observe JSON output contract"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Change a workflow node dependency cycle detection error type.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-workflow-dag-design if DAG behavior changes.",
+      "files": [],
+      "expectations": [
+        "Does not route workflow internals without CLI impact"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Change the default ChainBot root package directory layout.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-root-package-layout.",
+      "files": [],
+      "expectations": [
+        "Keeps root layout separate from CLI behavior"
+      ]
+    }
+  ]
+}

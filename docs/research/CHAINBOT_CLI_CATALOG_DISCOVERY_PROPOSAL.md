@@ -53,7 +53,7 @@
 
 实现必须遵守这些当前仓库事实：
 
-- `docs/decisions/CHAINBOT_CLI_DESIGN.md` 定义了当前稳定 CLI surface
+- `.agents/skills/decision-chainbot-cli-contract/SKILL.md` 定义了当前稳定 CLI surface
 - `cli.rs` 已经承担 parser + help + renderer 角色，但文件较大
 - builtin node kinds 当前来自 `crates/chainbot/src/builtins/nodes/registry.rs`
 - builtin trigger kinds 当前来自 `crates/chainbot/src/builtins/triggers/registry.rs`
@@ -495,7 +495,7 @@ chainbot catalog show <reference> [--json]
 
 ### Docs
 
-14. `docs/decisions/CHAINBOT_CLI_DESIGN.md`
+14. `.agents/skills/decision-chainbot-cli-contract/SKILL.md`
     - 实现完成后再更新稳定命令面
 
 15. `README.md`
@@ -617,7 +617,7 @@ Step 8  docs/examples update
 
 按本 proposal 先实现 Rust module 和 tests，再在通过验证后更新：
 
-- `docs/decisions/CHAINBOT_CLI_DESIGN.md`
+- `.agents/skills/decision-chainbot-cli-contract/SKILL.md`
 - `README.md`
 - `examples/plugin-integrations/`
 

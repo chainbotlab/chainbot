@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-workspace-boundary",
+  "description": "Routing evals for repository topology and workspace boundaries.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Add a new top-level JavaScript workspace package at the repository root.",
+      "expected_output": "Should load decision-chainbot-workspace-boundary.",
+      "files": [],
+      "expectations": [
+        "Protects pure Cargo workspace root",
+        "Keeps interface tooling app-local"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Change a Rust function inside crates/chainbot without touching topology.",
+      "expected_output": "Should not load this skill because ordinary code edits inside an existing crate do not change workspace boundaries.",
+      "files": [],
+      "expectations": [
+        "Does not route ordinary crate implementation work here"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Change installed plugin package identity rules inside a ChainBot root.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-root-package-layout or decision-chainbot-plugin-source-install.",
+      "files": [],
+      "expectations": [
+        "Keeps repository topology separate from root package identity"
+      ]
+    }
+  ]
+}

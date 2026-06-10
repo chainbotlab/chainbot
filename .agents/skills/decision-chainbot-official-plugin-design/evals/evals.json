@@ -1,0 +1,34 @@
+{
+  "skill": "decision-chainbot-official-plugin-design",
+  "description": "Routing evals for official plugin package/runtime ownership boundaries.",
+  "cases": [
+    {
+      "id": 1,
+      "prompt": "Move a new Ethereum signing node into official-plugins and decide whether the runtime should know about the chain.",
+      "expected_output": "Should load decision-chainbot-official-plugin-design.",
+      "files": [],
+      "expectations": [
+        "Keeps chain-specific behavior in official plugin packages",
+        "Preserves the thin generic runtime boundary"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Add a README typo fix under official-plugins.",
+      "expected_output": "Should not load this skill because this is a documentation typo with no package/runtime boundary change.",
+      "files": [],
+      "expectations": [
+        "Does not route ordinary text edits to this decision"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Change the workflow depends_mode scheduler behavior for any dependencies.",
+      "expected_output": "Should not load this skill; prefer decision-chainbot-workflow-dag-design.",
+      "files": [],
+      "expectations": [
+        "Does not steal workflow DAG scheduling changes"
+      ]
+    }
+  ]
+}

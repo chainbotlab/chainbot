@@ -13,7 +13,7 @@
 - `crates/chainbot/src/errors.rs`
 - `crates/chainbot/tests/cli_surface.rs`
 - `README.md`
-- `docs/decisions/CHAINBOT_CLI_DESIGN.md`
+- `docs/archive/decisions/CHAINBOT_CLI_DESIGN.md`
 - `docs/engineering/CHAINBOT_HELP_DIAGNOSTICS_IMPLEMENTATION.md`
 - `docs/engineering/AGENTS.md`
 - `AGENTS.md`
