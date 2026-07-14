@@ -1,6 +1,6 @@
 {
   "skill": "decision-chainbot-workflow-dag-design",
-  "description": "Routing evals for workflow DAG validation and scheduler semantics.",
+  "description": "Routing evals for workflow DAG, output addressing, and scheduler semantics.",
   "cases": [
     {
       "id": 1,
@@ -28,6 +28,17 @@
       "files": [],
       "expectations": [
         "Does not steal plugin host protocol work"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Allow a workflow node to reference node.price without declaring which upstream node produced it.",
+      "expected_output": "Should load decision-chainbot-workflow-dag-design.",
+      "files": [],
+      "expectations": [
+        "Requires producer-addressed node output references",
+        "Validates the producer belongs to the consumer dependency closure",
+        "Prevents same-wave mutable output visibility"
       ]
     }
   ]

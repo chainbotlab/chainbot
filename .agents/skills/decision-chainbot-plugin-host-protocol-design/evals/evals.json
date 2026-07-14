@@ -1,6 +1,6 @@
 {
   "skill": "decision-chainbot-plugin-host-protocol-design",
-  "description": "Routing evals for external node, MCP, and trigger host protocols.",
+  "description": "Routing evals for external node, MCP, process trigger lifecycle, and Wasm host protocols.",
   "cases": [
     {
       "id": 1,
@@ -28,6 +28,26 @@
       "files": [],
       "expectations": [
         "Keeps install lifecycle separate from execution protocol"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Keep a WebSocket trigger child blocked inside the daemon poll loop and call it process_short_lived.",
+      "expected_output": "Should load decision-chainbot-plugin-host-protocol-design.",
+      "files": [],
+      "expectations": [
+        "Uses process_daemon_session for long-lived listeners",
+        "Makes the supervisor own child cancellation and cleanup"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Change the Wasm trigger guest callback ABI or migrate trigger-plugin.wit bindings.",
+      "expected_output": "Should load decision-chainbot-plugin-host-protocol-design.",
+      "files": [],
+      "expectations": [
+        "Treats WIT Component Model bindings as the ABI authority",
+        "Keeps the core-Wasm ABI only as temporary compatibility"
       ]
     }
   ]
