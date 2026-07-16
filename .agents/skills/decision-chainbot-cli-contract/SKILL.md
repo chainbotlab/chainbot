@@ -5,7 +5,7 @@ license: "Proprietary"
 metadata:
   generated_by: "decision-capture"
   created: "2026-06-10"
-  last_updated: "2026-06-10"
+  last_updated: "2026-07-14"
   status: "current"
   affected_modules:
     - "crates/chainbot/src/cli/"
@@ -38,7 +38,7 @@ chainbot status [--json]
 chainbot observe [--json] [--limit <n>] [--trigger-id <id>] [--run-id <id>]
 chainbot stop
 chainbot trigger <list|enable|disable> [trigger-id]
-chainbot validate
+chainbot validate [--json]
 chainbot list-runs
 chainbot run
 chainbot serve
@@ -62,6 +62,12 @@ or mutate active/archived history.
 `trigger enable` and `trigger disable` persistently mutate the trigger package
 `enabled` field. They do not mutate runtime trigger records, dedup/cooldown
 coordination, or serve leases.
+
+`validate` returns success when contracts are valid even if compatibility
+warnings exist. Human output renders one warning per source location. `--json`
+returns `{ valid, root, warnings }`; each warning has a stable `code`,
+`source_location`, `original_reference`, and `replacement`, plus owning workflow,
+consumer-node, or plugin identifiers when available.
 
 ## Boundaries
 

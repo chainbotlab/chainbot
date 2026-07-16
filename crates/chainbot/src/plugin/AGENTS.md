@@ -13,4 +13,5 @@
 - `mod.rs`: Stable plugin facade.
 - `contract.rs`: Plugin runtime contracts.
 - `host.rs`: Plugin host execution surface.
+- `process.rs`: Crate-private bounded subprocess lifecycle controls shared by plugin hosts.
 - `source/`: Remote source discovery and installation support.

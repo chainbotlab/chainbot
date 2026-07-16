@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::errors::ContractError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,10 +43,30 @@ impl RuntimeVariableNamespace {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariableReference {
     pub namespace: RuntimeVariableNamespace,
     pub key: String,
+}
+
+impl Serialize for VariableReference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if let Some((producer, key)) = self.node_output_address() {
+            let mut reference = serializer.serialize_struct("VariableReference", 3)?;
+            reference.serialize_field("namespace", &self.namespace)?;
+            reference.serialize_field("producer", producer)?;
+            reference.serialize_field("key", key)?;
+            reference.end()
+        } else {
+            let mut reference = serializer.serialize_struct("VariableReference", 2)?;
+            reference.serialize_field("namespace", &self.namespace)?;
+            reference.serialize_field("key", &self.key)?;
+            reference.end()
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for VariableReference {
@@ -57,13 +79,48 @@ impl<'de> Deserialize<'de> for VariableReference {
         enum RawVariableReference {
             Structured {
                 namespace: RuntimeVariableNamespace,
+                #[serde(default)]
+                producer: Option<String>,
                 key: String,
             },
             Shorthand(String),
         }
 
         match RawVariableReference::deserialize(deserializer)? {
-            RawVariableReference::Structured { namespace, key } => Ok(Self { namespace, key }),
+            RawVariableReference::Structured {
+                namespace,
+                producer,
+                key,
+            } => {
+                if producer.is_some() && namespace != RuntimeVariableNamespace::NodeOutputs {
+                    return Err(serde::de::Error::custom(
+                        "producer is only valid for namespace=node_outputs",
+                    ));
+                }
+                let key = match producer {
+                    Some(producer)
+                        if !producer.trim().is_empty()
+                            && !key.trim().is_empty()
+                            && !producer.contains('.')
+                            && !key.contains('.') =>
+                    {
+                        format!("{producer}.{key}")
+                    }
+                    Some(_) => {
+                        return Err(serde::de::Error::custom(
+                            "producer and key must be non-empty single segments",
+                        ));
+                    }
+                    None => key,
+                };
+                let reference = Self { namespace, key };
+                if !reference.validate() {
+                    return Err(serde::de::Error::custom(
+                        "variable key must be one segment, or producer.key for node_outputs",
+                    ));
+                }
+                Ok(reference)
+            }
             RawVariableReference::Shorthand(value) => {
                 Self::from_shorthand(&value).map_err(serde::de::Error::custom)
             }
@@ -73,11 +130,29 @@ impl<'de> Deserialize<'de> for VariableReference {
 
 impl VariableReference {
     pub fn validate(&self) -> bool {
-        !self.key.trim().is_empty()
+        if self.key.trim().is_empty() || self.key.split('.').any(str::is_empty) {
+            return false;
+        }
+        let segment_count = self.key.split('.').count();
+        match self.namespace {
+            RuntimeVariableNamespace::NodeOutputs => segment_count <= 2,
+            _ => segment_count == 1,
+        }
     }
 
     pub fn as_string(&self) -> String {
         format!("{}:{}", self.namespace.as_str(), self.key)
+    }
+
+    pub fn node_output_address(&self) -> Option<(&str, &str)> {
+        (self.namespace == RuntimeVariableNamespace::NodeOutputs)
+            .then(|| self.key.split_once('.'))
+            .flatten()
+    }
+
+    pub fn is_legacy_node_output(&self) -> bool {
+        self.namespace == RuntimeVariableNamespace::NodeOutputs
+            && self.node_output_address().is_none()
     }
 
     fn from_shorthand(value: &str) -> Result<Self, String> {
@@ -102,9 +177,13 @@ impl VariableReference {
             }
         };
 
-        if key.trim().is_empty() || key.contains('.') {
+        if key.trim().is_empty()
+            || key.split('.').any(str::is_empty)
+            || (namespace == RuntimeVariableNamespace::NodeOutputs && key.split('.').count() > 2)
+            || (namespace != RuntimeVariableNamespace::NodeOutputs && key.contains('.'))
+        {
             return Err(format!(
-                "invalid variable reference `{value}`; key must be a single segment"
+                "invalid variable reference `{value}`; expected node.<key> or node.<producer>.<key>, and single-segment keys elsewhere"
             ));
         }
 
@@ -127,7 +206,7 @@ impl VariableBinding {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeVariableNamespaces {
     #[serde(default)]
     pub cli_args: BTreeMap<String, serde_json::Value>,
@@ -142,6 +221,8 @@ pub struct RuntimeVariableNamespaces {
     #[serde(default)]
     pub node_outputs: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
+    pub node_outputs_by_producer: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
     pub run_scoped: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub subflow_input: BTreeMap<String, serde_json::Value>,
@@ -151,38 +232,55 @@ pub struct RuntimeVariableNamespaces {
 
 impl RuntimeVariableNamespaces {
     pub fn resolve(&self, reference: &VariableReference) -> Option<&serde_json::Value> {
+        self.try_resolve(reference).ok().flatten()
+    }
+
+    pub fn try_resolve(
+        &self,
+        reference: &VariableReference,
+    ) -> Result<Option<&serde_json::Value>, ContractError> {
         match reference.namespace {
-            RuntimeVariableNamespace::CliArgs => self.cli_args.get(&reference.key),
+            RuntimeVariableNamespace::CliArgs => Ok(self.cli_args.get(&reference.key)),
             RuntimeVariableNamespace::ManualInvocationInput => {
-                self.manual_invocation_input.get(&reference.key)
+                Ok(self.manual_invocation_input.get(&reference.key))
             }
             RuntimeVariableNamespace::TriggerPayloadMapping => {
-                self.trigger_payload_mapping.get(&reference.key)
+                Ok(self.trigger_payload_mapping.get(&reference.key))
             }
             RuntimeVariableNamespace::WorkflowDefaults => {
-                self.workflow_defaults.get(&reference.key)
+                Ok(self.workflow_defaults.get(&reference.key))
             }
-            RuntimeVariableNamespace::ConfigDefaults => self.config_defaults.get(&reference.key),
-            RuntimeVariableNamespace::NodeOutputs => self.node_outputs.get(&reference.key),
-            RuntimeVariableNamespace::RunScoped => self.run_scoped.get(&reference.key),
-            RuntimeVariableNamespace::SubflowInput => self.subflow_input.get(&reference.key),
-            RuntimeVariableNamespace::SubflowOutput => self.subflow_output.get(&reference.key),
-        }
-    }
-}
-
-impl Default for RuntimeVariableNamespaces {
-    fn default() -> Self {
-        Self {
-            cli_args: BTreeMap::new(),
-            manual_invocation_input: BTreeMap::new(),
-            trigger_payload_mapping: BTreeMap::new(),
-            workflow_defaults: BTreeMap::new(),
-            config_defaults: BTreeMap::new(),
-            node_outputs: BTreeMap::new(),
-            run_scoped: BTreeMap::new(),
-            subflow_input: BTreeMap::new(),
-            subflow_output: BTreeMap::new(),
+            RuntimeVariableNamespace::ConfigDefaults => Ok(self.config_defaults.get(&reference.key)),
+            RuntimeVariableNamespace::NodeOutputs => {
+                if let Some((producer, key)) = reference.node_output_address() {
+                    return Ok(self
+                        .node_outputs_by_producer
+                        .get(producer)
+                        .and_then(|outputs| outputs.get(key)));
+                }
+                let producers = self
+                    .node_outputs_by_producer
+                    .iter()
+                    .filter(|(_, outputs)| outputs.contains_key(&reference.key))
+                    .map(|(producer, _)| producer.clone())
+                    .collect::<Vec<_>>();
+                if producers.len() > 1 {
+                    return Err(ContractError::AmbiguousLegacyNodeOutput {
+                        key: reference.key.clone(),
+                        producer_ids: producers,
+                    });
+                }
+                if let Some(producer) = producers.first() {
+                    return Ok(self
+                        .node_outputs_by_producer
+                        .get(producer)
+                        .and_then(|outputs| outputs.get(&reference.key)));
+                }
+                Ok(self.node_outputs.get(&reference.key))
+            }
+            RuntimeVariableNamespace::RunScoped => Ok(self.run_scoped.get(&reference.key)),
+            RuntimeVariableNamespace::SubflowInput => Ok(self.subflow_input.get(&reference.key)),
+            RuntimeVariableNamespace::SubflowOutput => Ok(self.subflow_output.get(&reference.key)),
         }
     }
 }
@@ -271,6 +369,7 @@ impl RuntimeVariableLayers {
             workflow_defaults: self.workflow_defaults.clone(),
             config_defaults: self.config_defaults.clone(),
             node_outputs: BTreeMap::new(),
+            node_outputs_by_producer: BTreeMap::new(),
             run_scoped: BTreeMap::new(),
             subflow_input,
             subflow_output: BTreeMap::new(),
@@ -281,5 +380,42 @@ impl RuntimeVariableLayers {
         }
 
         namespaces
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addressed_node_reference_serializes_with_canonical_producer_field() {
+        let reference: VariableReference =
+            serde_json::from_str(r#""node.fetch.price""#).expect("shorthand should parse");
+
+        let serialized = serde_json::to_value(&reference).expect("reference should serialize");
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "namespace": "node_outputs",
+                "producer": "fetch",
+                "key": "price"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<VariableReference>(serialized)
+                .expect("canonical structured reference should parse"),
+            reference
+        );
+    }
+
+    #[test]
+    fn node_reference_rejects_more_than_producer_and_key_segments() {
+        assert!(serde_json::from_str::<VariableReference>(r#""node.a.b.c""#).is_err());
+        assert!(serde_json::from_value::<VariableReference>(serde_json::json!({
+            "namespace": "node_outputs",
+            "producer": "a.b",
+            "key": "c"
+        }))
+        .is_err());
     }
 }

@@ -18,7 +18,9 @@ use crate::domain::runtime::NodeDefinition;
 use crate::errors::{assert_required_major, ContractError};
 
 use super::subflow::{SubflowContract, SubflowExport, SubflowImport};
-use super::variables::{RuntimeVariableLayers, VariableBinding, VariableReference};
+use super::variables::{
+    RuntimeVariableLayers, RuntimeVariableNamespace, VariableBinding, VariableReference,
+};
 use super::when::WhenCondition;
 
 pub const CURRENT_API_MAJOR: u64 = 2;
@@ -295,7 +297,36 @@ impl WorkflowDefinition {
             node.validate()?;
         }
 
-        self.validate_graph_contract()
+        self.validate_graph_contract()?;
+        self.validate_node_output_references()
+    }
+
+    pub fn legacy_node_output_references(&self) -> Vec<(String, &'static str, String)> {
+        let mut references = Vec::new();
+        for node in &self.nodes {
+            for input in &node.inputs {
+                if input.source.is_legacy_node_output() {
+                    references.push((node.node_id.clone(), "node.inputs", input.source.key.clone()));
+                }
+            }
+            if let Some(when) = &node.when
+                && when.source.is_legacy_node_output()
+            {
+                references.push((node.node_id.clone(), "node.when", when.source.key.clone()));
+            }
+            if let Some(subflow) = &node.subflow {
+                for import in &subflow.imports {
+                    if import.source.is_legacy_node_output() {
+                        references.push((
+                            node.node_id.clone(),
+                            "subflow.imports",
+                            import.source.key.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        references
     }
 
     fn validate_node_contract(&self, node: &NodeDefinition) -> Result<(), ContractError> {
@@ -349,6 +380,81 @@ impl WorkflowDefinition {
             (None, _) => {}
         }
 
+        Ok(())
+    }
+
+    fn validate_node_output_references(&self) -> Result<(), ContractError> {
+        let node_ids = self
+            .nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        let dependencies = self
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.clone(), node.depends_on.iter().cloned().collect::<BTreeSet<_>>()))
+            .collect::<BTreeMap<_, _>>();
+        let mut closure = dependencies.clone();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for node_id in &node_ids {
+                let direct = closure.get(node_id).cloned().unwrap_or_default();
+                let mut expanded = direct.clone();
+                for dependency in direct {
+                    if let Some(ancestors) = closure.get(&dependency) {
+                        expanded.extend(ancestors.iter().cloned());
+                    }
+                }
+                if closure.get(node_id) != Some(&expanded) {
+                    closure.insert(node_id.clone(), expanded);
+                    changed = true;
+                }
+            }
+        }
+
+        for node in &self.nodes {
+            let mut references = node
+                .inputs
+                .iter()
+                .map(|binding| ("node.inputs", &binding.source))
+                .collect::<Vec<_>>();
+            if let Some(when) = &node.when {
+                references.push(("node.when", &when.source));
+            }
+            if let Some(subflow) = &node.subflow {
+                references.extend(
+                    subflow
+                        .imports
+                        .iter()
+                        .map(|import| ("subflow.imports", &import.source)),
+                );
+            }
+            for (context, reference) in references {
+                if reference.namespace != RuntimeVariableNamespace::NodeOutputs {
+                    continue;
+                }
+                let Some((producer, key)) = reference.node_output_address() else {
+                    continue;
+                };
+                if producer.is_empty()
+                    || key.is_empty()
+                    || !node_ids.contains(producer)
+                    || producer == node.node_id
+                    || !closure
+                        .get(&node.node_id)
+                        .is_some_and(|ancestors| ancestors.contains(producer))
+                {
+                    return Err(ContractError::InvalidVariableReference {
+                        workflow_id: self.workflow_id.clone(),
+                        node_id: node.node_id.clone(),
+                        context,
+                        namespace: reference.namespace.as_str().to_owned(),
+                        key: reference.key.clone(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 

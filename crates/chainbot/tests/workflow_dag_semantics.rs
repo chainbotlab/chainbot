@@ -373,7 +373,7 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
     .expect_err("multi-segment shorthand keys should fail deserialization");
     assert!(invalid_reference
         .to_string()
-        .contains("key must be a single segment"));
+        .contains("single-segment keys elsewhere"));
 
     let invalid_subflow_plugin = toml::from_str::<WorkflowDefinition>(
 "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-parent\"\nname = \"parent\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"call-child\"\nkind = \"subflow\"\nplugin = \"builtin.identity\"\ndepends_on = []\n\n[nodes.call]\nworkflow = \"wf-child\"\n",
@@ -398,6 +398,43 @@ fn invalid_subflow_call_dsl_is_rejected_during_deserialize() {
     assert!(legacy_subflow
         .to_string()
         .contains("unknown field `subflow`"));
+}
+
+#[test]
+fn producer_address_must_reference_a_transitive_dependency() {
+    let workflow = |producer: &str| {
+        let mut consumer = node("consumer", vec!["middle"]);
+        consumer.inputs.push(VariableBinding {
+            target: "price".to_owned(),
+            source: VariableReference {
+                namespace: RuntimeVariableNamespace::NodeOutputs,
+                key: format!("{producer}.price"),
+            },
+        });
+        WorkflowDefinition {
+            api_version: "2.0.0".to_owned(),
+            workflow_id: "wf-addressed".to_owned(),
+            name: "addressed".to_owned(),
+            runtime: RuntimeVariableLayers::default(),
+            nodes: vec![node("producer", vec![]), node("sibling", vec![]), node("middle", vec!["producer"]), consumer],
+            package_root: PathBuf::new(),
+        }
+    };
+
+    workflow("producer")
+        .validate()
+        .expect("transitive dependency reference should validate");
+    for producer in ["missing", "consumer", "sibling"] {
+        assert!(matches!(
+            workflow(producer).validate(),
+            Err(ContractError::InvalidVariableReference {
+                workflow_id,
+                node_id,
+                context: "node.inputs",
+                ..
+            }) if workflow_id == "wf-addressed" && node_id == "consumer"
+        ));
+    }
 }
 
 #[test]

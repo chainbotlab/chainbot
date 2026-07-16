@@ -3,6 +3,9 @@ chainbot_version = "2.4.2"
 profile = "http-plugin-integrations"
 secret_refs = []
 
+[plugin_activation."http-node"]
+allowed_origins = ["https://api.example.test"]
+
 [storage]
 mode = "local"
 

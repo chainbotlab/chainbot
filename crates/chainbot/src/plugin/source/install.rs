@@ -10,6 +10,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::errors::ContractError;
 
 use super::fs::{copy_tree_strict, create_temp_dir_in, remove_path_if_exists};
@@ -19,8 +21,33 @@ use super::prepare::PreparedPlugin;
 pub(crate) struct InstallTransaction {
     target_dir: PathBuf,
     backup_dir: Option<PathBuf>,
-    staged_dir: PathBuf,
-    finalized: bool,
+    staging_root: PathBuf,
+    journal_path: PathBuf,
+    state: InstallTransactionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InstallTransactionState {
+    Staged,
+    BackupMoved,
+    Promoted,
+    Finalized,
+    RolledBack,
+}
+
+impl InstallTransactionState {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Finalized | Self::RolledBack)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct InstallTransactionJournal {
+    target_dir: PathBuf,
+    backup_dir: Option<PathBuf>,
+    staging_root: PathBuf,
+    state: InstallTransactionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +78,8 @@ impl InstallTransaction {
             operation: "create plugin transaction directory",
             source,
         })?;
+        recover_pending_transactions(plugins_dir, &transaction_dir)?;
+
         let target_dir = plugins_dir.join(&prepared.plugin_id);
         if target_dir.exists() && !force {
             return Err(ContractError::CliUsage {
@@ -64,7 +93,16 @@ impl InstallTransaction {
         let staging_root = create_temp_dir_in(&transaction_dir, "plugin-stage")?;
         let staged_dir = staging_root.join(&prepared.plugin_id);
         copy_tree_strict(&prepared.package_root, &staged_dir)?;
-        let backup_dir = if target_dir.exists() {
+        let mut transaction = Self {
+            target_dir: target_dir.clone(),
+            backup_dir: None,
+            journal_path: transaction_dir.join(format!("install-{}.json", prepared.plugin_id)),
+            staging_root,
+            state: InstallTransactionState::Staged,
+        };
+        transaction.persist_journal()?;
+
+        if target_dir.exists() {
             let backup_dir = transaction_dir.join(format!("backup-{}", prepared.plugin_id));
             remove_path_if_exists(&backup_dir)?;
             fs::rename(&target_dir, &backup_dir).map_err(|source| ContractError::Io {
@@ -72,57 +110,224 @@ impl InstallTransaction {
                 operation: "move existing plugin to backup",
                 source,
             })?;
-            Some(backup_dir)
-        } else {
-            None
-        };
-        fs::rename(&staged_dir, &target_dir).map_err(|source| ContractError::Io {
-            path: staged_dir.clone(),
-            operation: "promote staged plugin into target directory",
-            source,
-        })?;
+            transaction.backup_dir = Some(backup_dir);
+            transaction.state = InstallTransactionState::BackupMoved;
+            transaction.persist_journal()?;
+        }
+
+        if let Err(source) = fs::rename(&staged_dir, &target_dir) {
+            let promotion_error = ContractError::Io {
+                path: staged_dir,
+                operation: "promote staged plugin into target directory",
+                source,
+            };
+            return match transaction.rollback() {
+                Ok(()) => Err(promotion_error),
+                Err(rollback_error) => Err(ContractError::CliUsage {
+                    message: format!(
+                        "plugin promotion failed ({promotion_error}) and rollback failed ({rollback_error})"
+                    ),
+                }),
+            };
+        }
+        transaction.state = InstallTransactionState::Promoted;
+        transaction.persist_journal()?;
         let result = InstallTransactionResult {
             plugin_id: prepared.plugin_id.clone(),
-            target_dir: target_dir.clone(),
-            replaced_existing: backup_dir.is_some(),
+            target_dir,
+            replaced_existing: transaction.backup_dir.is_some(),
         };
-        Ok((
-            Self {
-                target_dir,
-                backup_dir,
-                staged_dir,
-                finalized: false,
-            },
-            result,
-        ))
+        Ok((transaction, result))
     }
 
     pub(crate) fn finalize(mut self) -> Result<(), ContractError> {
-        if let Some(backup_dir) = self.backup_dir.take() {
-            remove_path_if_exists(&backup_dir)?;
+        if let Some(backup_dir) = self.backup_dir.as_ref() {
+            remove_path_if_exists(backup_dir)?;
         }
-        self.finalized = true;
-        Ok(())
+        self.backup_dir = None;
+        self.state = InstallTransactionState::Finalized;
+        remove_path_if_exists(&self.staging_root)?;
+        remove_path_if_exists(&self.journal_path)
     }
 
     pub(crate) fn rollback(mut self) -> Result<(), ContractError> {
-        remove_path_if_exists(&self.target_dir)?;
-        if let Some(backup_dir) = self.backup_dir.take() {
-            fs::rename(&backup_dir, &self.target_dir).map_err(|source| ContractError::Io {
+        if matches!(
+            self.state,
+            InstallTransactionState::BackupMoved | InstallTransactionState::Promoted
+        ) {
+            remove_path_if_exists(&self.target_dir)?;
+        }
+        if let Some(backup_dir) = self.backup_dir.as_ref() {
+            fs::rename(backup_dir, &self.target_dir).map_err(|source| ContractError::Io {
                 path: backup_dir.clone(),
                 operation: "restore plugin backup",
                 source,
             })?;
         }
-        self.finalized = true;
-        Ok(())
+        self.backup_dir = None;
+        self.state = InstallTransactionState::RolledBack;
+        remove_path_if_exists(&self.staging_root)?;
+        remove_path_if_exists(&self.journal_path)
     }
+}
+
+impl InstallTransaction {
+    fn persist_journal(&self) -> Result<(), ContractError> {
+        let journal = InstallTransactionJournal {
+            target_dir: self.target_dir.clone(),
+            backup_dir: self.backup_dir.clone(),
+            staging_root: self.staging_root.clone(),
+            state: self.state,
+        };
+        let bytes = serde_json::to_vec(&journal).map_err(|source| ContractError::CliUsage {
+            message: format!("serialize plugin install transaction journal: {source}"),
+        })?;
+        let temporary_path = self.journal_path.with_extension("tmp");
+        fs::write(&temporary_path, bytes).map_err(|source| ContractError::Io {
+            path: temporary_path.clone(),
+            operation: "write plugin install transaction journal",
+            source,
+        })?;
+        fs::rename(&temporary_path, &self.journal_path).map_err(|source| ContractError::Io {
+            path: self.journal_path.clone(),
+            operation: "commit plugin install transaction journal",
+            source,
+        })
+    }
+}
+
+fn recover_pending_transactions(plugins_dir: &Path, transaction_dir: &Path) -> Result<(), ContractError> {
+    let entries = fs::read_dir(transaction_dir).map_err(|source| ContractError::Io {
+        path: transaction_dir.to_path_buf(),
+        operation: "read plugin transaction directory",
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ContractError::Io {
+            path: transaction_dir.to_path_buf(),
+            operation: "read plugin transaction entry",
+            source,
+        })?;
+        let journal_path = entry.path();
+        if !journal_path.is_file()
+            || !journal_path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("install-"))
+            || journal_path.extension().is_none_or(|extension| extension != "json")
+        {
+            continue;
+        }
+        let bytes = fs::read(&journal_path).map_err(|source| ContractError::Io {
+            path: journal_path.clone(),
+            operation: "read plugin install transaction journal",
+            source,
+        })?;
+        let journal: InstallTransactionJournal = serde_json::from_slice(&bytes).map_err(|source| ContractError::CliUsage {
+            message: format!("decode plugin install transaction journal {}: {source}", journal_path.display()),
+        })?;
+        if !journal.target_dir.starts_with(plugins_dir) {
+            return Err(ContractError::CliUsage {
+                message: format!("plugin install transaction journal target escapes plugins directory: {}", journal.target_dir.display()),
+            });
+        }
+        let target_is_valid = journal.target_dir.join("config.toml").is_file();
+        match journal.state {
+            InstallTransactionState::Staged => {}
+            InstallTransactionState::BackupMoved => {
+                if !journal.target_dir.exists()
+                    && let Some(backup_dir) = journal.backup_dir.as_ref().filter(|path| path.exists())
+                {
+                    fs::rename(backup_dir, &journal.target_dir).map_err(|source| ContractError::Io {
+                        path: backup_dir.clone(),
+                        operation: "restore interrupted plugin install backup",
+                        source,
+                    })?;
+                } else if target_is_valid {
+                    if let Some(backup_dir) = journal.backup_dir.as_ref() {
+                        remove_path_if_exists(backup_dir)?;
+                    }
+                }
+            }
+            InstallTransactionState::Promoted => {
+                if !target_is_valid {
+                    remove_path_if_exists(&journal.target_dir)?;
+                    if let Some(backup_dir) = journal.backup_dir.as_ref().filter(|path| path.exists()) {
+                        fs::rename(backup_dir, &journal.target_dir).map_err(|source| ContractError::Io {
+                            path: backup_dir.clone(),
+                            operation: "restore invalid promoted plugin backup",
+                            source,
+                        })?;
+                    }
+                } else if let Some(backup_dir) = journal.backup_dir.as_ref() {
+                    remove_path_if_exists(backup_dir)?;
+                }
+            }
+            InstallTransactionState::Finalized | InstallTransactionState::RolledBack => {}
+        }
+        remove_path_if_exists(&journal.staging_root)?;
+        remove_path_if_exists(&journal_path)?;
+    }
+    Ok(())
 }
 
 impl Drop for InstallTransaction {
     fn drop(&mut self) {
-        if self.finalized {
-            let _ = remove_path_if_exists(&self.staged_dir);
+        if self.state.is_terminal() {
+            return;
         }
+        if matches!(
+            self.state,
+            InstallTransactionState::BackupMoved | InstallTransactionState::Promoted
+        ) {
+            let _ = remove_path_if_exists(&self.target_dir);
+        }
+        if let Some(backup_dir) = self.backup_dir.take() {
+            let _ = fs::rename(backup_dir, &self.target_dir);
+        }
+        let _ = remove_path_if_exists(&self.staging_root);
+        let _ = remove_path_if_exists(&self.journal_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn recovery_restores_backup_after_interrupted_promotion() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("chainbot-install-recovery-{unique}"));
+        let plugins_dir = root.join("plugins");
+        let transaction_dir = root.join(".chainbot/plugin-transactions");
+        let target_dir = plugins_dir.join("example");
+        let backup_dir = transaction_dir.join("backup-example");
+        let staging_root = transaction_dir.join("plugin-stage-interrupted");
+        let journal_path = transaction_dir.join("install-example.json");
+        fs::create_dir_all(&plugins_dir).expect("plugins directory should be creatable");
+        fs::create_dir_all(&backup_dir).expect("backup directory should be creatable");
+        fs::write(backup_dir.join("config.toml"), "plugin_id = 'example'")
+            .expect("backup manifest should be writable");
+        fs::create_dir_all(&staging_root).expect("staging directory should be creatable");
+        let journal = InstallTransactionJournal {
+            target_dir: target_dir.clone(),
+            backup_dir: Some(backup_dir),
+            staging_root: staging_root.clone(),
+            state: InstallTransactionState::BackupMoved,
+        };
+        fs::write(
+            &journal_path,
+            serde_json::to_vec(&journal).expect("journal should serialize"),
+        )
+        .expect("journal should be writable");
+
+        recover_pending_transactions(&plugins_dir, &transaction_dir)
+            .expect("interrupted transaction should recover");
+
+        assert!(target_dir.join("config.toml").is_file());
+        assert!(!journal_path.exists());
+        assert!(!staging_root.exists());
+        let _ = fs::remove_dir_all(root);
     }
 }

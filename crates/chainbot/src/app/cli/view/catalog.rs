@@ -402,6 +402,9 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
                     crate::plugin::TriggerRuntimeLifecycle::ProcessShortLived => {
                         String::from("process_short_lived")
                     }
+                    crate::plugin::TriggerRuntimeLifecycle::ProcessDaemonSession => {
+                        String::from("process_daemon_session")
+                    }
                     crate::plugin::TriggerRuntimeLifecycle::WasmDaemonPersistentSession => {
                         String::from("wasm_daemon_persistent_session")
                     }

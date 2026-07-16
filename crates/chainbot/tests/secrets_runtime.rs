@@ -164,6 +164,8 @@ fn secret_values_never_persisted() {
             status: RunStatus::Running,
             started_at_ms: 1_711_000_000_000,
             finished_at_ms: None,
+            owner_id: None,
+            lease_generation: None,
         })
         .expect("run summary should persist");
 

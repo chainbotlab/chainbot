@@ -11,7 +11,10 @@ pub mod acceptance;
 pub mod contract;
 pub mod emission;
 
-pub use acceptance::{TriggerPlane, TriggerPlaneError, TriggerRunRequest, TriggerStateStore};
+pub use acceptance::{
+    TriggerAcceptanceCommand, TriggerAcceptanceOutcome, TriggerPlane, TriggerPlaneError,
+    TriggerRunRequest, TriggerStateStore,
+};
 pub use contract::{
     TriggerAck, TriggerDefinition, TriggerEventFrame, TriggerFatal, TriggerHeartbeat,
     TriggerHostMessage, TriggerKind, TriggerPluginActivationBindings, TriggerPluginHostPolicy,

@@ -40,6 +40,25 @@ use super::emission::{map_trigger_payload, trigger_emission_from_staged_record, 
 const STAGED_TRIGGER_EVENT_BATCH_LIMIT: i64 = 256;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TriggerAcceptanceCommand {
+    pub candidate_record: TriggerEventRecord,
+    pub expected_snapshot_sequence: u64,
+    pub staged_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriggerAcceptanceOutcome {
+    Accepted {
+        request: TriggerRunRequest,
+        record_ref: String,
+    },
+    Duplicate,
+    DedupSuppressed,
+    CooldownSuppressed,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TriggerRunRequest {
     pub run_id: String,
     pub workflow_id: String,
@@ -131,6 +150,45 @@ pub trait TriggerStateStore: std::fmt::Debug {
         &mut self,
         checkpoint: &TriggerCheckpointRecord,
     ) -> Result<(), TriggerPlaneError>;
+    fn accept_trigger_event(
+        &mut self,
+        command: TriggerAcceptanceCommand,
+    ) -> Result<TriggerAcceptanceOutcome, TriggerPlaneError> {
+        let record = command.candidate_record;
+        let record_ref = self.write_trigger_record_for_acceptance(&record)?;
+        let mut snapshot = self
+            .read_trigger_snapshot_for_acceptance(&record.trigger_id)?
+            .unwrap_or_else(|| TriggerSnapshotRecord::new(record.trigger_id.clone()));
+        if snapshot.last_sequence != command.expected_snapshot_sequence {
+            return Ok(TriggerAcceptanceOutcome::Conflict);
+        }
+        snapshot.apply_record(&record);
+        self.write_trigger_snapshot_for_acceptance(&snapshot)?;
+        if let Some(checkpoint) = record.checkpoint.clone() {
+            self.write_trigger_checkpoint_for_acceptance(&TriggerCheckpointRecord {
+                schema_version: String::from("1.0.0"),
+                trigger_id: record.trigger_id.clone(),
+                checkpoint,
+                acked_at_ms: record.accepted_at_ms,
+            })?;
+        }
+        if let Some(staged_id) = command.staged_id {
+            self.mark_staged_trigger_event_accepted_for_acceptance(&staged_id, record.accepted_at_ms)?;
+        }
+        Ok(TriggerAcceptanceOutcome::Accepted {
+            request: TriggerRunRequest {
+                run_id: record.run_id,
+                workflow_id: record.workflow_id,
+                trigger_id: record.trigger_id,
+                event_id: record.event_id,
+                source: record.source,
+                accepted_at_ms: record.accepted_at_ms,
+                payload: record.payload,
+                trigger_record_ref: record_ref.clone(),
+            },
+            record_ref,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -247,7 +305,7 @@ impl TriggerPlane {
             run_requests.append(&mut post_external_staged_requests);
 
             for emission in emissions {
-                let request = self.normalize_emission(&definition, emission, accepted_at_ms)?;
+                let request = self.normalize_emission(&definition, emission, accepted_at_ms, None)?;
                 if let Some(request) = request {
                     run_requests.push(request);
                 }
@@ -279,12 +337,8 @@ impl TriggerPlane {
                 definition,
                 trigger_emission_from_staged_record(&staged_record),
                 accepted_at_ms,
+                Some(staged_record.staging_id),
             )?;
-            self.state_store
-                .mark_staged_trigger_event_accepted_for_acceptance(
-                    &staged_record.staging_id,
-                    accepted_at_ms,
-                )?;
             if let Some(request) = request {
                 requests.push(request);
             }
@@ -297,11 +351,9 @@ impl TriggerPlane {
         definition: &TriggerDefinition,
         emission: TriggerEmission,
         accepted_at_ms: i64,
+        staged_id: Option<String>,
     ) -> Result<Option<TriggerRunRequest>, TriggerPlaneError> {
         let accepted_event_key = accepted_trigger_key(&definition.trigger_id, &emission.event_id);
-        if self.accepted_event_keys.contains(&accepted_event_key) {
-            return Ok(None);
-        }
 
         if emission.event_id.trim().is_empty() {
             return Err(TriggerPlaneError::Contract(
@@ -325,15 +377,6 @@ impl TriggerPlane {
             .dedup_window_ms
             .filter(|value| *value > 0)
             .map(|window_ms| accepted_at_ms.saturating_add(window_ms));
-        if let Some(dedup_key) = dedup_key.as_deref() {
-            if !self
-                .state_store
-                .dedup_is_ready_for_acceptance(dedup_key, accepted_at_ms)?
-            {
-                return Ok(None);
-            }
-        }
-
         let cooldown_key = emission.cooldown_ms.filter(|value| *value > 0).map(|_| {
             emission
                 .cooldown_key
@@ -344,15 +387,6 @@ impl TriggerPlane {
             .cooldown_ms
             .filter(|value| *value > 0)
             .map(|cooldown_ms| accepted_at_ms.saturating_add(cooldown_ms));
-        if let Some(cooldown_key) = cooldown_key.as_deref() {
-            if !self
-                .state_store
-                .cooldown_is_ready_for_acceptance(cooldown_key, accepted_at_ms)?
-            {
-                return Ok(None);
-            }
-        }
-
         self.accepted_sequence = self.accepted_sequence.saturating_add(1);
         let run_id = format!(
             "run-{}-{}-{}-{}-{}-{:020}",
@@ -397,37 +431,25 @@ impl TriggerPlane {
             cooldown_expires_at_ms,
         };
 
-        let trigger_record_ref = self
-            .state_store
-            .write_trigger_record_for_acceptance(&trigger_record)?;
-        let mut snapshot = self
+        let expected_snapshot_sequence = self
             .state_store
             .read_trigger_snapshot_for_acceptance(&definition.trigger_id)?
-            .unwrap_or_else(|| TriggerSnapshotRecord::new(definition.trigger_id.clone()));
-        snapshot.apply_record(&trigger_record);
-        self.state_store
-            .write_trigger_snapshot_for_acceptance(&snapshot)?;
-        if let Some(checkpoint) = checkpoint {
-            self.state_store
-                .write_trigger_checkpoint_for_acceptance(&TriggerCheckpointRecord {
-                    schema_version: String::from("1.0.0"),
-                    trigger_id: definition.trigger_id.clone(),
-                    checkpoint,
-                    acked_at_ms: accepted_at_ms,
-                })?;
+            .map_or(0, |snapshot| snapshot.last_sequence);
+        let outcome = self.state_store.accept_trigger_event(TriggerAcceptanceCommand {
+            candidate_record: trigger_record,
+            expected_snapshot_sequence,
+            staged_id,
+        })?;
+        match outcome {
+            TriggerAcceptanceOutcome::Accepted { request, .. } => {
+                self.accepted_event_keys.insert(accepted_event_key);
+                Ok(Some(request))
+            }
+            TriggerAcceptanceOutcome::Duplicate
+            | TriggerAcceptanceOutcome::DedupSuppressed
+            | TriggerAcceptanceOutcome::CooldownSuppressed
+            | TriggerAcceptanceOutcome::Conflict => Ok(None),
         }
-        self.accepted_event_keys.insert(accepted_event_key);
-
-        Ok(Some(TriggerRunRequest {
-            run_id,
-            workflow_id: definition.workflow_id.clone(),
-            trigger_id: definition.trigger_id.clone(),
-            event_id: emission.event_id,
-            source,
-            accepted_at_ms,
-            payload,
-            trigger_record_ref,
-        }))
     }
 }
 

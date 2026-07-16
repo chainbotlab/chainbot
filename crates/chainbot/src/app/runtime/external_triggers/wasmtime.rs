@@ -8,8 +8,6 @@
 //! Owns the wasm trigger transport ABI surface without duplicating manifest business schema.
 
 #[cfg(test)]
-const ROOT_TRIGGER_PLUGIN_WIT: &str = include_str!("../../../../../../wit/trigger-plugin.wit");
-#[cfg(test)]
 const CRATE_TRIGGER_PLUGIN_WIT: &str = include_str!("../../../../wit/trigger-plugin.wit");
 
 #[cfg(test)]
@@ -17,11 +15,20 @@ use std::sync::{Arc, Weak};
 
 use std::path::Path;
 
+use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{
-    Caller, Engine, Extern, ExternType, Func, Instance, Module, Store, StoreLimits,
+    Caller, Config, Engine, Extern, ExternType, Func, Instance, Module, Store, StoreLimits,
     StoreLimitsBuilder, TypedFunc, ValType,
 };
 
+mod component_v1 {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "trigger-plugin",
+    });
+}
+
+#[cfg(test)]
 const MINIMAL_WASM_MODULE_BYTES: &[u8] = b"\0asm\x01\0\0\0";
 const GUEST_RUN_SESSION_EXPORT_NAMES: [&str; 2] = ["run_session", "run-session"];
 const HOST_PUSH_IMPORT_MODULE_NAMES: [&str; 1] = ["trigger-host"];
@@ -52,13 +59,17 @@ pub struct WasmGuestTransportEnvelope {
 
 #[derive(Debug)]
 pub enum WasmGuestExecutionError {
+    Compile(String),
+    Instantiate(String),
     GuestCallFailed(String),
 }
 
 impl std::fmt::Display for WasmGuestExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::GuestCallFailed(message) => write!(f, "{message}"),
+            Self::Compile(message) | Self::Instantiate(message) | Self::GuestCallFailed(message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -75,6 +86,34 @@ struct WasmStoreState {
     last_callback_outcome: Option<HostPushOutcome>,
     #[cfg(test)]
     runtime_guard: Arc<()>,
+}
+
+impl component_v1::chainbot::trigger_plugin::trigger_host::Host for WasmStoreState {
+    fn push_trigger_event(
+        &mut self,
+        event_bytes: Vec<u8>,
+    ) -> Result<
+        component_v1::chainbot::trigger_plugin::trigger_host::HostPushSuccess,
+        component_v1::chainbot::trigger_plugin::trigger_host::HostPushError,
+    > {
+        let outcome = dispatch_component_callback_event(self, &event_bytes);
+        self.callback_invoked = true;
+        self.last_callback_outcome = Some(outcome);
+        match outcome {
+            HostPushOutcome::DurableAck => Ok(
+                component_v1::chainbot::trigger_plugin::trigger_host::HostPushSuccess::DurableAck,
+            ),
+            HostPushOutcome::RetryableBackpressure => Err(
+                component_v1::chainbot::trigger_plugin::trigger_host::HostPushError::Backpressure,
+            ),
+            HostPushOutcome::TerminalLeaseLost => Err(
+                component_v1::chainbot::trigger_plugin::trigger_host::HostPushError::LeaseLost,
+            ),
+            HostPushOutcome::TerminalShuttingDown => Err(
+                component_v1::chainbot::trigger_plugin::trigger_host::HostPushError::ShuttingDown,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,9 +152,19 @@ impl WasmStoreLimiterConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WasmTriggerSessionConfig {
     pub store_limiter: WasmStoreLimiterConfig,
+    pub fuel_per_turn: u64,
+}
+
+impl Default for WasmTriggerSessionConfig {
+    fn default() -> Self {
+        Self {
+            store_limiter: WasmStoreLimiterConfig::default(),
+            fuel_per_turn: 10_000_000,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +199,6 @@ pub struct WasmTriggerSession {
     guest_state: WasmGuestState,
     #[cfg(test)]
     started_at_ms: i64,
-    #[cfg(test)]
     config: WasmTriggerSessionConfig,
 }
 
@@ -171,6 +219,7 @@ impl WasmTriggerSession {
         )
     }
 
+    #[cfg(test)]
     pub fn new_with_config(
         trigger_id: impl Into<String>,
         plugin_id: impl Into<String>,
@@ -178,18 +227,82 @@ impl WasmTriggerSession {
         started_at_ms: i64,
         config: WasmTriggerSessionConfig,
     ) -> Self {
-        #[cfg(not(test))]
-        let _ = (trigger_id, plugin_id);
-
+        let trigger_id = trigger_id.into();
+        let plugin_id = plugin_id.into();
         let component = component.into();
-        let engine = Engine::default();
-        let module = load_session_module(&engine, &component);
-        let store_limits = config.store_limiter.build_store_limits();
+        if Path::new(&component).is_file() {
+            return Self::try_new_with_config(
+                trigger_id,
+                plugin_id,
+                component,
+                started_at_ms,
+                config,
+            )
+            .expect("test core_v0 module should compile and instantiate");
+        }
+        let engine = core_engine().expect("test core_v0 engine should configure");
+        let module = Module::new(&engine, MINIMAL_WASM_MODULE_BYTES)
+            .expect("test minimal core_v0 module should compile");
+        Self::from_module(
+            trigger_id,
+            plugin_id,
+            component,
+            started_at_ms,
+            config,
+            engine,
+            module,
+        )
+        .expect("test minimal core_v0 module should instantiate")
+    }
+
+    pub fn try_new_with_config(
+        trigger_id: impl Into<String>,
+        plugin_id: impl Into<String>,
+        component: impl Into<String>,
+        started_at_ms: i64,
+        config: WasmTriggerSessionConfig,
+    ) -> Result<Self, WasmGuestExecutionError> {
+        let trigger_id = trigger_id.into();
+        let plugin_id = plugin_id.into();
+        let component = component.into();
+        if component.trim().is_empty() || !Path::new(&component).is_file() {
+            return Err(WasmGuestExecutionError::Compile(format!(
+                "configured core_v0 module does not exist: {component}"
+            )));
+        }
+        let engine = core_engine()?;
+        let module = Module::from_file(&engine, &component).map_err(|source| {
+            WasmGuestExecutionError::Compile(format!(
+                "failed to compile core_v0 module `{component}`: {source}"
+            ))
+        })?;
+        Self::from_module(
+            trigger_id,
+            plugin_id,
+            component,
+            started_at_ms,
+            config,
+            engine,
+            module,
+        )
+    }
+
+    fn from_module(
+        trigger_id: String,
+        plugin_id: String,
+        component: String,
+        started_at_ms: i64,
+        config: WasmTriggerSessionConfig,
+        engine: Engine,
+        module: Module,
+    ) -> Result<Self, WasmGuestExecutionError> {
+        #[cfg(not(test))]
+        let _ = (&trigger_id, &plugin_id);
         let mut store = Store::new(
             &engine,
             WasmStoreState {
                 turn_count: 0,
-                store_limits,
+                store_limits: config.store_limiter.build_store_limits(),
                 active_push_context: None,
                 active_push_dispatch: None,
                 callback_invoked: false,
@@ -199,13 +312,18 @@ impl WasmTriggerSession {
             },
         );
         store.limiter(|state| &mut state.store_limits);
-        let instance = instantiate_session_instance(&module, &mut store);
+        let imports = build_session_imports(&module, &mut store)?;
+        let instance = Instance::new(&mut store, &module, &imports).map_err(|source| {
+            WasmGuestExecutionError::Instantiate(format!(
+                "failed to instantiate core_v0 module `{component}`: {source}"
+            ))
+        })?;
 
-        Self {
+        Ok(Self {
             #[cfg(test)]
-            trigger_id: trigger_id.into(),
+            trigger_id,
             #[cfg(test)]
-            plugin_id: plugin_id.into(),
+            plugin_id,
             component,
             #[cfg(test)]
             engine,
@@ -220,9 +338,8 @@ impl WasmTriggerSession {
             },
             #[cfg(test)]
             started_at_ms,
-            #[cfg(test)]
             config,
-        }
+        })
     }
 
     #[cfg(test)]
@@ -291,6 +408,11 @@ impl WasmTriggerSession {
         mut host: &mut dyn TriggerPushHost,
     ) -> Result<HostPushOutcome, WasmGuestExecutionError> {
         self.begin_turn(at_ms);
+        self.store.set_fuel(self.config.fuel_per_turn).map_err(|source| {
+            WasmGuestExecutionError::GuestCallFailed(format!(
+                "failed to set core_v0 turn fuel: {source}"
+            ))
+        })?;
 
         {
             let state = self.store.data_mut();
@@ -356,31 +478,189 @@ impl WasmTriggerSession {
     }
 }
 
-fn load_session_module(engine: &Engine, component: &str) -> Module {
-    let module_path = component.trim();
-    if module_path.is_empty() {
-        return Module::new(engine, MINIMAL_WASM_MODULE_BYTES)
-            .expect("minimal wasm module should compile with default engine");
+pub struct ComponentWasmTriggerSession {
+    component_path: String,
+    store: Store<WasmStoreState>,
+    bindings: component_v1::TriggerPlugin,
+    guest_state: WasmGuestState,
+    config: WasmTriggerSessionConfig,
+}
+
+impl std::fmt::Debug for ComponentWasmTriggerSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComponentWasmTriggerSession")
+            .field("component_path", &self.component_path)
+            .field("guest_state", &self.guest_state)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl ComponentWasmTriggerSession {
+    pub fn try_new_with_config(
+        component_path: impl Into<String>,
+        started_at_ms: i64,
+        config: WasmTriggerSessionConfig,
+    ) -> Result<Self, WasmGuestExecutionError> {
+        let component_path = component_path.into();
+        if component_path.trim().is_empty() || !Path::new(&component_path).is_file() {
+            return Err(WasmGuestExecutionError::Compile(format!(
+                "configured component_v1 file does not exist: {component_path}"
+            )));
+        }
+        let mut engine_config = Config::new();
+        engine_config.wasm_component_model(true).consume_fuel(true);
+        let engine = Engine::new(&engine_config).map_err(|source| {
+            WasmGuestExecutionError::Compile(format!(
+                "failed to configure component_v1 engine: {source}"
+            ))
+        })?;
+        let component = Component::from_file(&engine, &component_path).map_err(|source| {
+            WasmGuestExecutionError::Compile(format!(
+                "failed to compile component_v1 `{component_path}`: {source:?}"
+            ))
+        })?;
+        let mut linker = Linker::new(&engine);
+        component_v1::TriggerPlugin::add_to_linker::<_, HasSelf<_>>(
+            &mut linker,
+            |state| state,
+        )
+        .map_err(|source| {
+            WasmGuestExecutionError::Instantiate(format!(
+                "failed to link component_v1 host callbacks: {source}"
+            ))
+        })?;
+        let mut store = Store::new(
+            &engine,
+            WasmStoreState {
+                turn_count: 0,
+                store_limits: config.store_limiter.build_store_limits(),
+                active_push_context: None,
+                active_push_dispatch: None,
+                callback_invoked: false,
+                last_callback_outcome: None,
+                #[cfg(test)]
+                runtime_guard: Arc::new(()),
+            },
+        );
+        store.limiter(|state| &mut state.store_limits);
+        let bindings = component_v1::TriggerPlugin::instantiate(&mut store, &component, &linker)
+            .map_err(|source| {
+                WasmGuestExecutionError::Instantiate(format!(
+                    "failed to instantiate component_v1 `{component_path}`: {source}"
+                ))
+            })?;
+
+        Ok(Self {
+            component_path,
+            store,
+            bindings,
+            guest_state: WasmGuestState {
+                turn_count: 0,
+                last_turn_at_ms: None,
+                last_reconciled_at_ms: started_at_ms,
+            },
+            config,
+        })
     }
 
-    let candidate = Path::new(module_path);
-    if !candidate.is_file() {
-        return Module::new(engine, MINIMAL_WASM_MODULE_BYTES)
-            .expect("minimal wasm module should compile with default engine");
+    pub fn component(&self) -> &str {
+        &self.component_path
     }
 
-    Module::from_file(engine, candidate).unwrap_or_else(|source| {
-        panic!("configured wasm module should compile and instantiate: {module_path}: {source}")
+    pub fn mark_reconciled(&mut self, at_ms: i64) {
+        self.guest_state.last_reconciled_at_ms = at_ms;
+    }
+
+    pub fn execute_guest_turn(
+        &mut self,
+        at_ms: i64,
+        mut host: &mut dyn TriggerPushHost,
+    ) -> Result<HostPushOutcome, WasmGuestExecutionError> {
+        self.store.data_mut().turn_count = self.store.data().turn_count.saturating_add(1);
+        self.guest_state.turn_count = self.guest_state.turn_count.saturating_add(1);
+        self.guest_state.last_turn_at_ms = Some(at_ms);
+        self.store.set_fuel(self.config.fuel_per_turn).map_err(|source| {
+            WasmGuestExecutionError::GuestCallFailed(format!(
+                "failed to set component_v1 turn fuel: {source}"
+            ))
+        })?;
+        {
+            let state = self.store.data_mut();
+            state.active_push_context =
+                Some((&mut host as *mut &mut dyn TriggerPushHost).cast::<()>());
+            state.active_push_dispatch = Some(dispatch_push_to_trigger_host);
+            state.callback_invoked = false;
+            state.last_callback_outcome = None;
+        }
+
+        let call_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.bindings
+                .chainbot_trigger_plugin_trigger_guest()
+                .call_run_session(&mut self.store)
+        }));
+        let (callback_invoked, callback_outcome) = {
+            let state = self.store.data_mut();
+            state.active_push_context = None;
+            state.active_push_dispatch = None;
+            let invoked = state.callback_invoked;
+            let outcome = state.last_callback_outcome;
+            state.callback_invoked = false;
+            state.last_callback_outcome = None;
+            (invoked, outcome)
+        };
+        let call_result = call_result.map_err(|_| {
+            WasmGuestExecutionError::GuestCallFailed(
+                "component_v1 host callback panicked during run-session".to_owned(),
+            )
+        })?;
+        call_result.map_err(|source| {
+            WasmGuestExecutionError::GuestCallFailed(format!(
+                "failed to execute component_v1 run-session export: {source}"
+            ))
+        })?;
+        if !callback_invoked {
+            return Err(WasmGuestExecutionError::GuestCallFailed(
+                "component_v1 run-session did not invoke push-trigger-event".to_owned(),
+            ));
+        }
+        Ok(callback_outcome.unwrap_or(HostPushOutcome::TerminalShuttingDown))
+    }
+
+}
+
+fn dispatch_component_callback_event(
+    state: &mut WasmStoreState,
+    event_bytes: &[u8],
+) -> HostPushOutcome {
+    if event_bytes.len() > MAX_GUEST_TURN_ENVELOPE_BYTES {
+        return HostPushOutcome::TerminalShuttingDown;
+    }
+    let Some(context) = state.active_push_context else {
+        return HostPushOutcome::TerminalShuttingDown;
+    };
+    let Some(dispatch) = state.active_push_dispatch else {
+        return HostPushOutcome::TerminalShuttingDown;
+    };
+    // SAFETY: execute_guest_turn installs this erased pointer from a live mutable host reference,
+    // invokes the component synchronously, and clears it on success, trap, or unwind before return.
+    classify_host_push_result(unsafe { dispatch(context, event_bytes) })
+}
+
+fn core_engine() -> Result<Engine, WasmGuestExecutionError> {
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    Engine::new(&config).map_err(|source| {
+        WasmGuestExecutionError::Compile(format!(
+            "failed to configure core_v0 engine: {source}"
+        ))
     })
 }
 
-fn instantiate_session_instance(module: &Module, store: &mut Store<WasmStoreState>) -> Instance {
-    let imports = build_session_imports(module, store);
-    Instance::new(store, module, &imports)
-        .expect("configured wasm module should instantiate with supported imports")
-}
-
-fn build_session_imports(module: &Module, store: &mut Store<WasmStoreState>) -> Vec<Extern> {
+fn build_session_imports(
+    module: &Module,
+    store: &mut Store<WasmStoreState>,
+) -> Result<Vec<Extern>, WasmGuestExecutionError> {
     let mut imports = Vec::new();
     for import in module.imports() {
         let import_module = import.module();
@@ -397,25 +677,25 @@ fn build_session_imports(module: &Module, store: &mut Store<WasmStoreState>) -> 
                 let results_match =
                     matches!(results.next(), Some(ValType::I32)) && results.next().is_none();
                 if !params_match || !results_match {
-                    panic!(
-                        "push-trigger-event import must be (i32, i32) -> i32, got module={import_module} name={import_name}"
-                    );
+                    return Err(WasmGuestExecutionError::Instantiate(format!(
+                        "core_v0 push-trigger-event import must be (i32, i32) -> i32, got module={import_module} name={import_name}"
+                    )));
                 }
                 imports.push(Func::wrap(&mut *store, invoke_push_trigger_event_import).into());
             }
             ExternType::Func(_) => {
-                panic!(
-                    "unsupported wasm import function module={import_module} name={import_name}; only trigger-host.push-trigger-event is supported"
-                );
+                return Err(WasmGuestExecutionError::Instantiate(format!(
+                    "unsupported core_v0 import function module={import_module} name={import_name}; only trigger-host.push-trigger-event is supported"
+                )));
             }
             other => {
-                panic!(
-                    "unsupported wasm import kind for module={import_module} name={import_name}: {other:?}"
-                );
+                return Err(WasmGuestExecutionError::Instantiate(format!(
+                    "unsupported core_v0 import kind for module={import_module} name={import_name}: {other:?}"
+                )));
             }
         }
     }
-    imports
+    Ok(imports)
 }
 
 fn is_push_trigger_event_import(module: &str, name: &str) -> bool {
@@ -624,11 +904,6 @@ pub fn push_event_with_host_callback(
 }
 
 #[cfg(test)]
-pub fn trigger_plugin_wit_sources() -> (&'static str, &'static str) {
-    (ROOT_TRIGGER_PLUGIN_WIT, CRATE_TRIGGER_PLUGIN_WIT)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -641,14 +916,8 @@ mod tests {
     ];
 
     #[test]
-    fn trigger_wasm_wit_sources_stay_in_sync() {
-        let (root_copy, crate_copy) = trigger_plugin_wit_sources();
-        assert_eq!(root_copy, crate_copy);
-    }
-
-    #[test]
     fn trigger_wasm_wit_stays_transport_only() {
-        let (_root_copy, crate_copy) = trigger_plugin_wit_sources();
+        let crate_copy = CRATE_TRIGGER_PLUGIN_WIT;
 
         assert!(crate_copy.contains("push-trigger-event"));
         assert!(!crate_copy.contains("start:"));
@@ -828,6 +1097,7 @@ mod tests {
                 memories: 1,
                 trap_on_grow_failure: true,
             },
+            fuel_per_turn: 1_000_000,
         };
         let mut session = WasmTriggerSession::new_with_config(
             "tr-wasm",
@@ -842,6 +1112,156 @@ mod tests {
             Instance::new(&mut session.store, &session.module, &[]).is_err(),
             "configured instance limiter should bound long-lived store growth"
         );
+    }
+
+    #[test]
+    fn invalid_component_v1_bytes_return_typed_compile_error() {
+        let component_path = unique_wasm_test_path("invalid-component", "wasm");
+        std::fs::write(&component_path, b"not-a-component")
+            .expect("invalid component fixture should be writable");
+
+        let error = ComponentWasmTriggerSession::try_new_with_config(
+            component_path.to_string_lossy().into_owned(),
+            100,
+            WasmTriggerSessionConfig::default(),
+        )
+        .expect_err("invalid component bytes should fail without panicking");
+
+        assert!(matches!(error, WasmGuestExecutionError::Compile(_)));
+        let _ = std::fs::remove_file(component_path);
+    }
+
+    #[test]
+    fn invalid_core_v0_bytes_return_typed_compile_error() {
+        let module_path = unique_wasm_test_path("invalid-core", "wasm");
+        std::fs::write(&module_path, b"not-a-module")
+            .expect("invalid core fixture should be writable");
+
+        let error = WasmTriggerSession::try_new_with_config(
+            "tr-wasm",
+            "plugin-wasm",
+            module_path.to_string_lossy().into_owned(),
+            100,
+            WasmTriggerSessionConfig::default(),
+        )
+        .expect_err("invalid core bytes should fail without panicking");
+
+        assert!(matches!(error, WasmGuestExecutionError::Compile(_)));
+        let _ = std::fs::remove_file(module_path);
+    }
+
+    #[test]
+    fn component_v1_wit_fixture_receives_every_typed_host_outcome() {
+        let component_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/trigger-plugin-component-v1.wasm");
+        let mut session = ComponentWasmTriggerSession::try_new_with_config(
+            component_path.to_string_lossy().into_owned(),
+            100,
+            WasmTriggerSessionConfig::default(),
+        )
+        .expect("WIT-derived component fixture should compile and instantiate");
+        struct StubHost {
+            result: HostPushResult,
+        }
+        impl TriggerPushHost for StubHost {
+            fn push_trigger_event(&mut self, event_bytes: &[u8]) -> HostPushResult {
+                let envelope: WasmGuestTransportEnvelope = serde_json::from_slice(event_bytes)
+                    .expect("component callback should contain a transport envelope");
+                assert_eq!(envelope.event_key, "component-event");
+                assert_eq!(envelope.checkpoint.as_deref(), Some("cp-component"));
+                self.result
+            }
+        }
+        let cases = [
+            (Ok(HostPushSuccess::DurableAck), HostPushOutcome::DurableAck),
+            (
+                Err(HostPushError::Backpressure),
+                HostPushOutcome::RetryableBackpressure,
+            ),
+            (
+                Err(HostPushError::LeaseLost),
+                HostPushOutcome::TerminalLeaseLost,
+            ),
+            (
+                Err(HostPushError::ShuttingDown),
+                HostPushOutcome::TerminalShuttingDown,
+            ),
+        ];
+        for (index, (result, expected)) in cases.into_iter().enumerate() {
+            let outcome = session
+                .execute_guest_turn(110 + index as i64, &mut StubHost { result })
+                .expect("component callback turn should execute");
+            assert_eq!(outcome, expected);
+        }
+        assert_eq!(session.guest_state.turn_count, cases.len() as u64);
+    }
+
+    #[test]
+    fn component_v1_host_panic_clears_ephemeral_callback_state() {
+        let component_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/trigger-plugin-component-v1.wasm");
+        let mut session = ComponentWasmTriggerSession::try_new_with_config(
+            component_path.to_string_lossy().into_owned(),
+            100,
+            WasmTriggerSessionConfig::default(),
+        )
+        .expect("WIT-derived component fixture should instantiate");
+        struct PanicHost;
+        impl TriggerPushHost for PanicHost {
+            fn push_trigger_event(&mut self, _: &[u8]) -> HostPushResult {
+                panic!("fixture host panic")
+            }
+        }
+
+        assert!(matches!(
+            session.execute_guest_turn(110, &mut PanicHost),
+            Err(WasmGuestExecutionError::GuestCallFailed(message))
+                if message.contains("host callback panicked")
+        ));
+        assert!(session.store.data().active_push_context.is_none());
+        assert!(session.store.data().active_push_dispatch.is_none());
+    }
+
+    #[test]
+    fn component_v1_infinite_turn_is_interrupted_by_fuel() {
+        let component_path = unique_wasm_test_path("infinite-component", "wat");
+        std::fs::write(
+            &component_path,
+            r#"(component
+                (core module $guest
+                    (func (export "run-session")
+                        (loop $forever (br $forever))))
+                (core instance $guest-instance (instantiate $guest))
+                (func $run-session
+                    (canon lift (core func $guest-instance "run-session")))
+                (instance $trigger-guest
+                    (export "run-session" (func $run-session)))
+                (export "chainbot:trigger-plugin/trigger-guest@0.1.0"
+                    (instance $trigger-guest)))"#,
+        )
+        .expect("infinite component fixture should be writable");
+        let mut session = ComponentWasmTriggerSession::try_new_with_config(
+            component_path.to_string_lossy().into_owned(),
+            100,
+            WasmTriggerSessionConfig {
+                fuel_per_turn: 1_000,
+                ..WasmTriggerSessionConfig::default()
+            },
+        )
+        .expect("component fixture should compile and instantiate");
+        struct UnusedHost;
+        impl TriggerPushHost for UnusedHost {
+            fn push_trigger_event(&mut self, _: &[u8]) -> HostPushResult {
+                Ok(HostPushSuccess::DurableAck)
+            }
+        }
+
+        let error = session
+            .execute_guest_turn(110, &mut UnusedHost)
+            .expect_err("infinite component should exhaust turn fuel");
+
+        assert!(matches!(error, WasmGuestExecutionError::GuestCallFailed(_)));
+        let _ = std::fs::remove_file(component_path);
     }
 
     #[test]
@@ -919,6 +1339,14 @@ mod tests {
         let _ = std::fs::remove_file(module_path);
     }
 
+    fn unique_wasm_test_path(prefix: &str, extension: &str) -> std::path::PathBuf {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("chainbot-{prefix}-{timestamp}.{extension}"))
+    }
+
     #[test]
     fn wasm_trigger_session_requires_guest_callback_invocation() {
         let mut session = WasmTriggerSession::new("tr-wasm", "plugin-wasm", "", 100);
@@ -969,7 +1397,7 @@ mod tests {
   )
 )
 "#,
-            guest_envelope_json.as_bytes().len()
+            guest_envelope_json.len()
         )
     }
 }

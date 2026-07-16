@@ -6,7 +6,7 @@ It demonstrates:
 
 - external trigger plugin packages for both lifecycle models:
   - `market-trigger-plugin` (`process_short_lived`)
-  - `market-trigger-wasm-plugin` (`wasm_daemon_persistent_session`)
+  - `market-trigger-wasm-plugin` (`wasm_daemon_persistent_session`, `component_v1`)
 - an external node plugin package (`quote-node-plugin`)
 - plugin-local `bin/` runtime artifacts:
   - executable shell adapters for process trigger and node plugins

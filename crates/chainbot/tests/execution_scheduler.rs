@@ -1396,7 +1396,11 @@ fn runtime_execution_preserves_legacy_external_node_dispatch() {
         Some(&json!("buy"))
     );
     assert_eq!(
-        report.runtime_namespaces.run_scoped.get("decision"),
+        report
+            .runtime_namespaces
+            .node_outputs_by_producer
+            .get("legacy-node")
+            .and_then(|outputs| outputs.get("decision")),
         Some(&json!("buy"))
     );
 }

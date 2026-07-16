@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::ContractError;
+
 use super::variables::{RuntimeVariableNamespaces, VariableReference};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -46,8 +48,15 @@ impl WhenCondition {
     }
 
     pub fn evaluate(&self, namespaces: &RuntimeVariableNamespaces) -> bool {
-        let value = namespaces.resolve(&self.source);
-        match self.operator {
+        self.try_evaluate(namespaces).unwrap_or(false)
+    }
+
+    pub fn try_evaluate(
+        &self,
+        namespaces: &RuntimeVariableNamespaces,
+    ) -> Result<bool, ContractError> {
+        let value = namespaces.try_resolve(&self.source)?;
+        Ok(match self.operator {
             WhenOperator::Exists => value.is_some(),
             WhenOperator::Equals => value
                 .zip(self.expected.as_ref())
@@ -57,7 +66,7 @@ impl WhenCondition {
                 .is_some_and(|(left, right)| left != right),
             WhenOperator::Truthy => value.is_some_and(is_truthy),
             WhenOperator::Falsy => value.is_none_or(|candidate| !is_truthy(candidate)),
-        }
+        })
     }
 }
 

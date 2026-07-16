@@ -33,6 +33,8 @@ fn sqlite_runtime_read_queries_keep_indexed_plans() {
                 status: RunStatus::Succeeded,
                 started_at_ms: 1_711_000_000_000 + index,
                 finished_at_ms: Some(1_711_000_000_100 + index),
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("seeded run summary should persist");
         store
@@ -125,6 +127,8 @@ fn repeated_runtime_observation_remains_read_only() {
             status: RunStatus::Succeeded,
             started_at_ms: 1_711_100_000_000,
             finished_at_ms: Some(1_711_100_000_100),
+            owner_id: None,
+            lease_generation: None,
         })
         .expect("run summary should persist");
     store

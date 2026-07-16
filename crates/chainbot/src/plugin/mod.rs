@@ -12,7 +12,12 @@ use std::process::Command;
 
 mod contract;
 mod host;
+mod process;
 pub(crate) mod source;
+
+pub(crate) use process::{
+    configure_process_group, terminate_child_group, HostCancellation, HostCancellationReason,
+};
 
 pub(crate) const PLUGIN_HOST_ENV_ALLOWLIST: &[&str] =
     &["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"];
@@ -25,7 +30,7 @@ pub use contract::{
     PluginEventSchemaDescriptor, PluginKind, PluginManifest, PluginOperationDescriptor,
     PluginOperationKind, PluginTriggerListenerMode,
     TriggerDurableAckSemantics, TriggerHostErrorCategory,
-    TriggerPushCallbackSemantics, TriggerRuntimeLifecycle, CURRENT_API_MAJOR,
+    TriggerPushCallbackSemantics, TriggerRuntimeLifecycle, WasmTriggerAbi, CURRENT_API_MAJOR,
     EXTERNAL_NODE_ENTRYPOINT_EXEC_V1, EXTERNAL_NODE_ENTRYPOINT_EXEC_V2,
     EXTERNAL_NODE_ENTRYPOINT_MCP_TOOL_V1,
     NODE_PLUGIN_CONTRACT_MAX_MAJOR, NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,

@@ -7,6 +7,7 @@
 //! [ROLE]
 //! Defines DB-primary runtime state for ChainBot main execution commands.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
@@ -17,7 +18,8 @@ use postgres::{Client, NoTls};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::domain::state::{
-    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseSnapshot,
+    IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseGrant,
+    ServeLeaseSnapshot,
     ServeLeaseState, StagedTriggerEventRecord, TriggerCheckpointRecord, TriggerEventRecord,
     TriggerSnapshotRecord, WorkflowRuntimeLogEntry,
 };
@@ -26,6 +28,8 @@ use crate::infrastructure::config::{
 };
 
 const SERVE_LEASE_KEY: &str = "serve";
+
+use crate::domain::trigger::{TriggerAcceptanceCommand, TriggerAcceptanceOutcome, TriggerRunRequest};
 
 #[derive(Debug)]
 pub enum RuntimeStateError {
@@ -50,6 +54,9 @@ pub enum RuntimeStateError {
     JsonDecode {
         field: &'static str,
         source: serde_json::Error,
+    },
+    LeaseFenceLost {
+        run_id: String,
     },
 }
 
@@ -652,9 +659,15 @@ impl RuntimeStateStore {
 
                 let current = transaction
                     .query_row(
-                        "SELECT owner_id, expires_at_ms FROM serve_leases WHERE lease_key = ?1",
+                        "SELECT owner_id, expires_at_ms, generation FROM serve_leases WHERE lease_key = ?1",
                         params![SERVE_LEASE_KEY],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        },
                     )
                     .optional()
                     .map_err(|source| RuntimeStateError::Sqlite {
@@ -663,8 +676,11 @@ impl RuntimeStateStore {
                         source,
                     })?;
 
+                let takeover_generation = current
+                    .as_ref()
+                    .map_or(0_i64, |(_, _, generation)| generation.saturating_add(1));
                 let result = match current {
-                    Some((current_owner, current_expires_at_ms))
+                    Some((current_owner, current_expires_at_ms, _))
                         if current_expires_at_ms > now_ms && current_owner != owner_id =>
                     {
                         LeaseAcquireResult::Rejected {
@@ -672,43 +688,57 @@ impl RuntimeStateStore {
                             expires_at_ms: current_expires_at_ms,
                         }
                     }
-                    Some((current_owner, current_expires_at_ms))
+                    Some((current_owner, current_expires_at_ms, generation))
                         if current_expires_at_ms > now_ms && current_owner == owner_id =>
                     {
                         transaction
                             .execute(
-                                "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms)
-                                 VALUES (?1, ?2, ?3, ?4)
+                                "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms, generation)
+                                 VALUES (?1, ?2, ?3, ?4, ?5)
                                  ON CONFLICT(lease_key)
                                  DO UPDATE SET owner_id = excluded.owner_id,
                                                acquired_at_ms = excluded.acquired_at_ms,
-                                               expires_at_ms = excluded.expires_at_ms",
-                                params![SERVE_LEASE_KEY, owner_id, now_ms, expires_at_ms],
+                                               expires_at_ms = excluded.expires_at_ms,
+                                               generation = excluded.generation",
+                                params![SERVE_LEASE_KEY, owner_id, now_ms, expires_at_ms, generation],
                             )
                             .map_err(|source| RuntimeStateError::Sqlite {
                                 path: path.clone(),
                                 operation: "upsert sqlite renewed serve lease",
                                 source,
                             })?;
-                        LeaseAcquireResult::Renewed
+                        LeaseAcquireResult::Renewed {
+                            grant: ServeLeaseGrant {
+                                owner_id: owner_id.to_owned(),
+                                generation: u64::try_from(generation).unwrap_or(0),
+                                expires_at_ms,
+                            },
+                        }
                     }
                     _ => {
                         transaction
                             .execute(
-                                "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms)
-                                 VALUES (?1, ?2, ?3, ?4)
+                                "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms, generation)
+                                 VALUES (?1, ?2, ?3, ?4, ?5)
                                  ON CONFLICT(lease_key)
                                  DO UPDATE SET owner_id = excluded.owner_id,
                                                acquired_at_ms = excluded.acquired_at_ms,
-                                               expires_at_ms = excluded.expires_at_ms",
-                                params![SERVE_LEASE_KEY, owner_id, now_ms, expires_at_ms],
+                                               expires_at_ms = excluded.expires_at_ms,
+                                               generation = excluded.generation",
+                                params![SERVE_LEASE_KEY, owner_id, now_ms, expires_at_ms, takeover_generation],
                             )
                             .map_err(|source| RuntimeStateError::Sqlite {
                                 path: path.clone(),
                                 operation: "upsert sqlite acquired serve lease",
                                 source,
                             })?;
-                        LeaseAcquireResult::Acquired
+                        LeaseAcquireResult::Acquired {
+                            grant: ServeLeaseGrant {
+                                owner_id: owner_id.to_owned(),
+                                generation: u64::try_from(takeover_generation).unwrap_or(0),
+                                expires_at_ms,
+                            },
+                        }
                     }
                 };
 
@@ -726,16 +756,22 @@ impl RuntimeStateStore {
                 for _ in 0..4 {
                     let current = client
                         .query_opt(
-                            "SELECT owner_id, expires_at_ms FROM serve_leases WHERE lease_key = $1",
+                            "SELECT owner_id, expires_at_ms, generation FROM serve_leases WHERE lease_key = $1",
                             &[&SERVE_LEASE_KEY],
                         )
                         .map_err(|source| RuntimeStateError::Postgres {
                             operation: "read current postgres serve lease",
                             source,
                         })?
-                        .map(|row| (row.get::<_, String>(0), row.get::<_, i64>(1)));
+                        .map(|row| {
+                            (
+                                row.get::<_, String>(0),
+                                row.get::<_, i64>(1),
+                                row.get::<_, i64>(2),
+                            )
+                        });
 
-                    if let Some((current_owner, current_expires_at_ms)) = current {
+                    if let Some((current_owner, current_expires_at_ms, generation)) = current {
                         if current_expires_at_ms > now_ms && current_owner != owner_id {
                             return Ok(LeaseAcquireResult::Rejected {
                                 current_owner,
@@ -743,26 +779,48 @@ impl RuntimeStateStore {
                             });
                         }
 
+                        let next_generation = if current_expires_at_ms > now_ms
+                            && current_owner == owner_id
+                        {
+                            generation
+                        } else {
+                            generation.saturating_add(1)
+                        };
                         let updated = client
-                            .execute(
+                            .query_opt(
                                 "UPDATE serve_leases
                                  SET owner_id = $1,
                                      acquired_at_ms = $2,
-                                     expires_at_ms = $3
-                                 WHERE lease_key = $4
-                                   AND (owner_id = $1 OR expires_at_ms <= $2)",
-                                &[&owner_id, &now_ms, &expires_at_ms, &SERVE_LEASE_KEY],
+                                     expires_at_ms = $3,
+                                     generation = $4
+                                 WHERE lease_key = $5
+                                   AND (owner_id = $1 OR expires_at_ms <= $2)
+                                 RETURNING generation",
+                                &[&owner_id, &now_ms, &expires_at_ms, &next_generation, &SERVE_LEASE_KEY],
                             )
                             .map_err(|source| RuntimeStateError::Postgres {
                                 operation: "update postgres serve lease",
                                 source,
                             })?;
-                        if updated > 0 {
+                        if let Some(row) = updated {
+                            let generation = row.get::<_, i64>(0);
                             return Ok(
                                 if current_expires_at_ms > now_ms && current_owner == owner_id {
-                                    LeaseAcquireResult::Renewed
+                                    LeaseAcquireResult::Renewed {
+                                        grant: ServeLeaseGrant {
+                                            owner_id: owner_id.to_owned(),
+                                            generation: u64::try_from(generation).unwrap_or(0),
+                                            expires_at_ms,
+                                        },
+                                    }
                                 } else {
-                                    LeaseAcquireResult::Acquired
+                                    LeaseAcquireResult::Acquired {
+                                        grant: ServeLeaseGrant {
+                                            owner_id: owner_id.to_owned(),
+                                            generation: u64::try_from(generation).unwrap_or(0),
+                                            expires_at_ms,
+                                        },
+                                    }
                                 },
                             );
                         }
@@ -772,17 +830,23 @@ impl RuntimeStateStore {
 
                     let inserted = client
                         .execute(
-                            "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms)
-                             VALUES ($1, $2, $3, $4)
+                            "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms, generation)
+                             VALUES ($1, $2, $3, $4, $5)
                              ON CONFLICT(lease_key) DO NOTHING",
-                            &[&SERVE_LEASE_KEY, &owner_id, &now_ms, &expires_at_ms],
+                            &[&SERVE_LEASE_KEY, &owner_id, &now_ms, &expires_at_ms, &0_i64],
                         )
                         .map_err(|source| RuntimeStateError::Postgres {
                             operation: "insert postgres serve lease",
                             source,
                         })?;
                     if inserted > 0 {
-                        return Ok(LeaseAcquireResult::Acquired);
+                        return Ok(LeaseAcquireResult::Acquired {
+                            grant: ServeLeaseGrant {
+                                owner_id: owner_id.to_owned(),
+                                generation: 0,
+                                expires_at_ms,
+                            },
+                        });
                     }
                 }
 
@@ -798,7 +862,13 @@ impl RuntimeStateStore {
                         source,
                     })?;
                 if inserted > 0 {
-                    return Ok(LeaseAcquireResult::Acquired);
+                    return Ok(LeaseAcquireResult::Acquired {
+                        grant: ServeLeaseGrant {
+                            owner_id: owner_id.to_owned(),
+                            generation: 0,
+                            expires_at_ms,
+                        },
+                    });
                 }
 
                 let current = client
@@ -822,7 +892,9 @@ impl RuntimeStateStore {
         let rows = match &mut self.connection {
             RuntimeStorageConnection::Sqlite { path, connection } => connection
                 .execute(
-                    "DELETE FROM serve_leases WHERE lease_key = ?1 AND owner_id = ?2",
+                    "UPDATE serve_leases
+                     SET expires_at_ms = 0
+                     WHERE lease_key = ?1 AND owner_id = ?2",
                     params![SERVE_LEASE_KEY, owner_id],
                 )
                 .map_err(|source| RuntimeStateError::Sqlite {
@@ -832,7 +904,9 @@ impl RuntimeStateStore {
                 })?,
             RuntimeStorageConnection::Postgres { client, .. } => client
                 .execute(
-                    "DELETE FROM serve_leases WHERE lease_key = $1 AND owner_id = $2",
+                    "UPDATE serve_leases
+                     SET expires_at_ms = 0
+                     WHERE lease_key = $1 AND owner_id = $2",
                     &[&SERVE_LEASE_KEY, &owner_id],
                 )
                 .map_err(|source| RuntimeStateError::Postgres {
@@ -848,7 +922,8 @@ impl RuntimeStateStore {
             RuntimeStorageConnection::Sqlite { path, connection } => {
                 let mut statement = connection
                     .prepare(
-                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms
+                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
+                                owner_id, lease_generation
                          FROM run_summaries ORDER BY run_id ASC, started_at_ms ASC",
                     )
                     .map_err(|source| RuntimeStateError::Sqlite {
@@ -866,6 +941,10 @@ impl RuntimeStateStore {
                             status: parse_run_status(&status),
                             started_at_ms: row.get(4)?,
                             finished_at_ms: row.get(5)?,
+                            owner_id: row.get(6)?,
+                            lease_generation: row
+                                .get::<_, Option<i64>>(7)?
+                                .map(|generation| u64::try_from(generation).unwrap_or(0)),
                         })
                     })
                     .map_err(|source| RuntimeStateError::Sqlite {
@@ -886,7 +965,8 @@ impl RuntimeStateStore {
             RuntimeStorageConnection::Postgres { client, .. } => {
                 let rows = client
                     .query(
-                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms
+                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
+                                owner_id, lease_generation
                          FROM run_summaries ORDER BY run_id ASC, started_at_ms ASC",
                         &[],
                     )
@@ -902,6 +982,10 @@ impl RuntimeStateStore {
                         status: parse_run_status(&row.get::<_, String>(3)),
                         started_at_ms: row.get(4),
                         finished_at_ms: row.get(5),
+                        owner_id: row.get(6),
+                        lease_generation: row
+                            .get::<_, Option<i64>>(7)
+                            .map(|generation| u64::try_from(generation).unwrap_or(0)),
                     })
                     .collect::<Vec<_>>()
             }
@@ -925,7 +1009,8 @@ impl RuntimeStateStore {
             RuntimeStorageConnection::Sqlite { path, connection } => {
                 let mut statement = connection
                     .prepare(
-                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms
+                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
+                                owner_id, lease_generation
                          FROM run_summaries
                          ORDER BY started_at_ms DESC, run_id DESC
                          LIMIT ?1",
@@ -945,6 +1030,10 @@ impl RuntimeStateStore {
                             status: parse_run_status(&status),
                             started_at_ms: row.get(4)?,
                             finished_at_ms: row.get(5)?,
+                            owner_id: row.get(6)?,
+                            lease_generation: row
+                                .get::<_, Option<i64>>(7)?
+                                .map(|generation| u64::try_from(generation).unwrap_or(0)),
                         })
                     })
                     .map_err(|source| RuntimeStateError::Sqlite {
@@ -965,7 +1054,8 @@ impl RuntimeStateStore {
             RuntimeStorageConnection::Postgres { client, .. } => {
                 let rows = client
                     .query(
-                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms
+                        "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
+                                owner_id, lease_generation
                          FROM run_summaries
                          ORDER BY started_at_ms DESC, run_id DESC
                          LIMIT $1",
@@ -984,6 +1074,10 @@ impl RuntimeStateStore {
                         status: parse_run_status(&row.get::<_, String>(3)),
                         started_at_ms: row.get(4),
                         finished_at_ms: row.get(5),
+                        owner_id: row.get(6),
+                        lease_generation: row
+                            .get::<_, Option<i64>>(7)
+                            .map(|generation| u64::try_from(generation).unwrap_or(0)),
                     })
                     .collect())
             }
@@ -999,21 +1093,29 @@ impl RuntimeStateStore {
             RuntimeStorageConnection::Sqlite { path, connection } => {
                 connection
                     .execute(
-                        "INSERT INTO run_summaries (schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        "INSERT INTO run_summaries (
+                             schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
+                             owner_id, lease_generation
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                          ON CONFLICT(run_id)
                          DO UPDATE SET schema_version = excluded.schema_version,
                                        workflow_id = excluded.workflow_id,
                                        status = excluded.status,
                                        started_at_ms = excluded.started_at_ms,
-                                       finished_at_ms = excluded.finished_at_ms",
+                                       finished_at_ms = excluded.finished_at_ms,
+                                       owner_id = excluded.owner_id,
+                                       lease_generation = excluded.lease_generation",
                         params![
                             summary.schema_version,
                             summary.run_id,
                             summary.workflow_id,
                             status,
                             summary.started_at_ms,
-                            summary.finished_at_ms
+                            summary.finished_at_ms,
+                            summary.owner_id,
+                            summary
+                                .lease_generation
+                                .map(|generation| i64::try_from(generation).unwrap_or(i64::MAX))
                         ],
                     )
                     .map_err(|source| RuntimeStateError::Sqlite {
@@ -1025,14 +1127,18 @@ impl RuntimeStateStore {
             RuntimeStorageConnection::Postgres { client, .. } => {
                 client
                     .execute(
-                        "INSERT INTO run_summaries (schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms)
-                         VALUES ($1, $2, $3, $4, $5, $6)
+                        "INSERT INTO run_summaries (
+                             schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
+                             owner_id, lease_generation
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                          ON CONFLICT(run_id)
                          DO UPDATE SET schema_version = EXCLUDED.schema_version,
                                        workflow_id = EXCLUDED.workflow_id,
                                        status = EXCLUDED.status,
                                        started_at_ms = EXCLUDED.started_at_ms,
-                                       finished_at_ms = EXCLUDED.finished_at_ms",
+                                       finished_at_ms = EXCLUDED.finished_at_ms,
+                                       owner_id = EXCLUDED.owner_id,
+                                       lease_generation = EXCLUDED.lease_generation",
                         &[
                             &summary.schema_version,
                             &summary.run_id,
@@ -1040,6 +1146,10 @@ impl RuntimeStateStore {
                             &status,
                             &summary.started_at_ms,
                             &summary.finished_at_ms,
+                            &summary.owner_id,
+                            &summary
+                                .lease_generation
+                                .map(|generation| i64::try_from(generation).unwrap_or(i64::MAX)),
                         ],
                     )
                     .map_err(|source| RuntimeStateError::Postgres {
@@ -1049,6 +1159,80 @@ impl RuntimeStateStore {
             }
         }
         Ok(())
+    }
+
+    pub fn write_fenced_terminal_run_summary(
+        &mut self,
+        summary: &RunRecordSummary,
+        now_ms: i64,
+    ) -> Result<bool, RuntimeStateError> {
+        let (Some(owner_id), Some(lease_generation)) =
+            (summary.owner_id.as_deref(), summary.lease_generation)
+        else {
+            return self.write_run_summary(summary).map(|_| true);
+        };
+        let status = render_run_status(summary.status);
+        let lease_generation = i64::try_from(lease_generation).unwrap_or(i64::MAX);
+        let rows = match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => connection
+                .execute(
+                    "UPDATE run_summaries
+                     SET schema_version = ?1, workflow_id = ?2, status = ?3,
+                         started_at_ms = ?4, finished_at_ms = ?5
+                     WHERE run_id = ?6 AND owner_id = ?7 AND lease_generation = ?8
+                       AND EXISTS (
+                           SELECT 1 FROM serve_leases
+                           WHERE lease_key = ?9 AND owner_id = ?7 AND generation = ?8
+                             AND expires_at_ms > ?10
+                       )",
+                    params![
+                        summary.schema_version,
+                        summary.workflow_id,
+                        status,
+                        summary.started_at_ms,
+                        summary.finished_at_ms,
+                        summary.run_id,
+                        owner_id,
+                        lease_generation,
+                        SERVE_LEASE_KEY,
+                        now_ms,
+                    ],
+                )
+                .map_err(|source| RuntimeStateError::Sqlite {
+                    path: path.clone(),
+                    operation: "conditionally finalize sqlite fenced run summary",
+                    source,
+                })?,
+            RuntimeStorageConnection::Postgres { client, .. } => client
+                .execute(
+                    "UPDATE run_summaries
+                     SET schema_version = $1, workflow_id = $2, status = $3,
+                         started_at_ms = $4, finished_at_ms = $5
+                     WHERE run_id = $6 AND owner_id = $7 AND lease_generation = $8
+                       AND EXISTS (
+                           SELECT 1 FROM serve_leases
+                           WHERE lease_key = $9 AND owner_id = $7 AND generation = $8
+                             AND expires_at_ms > $10
+                       )",
+                    &[
+                        &summary.schema_version,
+                        &summary.workflow_id,
+                        &status,
+                        &summary.started_at_ms,
+                        &summary.finished_at_ms,
+                        &summary.run_id,
+                        &owner_id,
+                        &lease_generation,
+                        &SERVE_LEASE_KEY,
+                        &now_ms,
+                    ],
+                )
+                .map_err(|source| RuntimeStateError::Postgres {
+                    operation: "conditionally finalize postgres fenced run summary",
+                    source,
+                })? as usize,
+        };
+        Ok(rows > 0)
     }
 
     pub fn append_workflow_log_entry(
@@ -2316,6 +2500,194 @@ impl RuntimeStateStore {
         }
     }
 
+    pub fn accept_trigger_event(
+        &mut self,
+        command: TriggerAcceptanceCommand,
+    ) -> Result<TriggerAcceptanceOutcome, RuntimeStateError> {
+        self.begin_trigger_acceptance_transaction()?;
+        let result = self.accept_trigger_event_in_transaction(command);
+        match result {
+            Ok(outcome) => {
+                if let Err(error) = self.commit_trigger_acceptance_transaction() {
+                    let _ = self.rollback_trigger_acceptance_transaction();
+                    return Err(error);
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                let _ = self.rollback_trigger_acceptance_transaction();
+                Err(error)
+            }
+        }
+    }
+
+    fn accept_trigger_event_in_transaction(
+        &mut self,
+        command: TriggerAcceptanceCommand,
+    ) -> Result<TriggerAcceptanceOutcome, RuntimeStateError> {
+        let record = command.candidate_record;
+        self.lock_trigger_acceptance_keys(&record)?;
+
+        if let Some(existing) = self.find_trigger_record_by_event(&record.trigger_id, &record.event_id)? {
+            if let Some(checkpoint) = existing.checkpoint {
+                self.write_trigger_checkpoint(&TriggerCheckpointRecord {
+                    schema_version: String::from("1.0.0"),
+                    trigger_id: record.trigger_id.clone(),
+                    checkpoint,
+                    acked_at_ms: existing.accepted_at_ms,
+                })?;
+            }
+            self.consume_staged_trigger_event(command.staged_id.as_deref(), record.accepted_at_ms)?;
+            return Ok(TriggerAcceptanceOutcome::Duplicate);
+        }
+
+        if let Some(key) = record.dedup_key.as_deref()
+            && !self.dedup_is_ready(key, record.accepted_at_ms)?
+        {
+            self.consume_staged_trigger_event(command.staged_id.as_deref(), record.accepted_at_ms)?;
+            return Ok(TriggerAcceptanceOutcome::DedupSuppressed);
+        }
+        if let Some(key) = record.cooldown_key.as_deref()
+            && !self.cooldown_is_ready(key, record.accepted_at_ms)?
+        {
+            self.consume_staged_trigger_event(command.staged_id.as_deref(), record.accepted_at_ms)?;
+            return Ok(TriggerAcceptanceOutcome::CooldownSuppressed);
+        }
+
+        let mut snapshot = self
+            .read_trigger_snapshot(&record.trigger_id)?
+            .unwrap_or_else(|| TriggerSnapshotRecord::new(record.trigger_id.clone()));
+        if snapshot.last_sequence != command.expected_snapshot_sequence {
+            return Ok(TriggerAcceptanceOutcome::Conflict);
+        }
+        let record_ref = self.write_trigger_record(&record)?;
+        snapshot.apply_record(&record);
+        self.write_trigger_snapshot(&snapshot)?;
+        if let Some(checkpoint) = record.checkpoint.clone() {
+            self.write_trigger_checkpoint(&TriggerCheckpointRecord {
+                schema_version: String::from("1.0.0"),
+                trigger_id: record.trigger_id.clone(),
+                checkpoint,
+                acked_at_ms: record.accepted_at_ms,
+            })?;
+        }
+        self.consume_staged_trigger_event(command.staged_id.as_deref(), record.accepted_at_ms)?;
+
+        Ok(TriggerAcceptanceOutcome::Accepted {
+            request: TriggerRunRequest {
+                run_id: record.run_id,
+                workflow_id: record.workflow_id,
+                trigger_id: record.trigger_id,
+                event_id: record.event_id,
+                source: record.source,
+                accepted_at_ms: record.accepted_at_ms,
+                payload: record.payload,
+                trigger_record_ref: record_ref.clone(),
+            },
+            record_ref,
+        })
+    }
+
+    fn begin_trigger_acceptance_transaction(&mut self) -> Result<(), RuntimeStateError> {
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => connection
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|source| RuntimeStateError::Sqlite {
+                    path: path.clone(),
+                    operation: "begin sqlite trigger acceptance transaction",
+                    source,
+                }),
+            RuntimeStorageConnection::Postgres { client, .. } => client
+                .batch_execute("BEGIN")
+                .map_err(|source| RuntimeStateError::Postgres {
+                    operation: "begin postgres trigger acceptance transaction",
+                    source,
+                }),
+        }
+    }
+
+    fn commit_trigger_acceptance_transaction(&mut self) -> Result<(), RuntimeStateError> {
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => connection
+                .execute_batch("COMMIT")
+                .map_err(|source| RuntimeStateError::Sqlite {
+                    path: path.clone(),
+                    operation: "commit sqlite trigger acceptance transaction",
+                    source,
+                }),
+            RuntimeStorageConnection::Postgres { client, .. } => client
+                .batch_execute("COMMIT")
+                .map_err(|source| RuntimeStateError::Postgres {
+                    operation: "commit postgres trigger acceptance transaction",
+                    source,
+                }),
+        }
+    }
+
+    fn rollback_trigger_acceptance_transaction(&mut self) -> Result<(), RuntimeStateError> {
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => connection
+                .execute_batch("ROLLBACK")
+                .map_err(|source| RuntimeStateError::Sqlite {
+                    path: path.clone(),
+                    operation: "rollback sqlite trigger acceptance transaction",
+                    source,
+                }),
+            RuntimeStorageConnection::Postgres { client, .. } => client
+                .batch_execute("ROLLBACK")
+                .map_err(|source| RuntimeStateError::Postgres {
+                    operation: "rollback postgres trigger acceptance transaction",
+                    source,
+                }),
+        }
+    }
+
+    fn lock_trigger_acceptance_keys(
+        &mut self,
+        record: &TriggerEventRecord,
+    ) -> Result<(), RuntimeStateError> {
+        let mut keys = BTreeSet::from([format!("trigger:{}", record.trigger_id)]);
+        if let Some(key) = record.dedup_key.as_deref() {
+            keys.insert(format!("dedup:{key}"));
+        }
+        if let Some(key) = record.cooldown_key.as_deref() {
+            keys.insert(format!("cooldown:{key}"));
+        }
+        if let RuntimeStorageConnection::Postgres { client, .. } = &mut self.connection {
+            for key in keys {
+                client
+                    .query_one("SELECT pg_advisory_xact_lock(hashtext($1))", &[&key])
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "lock postgres trigger acceptance key",
+                        source,
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_staged_trigger_event(
+        &mut self,
+        staged_id: Option<&str>,
+        accepted_at_ms: i64,
+    ) -> Result<(), RuntimeStateError> {
+        if let Some(staged_id) = staged_id {
+            self.mark_staged_trigger_event_accepted(staged_id, accepted_at_ms)?;
+        }
+        Ok(())
+    }
+
+    fn find_trigger_record_by_event(
+        &mut self,
+        trigger_id: &str,
+        event_id: &str,
+    ) -> Result<Option<TriggerEventRecord>, RuntimeStateError> {
+        Ok(self
+            .load_trigger_records_after_sequence(trigger_id, 0)?
+            .into_iter()
+            .find(|record| record.event_id == event_id))
+    }
+
     pub fn write_trigger_record(
         &mut self,
         record: &TriggerEventRecord,
@@ -2658,6 +3030,8 @@ impl RuntimeStateStore {
                 status: RunStatus::Failed,
                 started_at_ms,
                 finished_at_ms: Some(recovered_at_ms),
+                owner_id: None,
+                lease_generation: None,
             })?;
             recovered_count += 1;
         }
@@ -3033,7 +3407,8 @@ impl RuntimeStateStore {
                  lease_key TEXT PRIMARY KEY,
                  owner_id TEXT NOT NULL,
                  acquired_at_ms BIGINT NOT NULL,
-                 expires_at_ms BIGINT NOT NULL
+                 expires_at_ms BIGINT NOT NULL,
+                 generation BIGINT NOT NULL DEFAULT 0
               );
 
              CREATE TABLE IF NOT EXISTS daemon_sessions (
@@ -3056,7 +3431,9 @@ impl RuntimeStateStore {
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 started_at_ms BIGINT NOT NULL,
-                finished_at_ms BIGINT NULL
+                finished_at_ms BIGINT NULL,
+                owner_id TEXT NULL,
+                lease_generation BIGINT NULL
              );
 
              CREATE TABLE IF NOT EXISTS workflow_runtime_logs (
@@ -3233,6 +3610,51 @@ impl RuntimeStateStore {
                         operation: "apply sqlite runtime schema migrations",
                         source,
                     })?;
+                let has_generation = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('serve_leases') WHERE name = 'generation'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "inspect sqlite serve lease generation migration",
+                        source,
+                    })?
+                    > 0;
+                if !has_generation {
+                    connection
+                        .execute("ALTER TABLE serve_leases ADD COLUMN generation BIGINT NOT NULL DEFAULT 0", [])
+                        .map_err(|source| RuntimeStateError::Sqlite {
+                            path: path.clone(),
+                            operation: "apply sqlite serve lease generation migration",
+                            source,
+                        })?;
+                }
+                for column in ["owner_id TEXT", "lease_generation BIGINT"] {
+                    let column_name = column.split_once(' ').map(|(name, _)| name).unwrap_or_default();
+                    let exists = connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM pragma_table_info('run_summaries') WHERE name = ?1",
+                            params![column_name],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|source| RuntimeStateError::Sqlite {
+                            path: path.clone(),
+                            operation: "inspect sqlite run summary fence migration",
+                            source,
+                        })?
+                        > 0;
+                    if !exists {
+                        connection
+                            .execute(&format!("ALTER TABLE run_summaries ADD COLUMN {column}"), [])
+                            .map_err(|source| RuntimeStateError::Sqlite {
+                                path: path.clone(),
+                                operation: "apply sqlite run summary fence migration",
+                                source,
+                            })?;
+                    }
+                }
                 connection
                     .execute(
                         "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
@@ -3241,6 +3663,16 @@ impl RuntimeStateStore {
                     .map_err(|source| RuntimeStateError::Sqlite {
                         path: path.clone(),
                         operation: "record sqlite schema migration",
+                        source,
+                    })?;
+                connection
+                    .execute(
+                        "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+                        params![6_i64, now_ms],
+                    )
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "record sqlite serve lease generation migration",
                         source,
                     })?;
             }
@@ -3252,6 +3684,16 @@ impl RuntimeStateStore {
                     }
                 })?;
                 client
+                    .batch_execute(
+                        "ALTER TABLE serve_leases ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0;
+                         ALTER TABLE run_summaries ADD COLUMN IF NOT EXISTS owner_id TEXT NULL;
+                         ALTER TABLE run_summaries ADD COLUMN IF NOT EXISTS lease_generation BIGINT NULL;",
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "apply postgres runtime fence migration",
+                        source,
+                    })?;
+                client
                     .execute(
                         "INSERT INTO schema_migrations (version, applied_at_ms)
                          VALUES ($1, $2)
@@ -3260,6 +3702,17 @@ impl RuntimeStateStore {
                     )
                     .map_err(|source| RuntimeStateError::Postgres {
                         operation: "record postgres schema migration",
+                        source,
+                    })?;
+                client
+                    .execute(
+                        "INSERT INTO schema_migrations (version, applied_at_ms)
+                         VALUES ($1, $2)
+                         ON CONFLICT(version) DO NOTHING",
+                        &[&6_i64, &now_ms],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "record postgres serve lease generation migration",
                         source,
                     })?;
             }
@@ -3289,6 +3742,9 @@ impl Display for RuntimeStateError {
             Self::JsonDecode { field, source } => {
                 write!(f, "failed to decode JSON for {field}: {source}")
             }
+            Self::LeaseFenceLost { run_id } => {
+                write!(f, "lease fence no longer owns run {run_id}")
+            }
         }
     }
 }
@@ -3301,6 +3757,7 @@ impl Error for RuntimeStateError {
             Self::Postgres { source, .. } => Some(source),
             Self::JsonEncode { source, .. } => Some(source),
             Self::JsonDecode { source, .. } => Some(source),
+            Self::LeaseFenceLost { .. } => None,
         }
     }
 }

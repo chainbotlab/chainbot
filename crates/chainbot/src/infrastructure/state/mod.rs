@@ -162,4 +162,13 @@ impl crate::domain::trigger::acceptance::TriggerStateStore for RuntimeStateStore
             crate::domain::trigger::TriggerPlaneError::runtime_state(error.to_string())
         })
     }
+
+    fn accept_trigger_event(
+        &mut self,
+        command: crate::domain::trigger::TriggerAcceptanceCommand,
+    ) -> Result<crate::domain::trigger::TriggerAcceptanceOutcome, crate::domain::trigger::TriggerPlaneError> {
+        RuntimeStateStore::accept_trigger_event(self, command).map_err(|error| {
+            crate::domain::trigger::TriggerPlaneError::runtime_state(error.to_string())
+        })
+    }
 }

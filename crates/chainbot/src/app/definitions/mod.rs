@@ -29,3 +29,4 @@ mod root_bundle;
 mod validate;
 
 pub use root_bundle::load_root_definition_bundle;
+pub use validate::{collect_compatibility_warnings, CompatibilityWarning};

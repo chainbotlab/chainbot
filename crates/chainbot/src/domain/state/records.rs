@@ -21,6 +21,10 @@ pub struct RunRecordSummary {
     pub status: RunStatus,
     pub started_at_ms: i64,
     pub finished_at_ms: Option<i64>,
+    #[serde(default)]
+    pub owner_id: Option<String>,
+    #[serde(default)]
+    pub lease_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

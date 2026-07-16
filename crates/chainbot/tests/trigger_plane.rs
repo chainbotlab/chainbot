@@ -249,6 +249,7 @@ fn trigger_plugin_manifest_validation() {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: Some("bin/external_trigger.wasm".to_owned()),
+            abi: None,
         }),
         operations: Vec::new(),
         event_schema: Some(PluginEventSchemaDescriptor {
@@ -1563,6 +1564,7 @@ fn plugin_manifest(
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         }),
         operations: Vec::new(),
         event_schema: (kind == "external_trigger").then(|| PluginEventSchemaDescriptor {

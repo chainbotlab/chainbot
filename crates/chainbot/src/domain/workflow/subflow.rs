@@ -140,13 +140,20 @@ impl SubflowContract {
         &self,
         namespaces: &RuntimeVariableNamespaces,
     ) -> BTreeMap<String, serde_json::Value> {
+        self.try_build_child_inputs(namespaces).unwrap_or_default()
+    }
+
+    pub fn try_build_child_inputs(
+        &self,
+        namespaces: &RuntimeVariableNamespaces,
+    ) -> Result<BTreeMap<String, serde_json::Value>, ContractError> {
         let mut child_inputs = BTreeMap::new();
         for import in &self.imports {
-            if let Some(value) = namespaces.resolve(&import.source) {
+            if let Some(value) = namespaces.try_resolve(&import.source)? {
                 child_inputs.insert(import.child_key.clone(), value.clone());
             }
         }
-        child_inputs
+        Ok(child_inputs)
     }
 
     pub fn collect_exports(

@@ -12,6 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+
 use super::help::{help_text, render_version_output};
 use super::{
     CatalogRequest, CliCommand, CliOutput, CliRequest, PluginCommand, PluginSourceRequest,
@@ -26,7 +28,9 @@ use crate::app::cli::view::plugin_source::{
     render_plugin_install_success, render_plugin_source_list, render_plugin_source_show,
 };
 use crate::app::cli::view::status::{build_status_output, render_status_output};
-use crate::app::definitions::load_root_definition_bundle;
+use crate::app::definitions::{
+    collect_compatibility_warnings, load_root_definition_bundle, CompatibilityWarning,
+};
 use crate::app::runtime::daemon;
 use crate::app::runtime::execution::ExecutionPlane;
 use crate::app::runtime::execution::PluginActivationRuntime;
@@ -39,7 +43,7 @@ use crate::builtins::{build_builtin_registry, BuiltinRuntimeContext, SecretDecry
 use crate::domain::runtime::{NormalizedRunRequest, WorkflowRunStatus};
 #[cfg(test)]
 use crate::domain::state::StagedTriggerEventRecord;
-use crate::domain::state::{RunRecordSummary, RunStatus, TriggerEventRecord};
+use crate::domain::state::{RunExecutionFence, RunRecordSummary, RunStatus, TriggerEventRecord};
 use crate::domain::trigger::{
     TriggerDefinition, TriggerPluginActivationBindings, TriggerPluginHostPolicy, TriggerRunRequest,
     REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
@@ -59,7 +63,7 @@ use crate::plugin::source::{
     prepare_installable_plugin, resolve_plugin_selection, InstallTransaction,
     PluginSourceDescriptor,
 };
-use crate::plugin::{PluginKind, PluginManifest};
+use crate::plugin::{HostCancellation, PluginKind, PluginManifest};
 use crate::secrets::SecretReference;
 
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
@@ -72,6 +76,13 @@ struct InitResult {
     root: PathBuf,
     created_paths: Vec<PathBuf>,
     reused_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationOutput {
+    valid: bool,
+    root: String,
+    warnings: Vec<CompatibilityWarning>,
 }
 
 #[derive(Debug)]
@@ -103,7 +114,7 @@ impl CliRequest {
             CliCommand::Plugin => self.execute_plugin(),
             CliCommand::Stop => self.execute_stop(),
             CliCommand::Trigger => self.execute_trigger(),
-            CliCommand::Validate => self.execute_validate(),
+            CliCommand::Validate => self.execute_validate(self.json_output),
             CliCommand::Run => self.execute_run(),
             CliCommand::Serve => self.execute_serve(),
             CliCommand::InternalServeDaemon => self.execute_internal_serve_daemon(),
@@ -345,12 +356,40 @@ impl CliRequest {
         }
     }
 
-    pub(crate) fn execute_validate(&self) -> Result<CliOutput, UserFacingError> {
-        let layout = self.load_definition_root()?;
-        Ok(CliOutput::text(format!(
-            "validated root: {}",
-            layout.root.display()
-        )))
+    pub(crate) fn execute_validate(
+        &self,
+        json_output: bool,
+    ) -> Result<CliOutput, UserFacingError> {
+        let layout = self.resolve_existing_root()?;
+        let definitions =
+            load_root_definition_bundle(&layout).map_err(UserFacingError::from_contract)?;
+        let warnings =
+            collect_compatibility_warnings(&definitions.workflows, &definitions.plugins);
+        if json_output {
+            let payload = ValidationOutput {
+                valid: true,
+                root: layout.root.display().to_string(),
+                warnings,
+            };
+            let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
+                UserFacingError::state(format!(
+                    "Failed to serialize validation payload: {source}"
+                ))
+            })?;
+            return Ok(CliOutput::text(stdout));
+        }
+
+        let mut lines = vec![format!("validated root: {}", layout.root.display())];
+        lines.extend(warnings.into_iter().map(|warning| {
+            format!(
+                "warning[{}] {}: `{}`; use `{}`",
+                warning.code,
+                warning.source_location,
+                warning.original_reference,
+                warning.replacement
+            )
+        }));
+        Ok(CliOutput::text(lines.join("\n")))
     }
 
     pub(crate) fn execute_trigger(&self) -> Result<CliOutput, UserFacingError> {
@@ -863,6 +902,31 @@ pub(crate) fn execute_single_run(
     request: NormalizedRunRequest,
     started_at_ms: i64,
 ) -> Result<SingleRunResult, UserFacingError> {
+    execute_single_run_with_fence(runtime, request, started_at_ms, None)
+}
+
+pub(crate) fn execute_single_run_with_fence(
+    runtime: &mut RuntimeContext,
+    request: NormalizedRunRequest,
+    started_at_ms: i64,
+    fence: Option<&RunExecutionFence>,
+) -> Result<SingleRunResult, UserFacingError> {
+    execute_single_run_with_fence_and_cancellation(
+        runtime,
+        request,
+        started_at_ms,
+        fence,
+        &HostCancellation::default(),
+    )
+}
+
+pub(crate) fn execute_single_run_with_fence_and_cancellation(
+    runtime: &mut RuntimeContext,
+    request: NormalizedRunRequest,
+    started_at_ms: i64,
+    fence: Option<&RunExecutionFence>,
+    cancellation: &HostCancellation,
+) -> Result<SingleRunResult, UserFacingError> {
     let run_id = request.run_id.clone();
     let workflow_id = request.workflow_id.clone();
 
@@ -873,6 +937,7 @@ pub(crate) fn execute_single_run(
         RunStatus::Running,
         started_at_ms,
         None,
+        fence,
     )
     .map_err(|error| map_runtime_state_error("persist running run summary", error))?;
 
@@ -885,7 +950,7 @@ pub(crate) fn execute_single_run(
     )
     .map_err(|error| map_runtime_state_error("write run_started log", error))?;
 
-    let plane = build_execution_plane(runtime)?;
+    let plane = build_execution_plane(runtime, cancellation)?;
     let report = plane.execute(&request);
     let finished_at_ms = current_time_ms()?;
 
@@ -917,6 +982,7 @@ pub(crate) fn execute_single_run(
                 status,
                 started_at_ms,
                 Some(finished_at_ms),
+                fence,
             )
             .map_err(|error| map_runtime_state_error("persist finished run summary", error))?;
 
@@ -956,6 +1022,7 @@ pub(crate) fn execute_single_run(
                 RunStatus::Failed,
                 started_at_ms,
                 Some(finished_at_ms),
+                fence,
             )
             .map_err(|write_error| {
                 map_runtime_state_error("persist failed run summary", write_error)
@@ -968,7 +1035,10 @@ pub(crate) fn execute_single_run(
     }
 }
 
-fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, UserFacingError> {
+fn build_execution_plane(
+    runtime: &RuntimeContext,
+    cancellation: &HostCancellation,
+) -> Result<ExecutionPlane, UserFacingError> {
     let registry = build_builtin_registry(BuiltinRuntimeContext {
         root_layout: runtime.root_layout.clone(),
         secret_mode: runtime.secret_mode,
@@ -986,6 +1056,7 @@ fn build_execution_plane(runtime: &RuntimeContext) -> Result<ExecutionPlane, Use
         runtime.root_layout.secrets_dir.clone(),
         runtime.secret_mode,
     )
+    .map(|plane| plane.with_cancellation(cancellation.clone()))
     .map_err(UserFacingError::from_contract)
 }
 
@@ -1151,15 +1222,27 @@ fn write_run_status(
     status: RunStatus,
     started_at_ms: i64,
     finished_at_ms: Option<i64>,
+    fence: Option<&RunExecutionFence>,
 ) -> Result<(), RuntimeStateError> {
-    state_store.write_run_summary(&RunRecordSummary {
+    let summary = RunRecordSummary {
         schema_version: "1.0.0".to_owned(),
         run_id: run_id.to_owned(),
         workflow_id: workflow_id.to_owned(),
         status,
         started_at_ms,
         finished_at_ms,
-    })
+        owner_id: fence.map(|fence| fence.owner_id.clone()),
+        lease_generation: fence.map(|fence| fence.lease_generation),
+    };
+    if finished_at_ms.is_some() && fence.is_some() {
+        if !state_store.write_fenced_terminal_run_summary(&summary, finished_at_ms.unwrap_or(started_at_ms))? {
+            return Err(RuntimeStateError::LeaseFenceLost {
+                run_id: run_id.to_owned(),
+            });
+        }
+        return Ok(());
+    }
+    state_store.write_run_summary(&summary)
 }
 
 fn write_log_entry(
@@ -1460,7 +1543,7 @@ mod tests {
             state_store
                 .try_acquire_serve_lease("owner-renew", 1_710_300_200_000, TEST_SERVE_LEASE_TTL_MS,)
                 .expect("initial lease should acquire"),
-            crate::domain::state::LeaseAcquireResult::Acquired
+            crate::domain::state::LeaseAcquireResult::Acquired { .. }
         ));
 
         let mut supervisor = ServeLeaseSupervisor::new(

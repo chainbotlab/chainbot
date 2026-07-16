@@ -1,0 +1,53 @@
+{
+  "nextId": 5,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "完成 lease fencing 与 run ownership",
+      "description": "实现真实 generation 迁移、独立 heartbeat、取消传播、fenced run start/recovery/finalization，并补 SQLite/PostgreSQL parity 测试。",
+      "status": "in_progress",
+      "activeForm": "正在完成 lease fencing 与 run ownership",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784082472700,
+      "updatedAt": 1784082523253
+    },
+    {
+      "id": "2",
+      "subject": "完成原子 trigger acceptance",
+      "description": "将 TriggerPlane 接到后端单事务 acceptance，处理 duplicate repair、staged ACK、snapshot/checkpoint 和失败回滚。",
+      "status": "pending",
+      "activeForm": "正在完成原子 trigger acceptance",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784082472702,
+      "updatedAt": 1784082472702
+    },
+    {
+      "id": "3",
+      "subject": "完成外部 trigger 生命周期与 Wasm ABI",
+      "description": "实现受 supervisor 管理的 process daemon session、WIT Component Model 适配、资源限制、官方 manifest 迁移和 recovery matrix。",
+      "status": "pending",
+      "activeForm": "正在完成外部 trigger 生命周期与 Wasm ABI",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784082472703,
+      "updatedAt": 1784082472703
+    },
+    {
+      "id": "4",
+      "subject": "完成全量验证与文档迁移",
+      "description": "迁移示例/用户文档、补契约测试、运行全部指定 Cargo 和 skill 验证。",
+      "status": "pending",
+      "activeForm": "正在完成全量验证与文档迁移",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784082472704,
+      "updatedAt": 1784082472704
+    }
+  ]
+}

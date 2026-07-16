@@ -9,22 +9,28 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
+use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
+use std::time::Duration;
 
 use crate::app::cli::{
     build_trigger_host_policy, collect_external_trigger_manifests, current_time_ms,
-    execute_single_run, load_replayable_trigger_requests, map_ingress_error,
+    execute_single_run_with_fence_and_cancellation, load_replayable_trigger_requests,
+    map_ingress_error,
     map_runtime_state_error, merge_trigger_requests, normalized_request_from_trigger, CliOutput,
     CliRequest, RuntimeContext,
 };
-use crate::app::runtime::external_triggers::process_listener::collect_external_process_trigger_emissions;
+use crate::app::runtime::external_triggers::process_listener::{
+    collect_external_process_trigger_emissions, ProcessTriggerSession,
+};
 use crate::app::runtime::external_triggers::supervisor::{
     build_desired_external_trigger_sessions, ExternalTriggerPollBudget,
     ExternalTriggerSessionRuntime, ExternalTriggerSupervisor,
 };
 use crate::app::runtime::external_triggers::wasmtime::HostPushOutcome;
 use crate::domain::state::{
-    LeaseAcquireResult, RunStatus, ServeLeaseState, StagedTriggerEventRecord, SERVE_OWNER_ID_PREFIX,
+    LeaseAcquireResult, RunExecutionFence, RunStatus, ServeLeaseGrant, ServeLeaseState,
+    StagedTriggerEventRecord, SERVE_OWNER_ID_PREFIX,
 };
 use crate::domain::trigger::{TriggerDefinition, TriggerPlane, TriggerPlaneError};
 use crate::errors::UserFacingError;
@@ -34,10 +40,14 @@ use crate::ingress::{
     build_desired_ingress_state, drain_ingress_emissions, DesiredIngressState,
     TriggerIngressSupervisor,
 };
-use crate::plugin::{PluginManifest, TriggerRuntimeLifecycle};
+use crate::plugin::{
+    HostCancellation, HostCancellationReason, PluginManifest, TriggerRuntimeLifecycle,
+};
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
 const SERVE_LEASE_RENEW_INTERVAL_MS: i64 = 10_000;
+const SERVE_LEASE_RETRY_INTERVAL_MS: i64 = 1_000;
+const SERVE_HEARTBEAT_STOP_POLL_MS: i64 = 250;
 const SERVE_IDLE_POLL_INTERVAL_MS: u64 = 250;
 const SERVE_ERROR_BACKOFF_MS: u64 = 1_000;
 const SERVE_START_ACK_TIMEOUT_MS: u64 = 5_000;
@@ -56,6 +66,9 @@ pub(crate) struct ServeLeaseSupervisor {
     lease_ttl_ms: i64,
     renew_interval_ms: i64,
     next_renew_at_ms: i64,
+    grant: Option<ServeLeaseGrant>,
+    cancellation: HostCancellation,
+    independent_heartbeat: bool,
 }
 
 impl ServeLeaseSupervisor {
@@ -72,11 +85,50 @@ impl ServeLeaseSupervisor {
             lease_ttl_ms: SERVE_LEASE_TTL_MS,
             renew_interval_ms: SERVE_LEASE_RENEW_INTERVAL_MS,
             next_renew_at_ms: acquired_at_ms.saturating_add(SERVE_LEASE_RENEW_INTERVAL_MS),
+            grant: None,
+            cancellation: HostCancellation::default(),
+            independent_heartbeat: false,
         }
     }
 
+    pub(crate) fn with_grant(
+        storage_config: RuntimeStorageConfig,
+        pid: i64,
+        grant: ServeLeaseGrant,
+        acquired_at_ms: i64,
+    ) -> Self {
+        let mut supervisor = Self::new(storage_config, grant.owner_id.clone(), pid, acquired_at_ms);
+        supervisor.grant = Some(grant);
+        supervisor
+    }
+
+    fn with_grant_and_cancellation(
+        storage_config: RuntimeStorageConfig,
+        pid: i64,
+        grant: ServeLeaseGrant,
+        acquired_at_ms: i64,
+        cancellation: HostCancellation,
+    ) -> Self {
+        let mut supervisor = Self::with_grant(storage_config, pid, grant, acquired_at_ms);
+        supervisor.cancellation = cancellation;
+        supervisor.independent_heartbeat = true;
+        supervisor
+    }
+
+    pub(crate) fn cancellation(&self) -> HostCancellation {
+        self.cancellation.clone()
+    }
+
+    pub(crate) fn execution_fence(&self) -> Option<RunExecutionFence> {
+        self.grant.as_ref().map(|grant| RunExecutionFence {
+            owner_id: grant.owner_id.clone(),
+            lease_generation: grant.generation,
+        })
+    }
+
     pub(crate) fn maybe_renew(&mut self, now_ms: i64) -> Result<(), UserFacingError> {
-        if now_ms < self.next_renew_at_ms {
+        self.ensure_active()?;
+        if self.independent_heartbeat || now_ms < self.next_renew_at_ms {
             return Ok(());
         }
 
@@ -86,13 +138,15 @@ impl ServeLeaseSupervisor {
             .try_acquire_serve_lease(&self.owner_id, now_ms, self.lease_ttl_ms)
             .map_err(|error| map_runtime_state_error("renew serve lease", error))?
         {
-            LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
+            LeaseAcquireResult::Acquired { grant } | LeaseAcquireResult::Renewed { grant } => {
+                let expires_at_ms = grant.expires_at_ms;
+                self.grant = Some(grant);
                 store
                     .heartbeat_daemon(
                         &self.owner_id,
                         Some(self.pid),
                         now_ms,
-                        now_ms.saturating_add(self.lease_ttl_ms),
+                        expires_at_ms,
                     )
                     .map_err(|error| map_runtime_state_error("heartbeat daemon session", error))?;
                 self.next_renew_at_ms = now_ms.saturating_add(self.renew_interval_ms);
@@ -101,11 +155,193 @@ impl ServeLeaseSupervisor {
             LeaseAcquireResult::Rejected {
                 current_owner,
                 expires_at_ms,
-            } => Err(UserFacingError::conflict(format!(
-                "Serve lease renewal was rejected (current owner: {current_owner}, expires_at_ms: {expires_at_ms})."
-            ))),
+            } => {
+                self.cancellation.lease_lost();
+                Err(UserFacingError::conflict(format!(
+                    "Serve lease renewal was rejected (current owner: {current_owner}, expires_at_ms: {expires_at_ms})."
+                )))
+            }
         }
     }
+
+    fn ensure_active(&self) -> Result<(), UserFacingError> {
+        match self.cancellation.reason() {
+            None => Ok(()),
+            Some(HostCancellationReason::LeaseLost) => Err(UserFacingError::conflict_with_code(
+                "serve_lease_lost",
+                "Serve lease ownership was lost; active runtime work has been cancelled.",
+            )),
+            Some(HostCancellationReason::ShuttingDown) => Err(UserFacingError::unavailable_with_code(
+                "daemon_shutting_down",
+                "The daemon is shutting down; active runtime work has been cancelled.",
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ServeLeaseHeartbeat {
+    stop_tx: mpsc::SyncSender<()>,
+    error_rx: mpsc::Receiver<UserFacingError>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ServeLeaseHeartbeat {
+    fn start(
+        storage_config: RuntimeStorageConfig,
+        owner_id: String,
+        pid: i64,
+        initial_grant: ServeLeaseGrant,
+        cancellation: HostCancellation,
+        started_at_ms: i64,
+    ) -> Self {
+        let (stop_tx, stop_rx) = mpsc::sync_channel(1);
+        let (error_tx, error_rx) = mpsc::sync_channel(1);
+        let handle = thread::spawn(move || {
+            if let Err(error) = run_serve_lease_heartbeat(
+                &storage_config,
+                &owner_id,
+                pid,
+                initial_grant,
+                &cancellation,
+                started_at_ms,
+                &stop_rx,
+            ) {
+                cancellation.lease_lost();
+                let _ = error_tx.try_send(error);
+            }
+        });
+        Self {
+            stop_tx,
+            error_rx,
+            handle: Some(handle),
+        }
+    }
+
+    fn check(&self) -> Result<(), UserFacingError> {
+        match self.error_rx.try_recv() {
+            Ok(error) => Err(error),
+            Err(TryRecvError::Empty) => Ok(()),
+            Err(TryRecvError::Disconnected) if self.handle.is_some() => {
+                Err(UserFacingError::unavailable_with_code(
+                    "serve_heartbeat_stopped",
+                    "The serve lease heartbeat stopped unexpectedly.",
+                ))
+            }
+            Err(TryRecvError::Disconnected) => Ok(()),
+        }
+    }
+
+    fn shutdown(&mut self) -> Result<(), UserFacingError> {
+        let _ = self.stop_tx.try_send(());
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        handle.join().map_err(|_| {
+            UserFacingError::unavailable_with_code(
+                "serve_heartbeat_join_failed",
+                "The serve lease heartbeat thread panicked during shutdown.",
+            )
+        })
+    }
+}
+
+fn run_serve_lease_heartbeat(
+    storage_config: &RuntimeStorageConfig,
+    owner_id: &str,
+    pid: i64,
+    initial_grant: ServeLeaseGrant,
+    cancellation: &HostCancellation,
+    started_at_ms: i64,
+    stop_rx: &mpsc::Receiver<()>,
+) -> Result<(), UserFacingError> {
+    let mut expires_at_ms = initial_grant.expires_at_ms;
+    let mut next_renew_at_ms = started_at_ms.saturating_add(SERVE_LEASE_RENEW_INTERVAL_MS);
+
+    loop {
+        let now_ms = current_time_ms()?;
+        if now_ms >= next_renew_at_ms {
+            match renew_serve_lease_once(storage_config, owner_id, pid, now_ms) {
+                Ok(grant) => {
+                    expires_at_ms = grant.expires_at_ms;
+                    next_renew_at_ms = now_ms.saturating_add(SERVE_LEASE_RENEW_INTERVAL_MS);
+                }
+                Err(HeartbeatRenewalError::Rejected(error)) => return Err(error),
+                Err(HeartbeatRenewalError::Storage(error)) => {
+                    if now_ms >= expires_at_ms {
+                        return Err(error);
+                    }
+                    next_renew_at_ms = now_ms
+                        .saturating_add(SERVE_LEASE_RETRY_INTERVAL_MS)
+                        .min(expires_at_ms);
+                }
+            }
+        }
+
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let wait_ms = next_renew_at_ms
+            .saturating_sub(current_time_ms()?)
+            .clamp(1, SERVE_HEARTBEAT_STOP_POLL_MS);
+        match stop_rx.recv_timeout(Duration::from_millis(wait_ms as u64)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+enum HeartbeatRenewalError {
+    Rejected(UserFacingError),
+    Storage(UserFacingError),
+}
+
+fn renew_serve_lease_once(
+    storage_config: &RuntimeStorageConfig,
+    owner_id: &str,
+    pid: i64,
+    now_ms: i64,
+) -> Result<ServeLeaseGrant, HeartbeatRenewalError> {
+    let mut store = RuntimeStateStore::open(storage_config, now_ms).map_err(|error| {
+        HeartbeatRenewalError::Storage(map_runtime_state_error(
+            "open heartbeat runtime state store",
+            error,
+        ))
+    })?;
+    let grant = match store
+        .try_acquire_serve_lease(owner_id, now_ms, SERVE_LEASE_TTL_MS)
+        .map_err(|error| {
+            HeartbeatRenewalError::Storage(map_runtime_state_error(
+                "renew serve lease from heartbeat",
+                error,
+            ))
+        })?
+    {
+        LeaseAcquireResult::Acquired { grant } | LeaseAcquireResult::Renewed { grant } => grant,
+        LeaseAcquireResult::Rejected {
+            current_owner,
+            expires_at_ms,
+        } => {
+            return Err(HeartbeatRenewalError::Rejected(
+                UserFacingError::conflict_with_code(
+                    "serve_lease_lost",
+                    format!(
+                        "Serve lease heartbeat was rejected (current owner: {current_owner}, expires_at_ms: {expires_at_ms})."
+                    ),
+                ),
+            ));
+        }
+    };
+    store
+        .heartbeat_daemon(owner_id, Some(pid), now_ms, grant.expires_at_ms)
+        .map_err(|error| {
+            HeartbeatRenewalError::Storage(map_runtime_state_error(
+                "persist daemon heartbeat",
+                error,
+            ))
+        })?;
+    Ok(grant)
 }
 
 pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacingError> {
@@ -124,7 +360,7 @@ pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacin
         .try_acquire_serve_lease(&owner_id, now_ms, SERVE_LEASE_TTL_MS)
         .map_err(|error| map_runtime_state_error("acquire serve lease", error))?
     {
-        LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed => {
+        LeaseAcquireResult::Acquired { .. } | LeaseAcquireResult::Renewed { .. } => {
             store
                 .register_daemon_start(&owner_id, None, now_ms, now_ms + SERVE_LEASE_TTL_MS)
                 .map_err(|error| map_runtime_state_error("register daemon start", error))?;
@@ -151,14 +387,14 @@ pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacin
                     "The daemon session disappeared before the child PID could be recorded.",
                 ));
             }
-            wait_for_daemon_start(&storage_config, &owner_id, child.id(), now_ms).or_else(
+            wait_for_daemon_start(&storage_config, &owner_id, child.id(), now_ms).map_err(
                 |error| {
                     let _ = child.kill();
                     let _ = child.wait();
                     let cleanup_at_ms = current_time_ms().unwrap_or(now_ms);
                     let _ = store.mark_daemon_stopped(&owner_id, cleanup_at_ms);
                     let _ = store.release_serve_lease(&owner_id);
-                    Err(error)
+                    error
                 },
             )?;
             Ok(CliOutput::text(format!(
@@ -244,7 +480,7 @@ pub(crate) fn execute_internal_serve_daemon(
         .map_err(UserFacingError::from_contract)?;
     let pid = i64::from(std::process::id());
 
-    {
+    let initial_grant = {
         let mut store = RuntimeStateStore::open(&storage_config, now_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let status = store
@@ -274,12 +510,19 @@ pub(crate) fn execute_internal_serve_daemon(
                     .max(started_at_ms.saturating_add(1))
             })
             .unwrap_or_else(|| current_time_ms().unwrap_or(now_ms));
+        let grant = match store
+            .try_acquire_serve_lease(&owner_id, acked_at_ms, SERVE_LEASE_TTL_MS)
+            .map_err(|error| map_runtime_state_error("renew daemon start lease", error))?
+        {
+            LeaseAcquireResult::Acquired { grant } | LeaseAcquireResult::Renewed { grant } => grant,
+            LeaseAcquireResult::Rejected { .. } => return Ok(CliOutput::text(String::new())),
+        };
         store
             .heartbeat_daemon(
                 &owner_id,
                 Some(pid),
                 acked_at_ms,
-                acked_at_ms + SERVE_LEASE_TTL_MS,
+                grant.expires_at_ms,
             )
             .map_err(|error| map_runtime_state_error("acknowledge daemon start", error))?;
         if store
@@ -288,9 +531,16 @@ pub(crate) fn execute_internal_serve_daemon(
         {
             return Ok(CliOutput::text(String::new()));
         }
-    }
+        grant
+    };
 
-    let loop_result = run_internal_serve_daemon_loop(request, &storage_config, &owner_id, pid);
+    let loop_result = run_internal_serve_daemon_loop(
+        request,
+        &storage_config,
+        &owner_id,
+        pid,
+        initial_grant,
+    );
     let stopped_at_ms = current_time_ms().unwrap_or(now_ms);
     if let Ok(mut store) = RuntimeStateStore::open(&storage_config, stopped_at_ms) {
         let _ = store.mark_daemon_stopped(&owner_id, stopped_at_ms);
@@ -380,18 +630,33 @@ pub(crate) fn run_internal_serve_daemon_loop(
     storage_config: &RuntimeStorageConfig,
     owner_id: &str,
     pid: i64,
+    initial_grant: ServeLeaseGrant,
 ) -> Result<(), UserFacingError> {
     let ingress_supervisor =
         TriggerIngressSupervisor::start(storage_config.clone()).map_err(map_ingress_error)?;
-    let mut external_trigger_supervisor = ExternalTriggerSupervisor::new(owner_id.to_owned());
-    let mut lease_supervisor = ServeLeaseSupervisor::new(
+    let cancellation = HostCancellation::default();
+    let mut external_trigger_supervisor = ExternalTriggerSupervisor::new(owner_id.to_owned())
+        .with_cancellation(cancellation.clone());
+    let heartbeat_started_at_ms = current_time_ms()?;
+    let mut lease_heartbeat = ServeLeaseHeartbeat::start(
         storage_config.clone(),
         owner_id.to_owned(),
         pid,
-        current_time_ms()?,
+        initial_grant.clone(),
+        cancellation.clone(),
+        heartbeat_started_at_ms,
+    );
+    let mut lease_supervisor = ServeLeaseSupervisor::with_grant_and_cancellation(
+        storage_config.clone(),
+        pid,
+        initial_grant,
+        heartbeat_started_at_ms,
+        cancellation.clone(),
     );
 
     let loop_result = (|| loop {
+        lease_heartbeat.check()?;
+        lease_supervisor.ensure_active()?;
         let observed_at_ms = current_time_ms()?;
         let mut control_store = RuntimeStateStore::open(storage_config, observed_at_ms)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
@@ -425,14 +690,6 @@ pub(crate) fn run_internal_serve_daemon_loop(
                 continue;
             }
         };
-        let external_trigger_manifests =
-            collect_external_trigger_manifests(&runtime.definitions.plugins);
-        let desired_external_sessions = build_desired_external_trigger_sessions(
-            &runtime.definitions.triggers,
-            &external_trigger_manifests,
-        )
-        .map_err(UserFacingError::from_contract)?;
-        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, observed_at_ms);
         let desired_ingress = build_desired_ingress_state(&runtime.definitions.triggers)
             .map_err(UserFacingError::from_contract)?;
         ingress_supervisor
@@ -473,19 +730,25 @@ pub(crate) fn run_internal_serve_daemon_loop(
         }
     })();
 
+    cancellation.shutdown();
     teardown_external_trigger_sessions(
         &mut external_trigger_supervisor,
         current_time_ms().unwrap_or_default(),
     );
     let shutdown_result = ingress_supervisor.shutdown().map_err(map_ingress_error);
-    loop_result.and(shutdown_result)
+    let heartbeat_result = lease_heartbeat.shutdown();
+    loop_result.and(shutdown_result).and(heartbeat_result)
 }
 
 pub(crate) fn teardown_external_trigger_sessions(
     supervisor: &mut ExternalTriggerSupervisor,
     observed_at_ms: i64,
 ) {
-    let _ = supervisor.reconcile(BTreeMap::new(), observed_at_ms);
+    let _ = supervisor.try_reconcile_with_process(
+        BTreeMap::new(),
+        observed_at_ms,
+        |_, _| Ok(None),
+    );
 }
 
 pub(crate) fn serve_once_with_lease(
@@ -495,10 +758,9 @@ pub(crate) fn serve_once_with_lease(
     external_trigger_supervisor: &mut ExternalTriggerSupervisor,
 ) -> Result<CliOutput, UserFacingError> {
     lease_supervisor.maybe_renew(accepted_at_ms)?;
-    let process_poll_budget =
-        external_trigger_supervisor.plan_process_polls_for_cycle(accepted_at_ms);
     let replay_requests =
         load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
+    let trigger_definitions = runtime.definitions.triggers.clone();
     let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
     let policy = build_trigger_host_policy(
         &runtime.definitions.root_config,
@@ -506,6 +768,61 @@ pub(crate) fn serve_once_with_lease(
         &runtime.root_layout.plugins_dir,
         &runtime.root_layout.secrets_dir,
     );
+    let desired_external_sessions = build_desired_external_trigger_sessions(
+        &trigger_definitions,
+        &trigger_manifests,
+    )
+    .map_err(UserFacingError::from_contract)?;
+    let definitions_by_id = trigger_definitions
+        .iter()
+        .map(|definition| (definition.trigger_id.as_str(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let manifests_by_id = trigger_manifests
+        .iter()
+        .map(|manifest| (manifest.plugin_id.as_str(), manifest))
+        .collect::<BTreeMap<_, _>>();
+    external_trigger_supervisor
+        .try_reconcile_with_process(
+            desired_external_sessions,
+            accepted_at_ms,
+            |spec, cancellation| {
+                if spec.runtime != ExternalTriggerSessionRuntime::ProcessDaemon {
+                    return Ok(None);
+                }
+                let definition = definitions_by_id.get(spec.trigger_id.as_str()).ok_or_else(|| {
+                    crate::errors::ContractError::InvalidTriggerDefinitionField {
+                        trigger_id: spec.trigger_id.clone(),
+                        field: "trigger.trigger_id",
+                        detail: "managed process session is missing trigger definition".to_owned(),
+                    }
+                })?;
+                let manifest = manifests_by_id.get(spec.plugin_id.as_str()).ok_or_else(|| {
+                    crate::errors::ContractError::UnknownTriggerPlugin {
+                        trigger_id: spec.trigger_id.clone(),
+                        plugin_id: spec.plugin_id.clone(),
+                    }
+                })?;
+                ProcessTriggerSession::start(
+                    &mut runtime.state_store,
+                    definition,
+                    manifest,
+                    &policy,
+                    spec.wasm_component.clone().unwrap_or_default(),
+                    cancellation,
+                )
+                .map(Some)
+            },
+        )
+        .map_err(UserFacingError::from_contract)?;
+    external_trigger_supervisor
+        .drain_process_sessions(
+            &trigger_definitions,
+            &mut runtime.state_store,
+            accepted_at_ms,
+        )
+        .map_err(UserFacingError::from_contract)?;
+    let process_poll_budget =
+        external_trigger_supervisor.plan_process_polls_for_cycle(accepted_at_ms);
     let mut renew_progress = || {
         let now_ms = current_time_ms().map_err(|error| {
             TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
@@ -521,7 +838,7 @@ pub(crate) fn serve_once_with_lease(
         })
     };
     stage_process_external_trigger_sessions(
-        &runtime.definitions.triggers,
+        &trigger_definitions,
         &trigger_manifests,
         &policy,
         external_trigger_supervisor,
@@ -532,7 +849,7 @@ pub(crate) fn serve_once_with_lease(
     )
     .map_err(map_trigger_error)?;
     stage_wasm_external_trigger_sessions(
-        &runtime.definitions.triggers,
+        &trigger_definitions,
         &trigger_manifests,
         external_trigger_supervisor,
         &mut runtime.state_store,
@@ -542,13 +859,13 @@ pub(crate) fn serve_once_with_lease(
     .map_err(map_trigger_error)?;
 
     let builtin_events = crate::builtins::build_builtin_trigger_emissions(
-        &runtime.definitions.triggers,
+        &trigger_definitions,
         accepted_at_ms,
     )
     .map_err(UserFacingError::from_contract)?;
     let drained_ingress = drain_ingress_emissions(
         &mut runtime.state_store,
-        &runtime.definitions.triggers,
+        &trigger_definitions,
         INGRESS_INBOX_BATCH_LIMIT,
     )
     .map_err(map_trigger_error)?;
@@ -565,7 +882,7 @@ pub(crate) fn serve_once_with_lease(
 
     let mut trigger_plane = TriggerPlane::open_with_store_acceptance_only(
         trigger_store,
-        runtime.definitions.triggers.clone(),
+        trigger_definitions,
         trigger_manifests,
         policy,
         builtin_events,
@@ -595,7 +912,14 @@ pub(crate) fn serve_once_with_lease(
     for trigger_request in &run_requests {
         lease_supervisor.maybe_renew(current_time_ms()?)?;
         let normalized_request = normalized_request_from_trigger(trigger_request);
-        match execute_single_run(runtime, normalized_request, accepted_at_ms) {
+        let fence = lease_supervisor.execution_fence();
+        match execute_single_run_with_fence_and_cancellation(
+            runtime,
+            normalized_request,
+            accepted_at_ms,
+            fence.as_ref(),
+            &lease_supervisor.cancellation(),
+        ) {
             Ok(run_result) => completed_runs.push((trigger_request, run_result)),
             Err(error) => failures.push(format!(
                 "trigger_id={} event_id={} workflow_id={} error={error}",
@@ -744,7 +1068,13 @@ where
     let wasm_sessions = supervisor
         .sessions()
         .values()
-        .filter(|session| session.runtime == ExternalTriggerSessionRuntime::Wasm)
+        .filter(|session| {
+            matches!(
+                session.runtime,
+                ExternalTriggerSessionRuntime::Wasm
+                    | ExternalTriggerSessionRuntime::WasmComponent
+            )
+        })
         .map(|session| (session.trigger_id.clone(), session.plugin_id.clone()))
         .collect::<Vec<_>>();
 
@@ -840,4 +1170,82 @@ fn serve_start_ack_timeout_ms() -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(SERVE_START_ACK_TIMEOUT_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::infrastructure::config::RuntimeStorageBackend;
+
+    #[test]
+    fn heartbeat_publishes_lease_loss_when_a_successor_owns_the_lease() {
+        let now_ms = current_time_ms().expect("test clock should be available");
+        let sqlite_path = unique_sqlite_path("heartbeat-lease-loss");
+        let storage_config = RuntimeStorageConfig {
+            backend: RuntimeStorageBackend::Local {
+                database_path: sqlite_path.clone(),
+            },
+            history_retention: None,
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        };
+        let mut store = RuntimeStateStore::open(&storage_config, now_ms)
+            .expect("heartbeat test store should open");
+        let initial_grant = match store
+            .try_acquire_serve_lease("owner-a", now_ms, SERVE_LEASE_TTL_MS)
+            .expect("initial lease should acquire")
+        {
+            LeaseAcquireResult::Acquired { grant } => grant,
+            other => panic!("expected initial grant, got {other:?}"),
+        };
+        assert!(store
+            .release_serve_lease("owner-a")
+            .expect("initial lease should release"));
+        assert!(matches!(
+            store
+                .try_acquire_serve_lease("owner-b", now_ms + 1, SERVE_LEASE_TTL_MS)
+                .expect("successor lease should acquire"),
+            LeaseAcquireResult::Acquired { .. }
+        ));
+        drop(store);
+
+        let cancellation = HostCancellation::default();
+        let mut heartbeat = ServeLeaseHeartbeat::start(
+            storage_config,
+            String::from("owner-a"),
+            i64::from(std::process::id()),
+            initial_grant,
+            cancellation.clone(),
+            now_ms.saturating_sub(SERVE_LEASE_RENEW_INTERVAL_MS),
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let error = loop {
+            match heartbeat.check() {
+                Err(error) => break error,
+                Ok(()) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(()) => panic!("heartbeat should report lease loss"),
+            }
+        };
+
+        assert_eq!(error.error_code(), "serve_lease_lost");
+        assert_eq!(
+            cancellation.reason(),
+            Some(HostCancellationReason::LeaseLost)
+        );
+        heartbeat
+            .shutdown()
+            .expect("heartbeat should join after lease loss");
+        let _ = std::fs::remove_file(sqlite_path);
+    }
+
+    fn unique_sqlite_path(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("chainbot-{prefix}-{nonce}.sqlite3"))
+    }
 }

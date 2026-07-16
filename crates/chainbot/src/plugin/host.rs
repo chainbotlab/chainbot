@@ -8,6 +8,7 @@
 //! Owns the external node-plugin host runtime boundary and internal invoker seam.
 
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -27,6 +28,9 @@ use tokio::process::Command as TokioCommand;
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 use super::{configure_plugin_subprocess_environment, plugin_host_allowlisted_environment};
+use super::process::{
+    run_bounded_process, HostCancellation, PluginProcessFailure, PluginProcessLimits,
+};
 use super::contract::{
     validate_output_schema, ExternalNodeJsonRpcRequest, ExternalNodeJsonRpcResponse,
     ExternalNodePluginRequest, ExternalNodePluginResponse, JsonRpcId, McpTransportKind,
@@ -50,16 +54,58 @@ fn mcp_stdio_timeout() -> Duration {
         .unwrap_or(MCP_STDIO_TIMEOUT)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpRequestGuardError {
+    TimedOut,
+    Cancelled,
+}
+
+async fn await_mcp_request<T>(
+    cancellation: HostCancellation,
+    timeout: Duration,
+    request: impl Future<Output = T>,
+) -> Result<T, McpRequestGuardError> {
+    tokio::select! {
+        result = tokio::time::timeout(timeout, request) => {
+            result.map_err(|_| McpRequestGuardError::TimedOut)
+        }
+        _ = wait_for_host_cancellation(cancellation) => Err(McpRequestGuardError::Cancelled),
+    }
+}
+
+async fn wait_for_host_cancellation(cancellation: HostCancellation) {
+    while !cancellation.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn map_mcp_request_guard(
+    error: McpRequestGuardError,
+    timeout_detail: String,
+    cancellation_detail: &'static str,
+) -> McpInvocationFailure {
+    match error {
+        McpRequestGuardError::TimedOut => McpInvocationFailure::Timeout {
+            detail: timeout_detail,
+        },
+        McpRequestGuardError::Cancelled => McpInvocationFailure::Cancelled {
+            detail: cancellation_detail.to_owned(),
+        },
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePluginExecutionResult {
     pub output: std::collections::BTreeMap<String, serde_json::Value>,
     pub result_state: Option<NodePluginResultState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ExternalNodePluginHost {
     plugins_root: PathBuf,
     secret_runtime: Option<PluginHostSecretRuntime>,
+    process_limits: PluginProcessLimits,
+    cancellation: HostCancellation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +122,11 @@ struct PluginHostSecretRuntime {
 
 impl ExternalNodePluginHost {
     pub fn new(plugins_root: PathBuf) -> Self {
-        Self {
+        Self::with_process_controls(
             plugins_root,
-            secret_runtime: None,
-        }
+            PluginProcessLimits::node(),
+            HostCancellation::default(),
+        )
     }
 
     pub fn with_secret_runtime(
@@ -87,17 +134,34 @@ impl ExternalNodePluginHost {
         secrets_root: PathBuf,
         secret_mode: PluginHostSecretMode,
     ) -> Self {
-        Self {
-            plugins_root,
-            secret_runtime: Some(PluginHostSecretRuntime {
-                secrets_root,
-                secret_mode,
-            }),
-        }
+        let mut host = Self::new(plugins_root);
+        host.secret_runtime = Some(PluginHostSecretRuntime {
+            secrets_root,
+            secret_mode,
+        });
+        host
     }
 
     pub fn plugins_root(&self) -> &Path {
         &self.plugins_root
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: HostCancellation) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub(crate) fn with_process_controls(
+        plugins_root: PathBuf,
+        process_limits: PluginProcessLimits,
+        cancellation: HostCancellation,
+    ) -> Self {
+        Self {
+            plugins_root,
+            secret_runtime: None,
+            process_limits,
+            cancellation,
+        }
     }
 
     pub fn execute(
@@ -227,44 +291,22 @@ impl ExternalNodePluginHost {
         let executable = self.resolve_executable_path(manifest)?;
 
         let mut command = Command::new(&executable);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
         configure_plugin_subprocess_environment(&mut command);
-
-        let mut child = command
-            .spawn()
-            .map_err(|source| ContractError::NodePluginSpawnFailed {
-                plugin_id: manifest.plugin_id.clone(),
-                executable: executable.clone(),
-                source,
-            })?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            stdin.write_all(request_json).map_err(|source| ContractError::NodePluginProcessIo {
-                plugin_id: manifest.plugin_id.clone(),
-                operation: "write request to plugin stdin",
-                source,
-            })?;
-        }
-
-        let output = child.wait_with_output().map_err(|source| ContractError::NodePluginProcessIo {
-            plugin_id: manifest.plugin_id.clone(),
-            operation: "wait for plugin process output",
-            source,
+        let output = run_bounded_process(
+            &mut command,
+            request_json,
+            self.process_limits,
+            &self.cancellation,
+        )
+        .map_err(|failure| {
+            map_subprocess_failure(manifest, executable.clone(), self.process_limits, failure)
         })?;
 
-        if !output.status.success() {
-            return Err(ContractError::NodePluginProcessFailed {
-                plugin_id: manifest.plugin_id.clone(),
-                exit_code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
-
-        Ok(output)
+        Ok(std::process::Output {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 
     fn execute_mcp_per_invocation_session(
@@ -274,6 +316,7 @@ impl ExternalNodePluginHost {
     ) -> Result<NodePluginExecutionResult, ContractError> {
         manifest.validate()?;
         request.validate(manifest)?;
+        self.ensure_not_cancelled(&manifest.plugin_id)?;
 
         let _session = McpInvocationSession::start(&manifest.plugin_id);
         let operation = manifest.node_operation(&request.operation)?;
@@ -283,6 +326,7 @@ impl ExternalNodePluginHost {
         adapter
             .initialize()
             .map_err(|failure| map_mcp_invocation_failure(&manifest.plugin_id, failure))?;
+        self.ensure_not_cancelled(&manifest.plugin_id)?;
 
         let discovered_tools = adapter
             .list_tools()
@@ -293,11 +337,13 @@ impl ExternalNodePluginHost {
             &request.operation,
             &discovered_tools,
         )?;
+        self.ensure_not_cancelled(&manifest.plugin_id)?;
 
         let call_result = adapter
             .call_tool(&request.operation, &request.input)
             .map_err(|failure| map_mcp_invocation_failure(&manifest.plugin_id, failure))?;
 
+        self.ensure_not_cancelled(&manifest.plugin_id)?;
         let output = normalize_mcp_tool_result(&manifest.plugin_id, call_result)?;
         validate_output_schema(&manifest.plugin_id, &operation.output_schema, &output)?;
 
@@ -305,6 +351,15 @@ impl ExternalNodePluginHost {
             output,
             result_state: None,
         })
+    }
+
+    fn ensure_not_cancelled(&self, plugin_id: &str) -> Result<(), ContractError> {
+        if self.cancellation.is_cancelled() {
+            return Err(ContractError::NodePluginCancelled {
+                plugin_id: plugin_id.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     fn resolve_executable_path(&self, manifest: &PluginManifest) -> Result<PathBuf, ContractError> {
@@ -539,6 +594,7 @@ fn create_mcp_session_adapter(
                 &manifest.plugin_id,
                 command,
                 stdio.args.clone(),
+                host.cancellation.clone(),
             )?))
         }
         McpTransportKind::StreamableHttp => {
@@ -555,6 +611,7 @@ fn create_mcp_session_adapter(
                 &manifest.plugin_id,
                 streamable_http.url.clone(),
                 headers,
+                host.cancellation.clone(),
             )?))
         }
     }
@@ -563,12 +620,18 @@ fn create_mcp_session_adapter(
 struct RmcpStdioSessionAdapter {
     command: PathBuf,
     args: Vec<String>,
+    cancellation: HostCancellation,
     runtime: TokioRuntime,
     service: Option<RunningService<RoleClient, ()>>,
 }
 
 impl RmcpStdioSessionAdapter {
-    fn new(plugin_id: &str, command: PathBuf, args: Vec<String>) -> Result<Self, ContractError> {
+    fn new(
+        plugin_id: &str,
+        command: PathBuf,
+        args: Vec<String>,
+        cancellation: HostCancellation,
+    ) -> Result<Self, ContractError> {
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
@@ -580,6 +643,7 @@ impl RmcpStdioSessionAdapter {
         Ok(Self {
             command,
             args,
+            cancellation,
             runtime,
             service: None,
         })
@@ -594,6 +658,8 @@ impl McpSessionAdapter for RmcpStdioSessionAdapter {
 
         let command_path = self.command.clone();
         let args = self.args.clone();
+        let cancellation = self.cancellation.clone();
+        let timeout = mcp_stdio_timeout();
         let service = self.runtime.block_on(async {
             let mut command = TokioCommand::new(&command_path);
             command.args(&args);
@@ -610,13 +676,14 @@ impl McpSessionAdapter for RmcpStdioSessionAdapter {
                     ),
                 })?;
 
-            tokio::time::timeout(mcp_stdio_timeout(), rmcp::service::serve_client((), transport))
+            await_mcp_request(cancellation, timeout, rmcp::service::serve_client((), transport))
                 .await
-                .map_err(|_| McpInvocationFailure::Timeout {
-                    detail: format!(
-                        "stdio MCP initialize request timed out after {:?}",
-                        mcp_stdio_timeout()
-                    ),
+                .map_err(|error| {
+                    map_mcp_request_guard(
+                        error,
+                        format!("stdio MCP initialize request timed out after {timeout:?}"),
+                        "stdio MCP initialize request was cancelled",
+                    )
                 })?
                 .map_err(|error| map_rmcp_client_initialize_error("stdio", error))
         })?;
@@ -625,6 +692,8 @@ impl McpSessionAdapter for RmcpStdioSessionAdapter {
     }
 
     fn list_tools(&mut self) -> Result<Vec<McpDiscoveredTool>, McpInvocationFailure> {
+        let cancellation = self.cancellation.clone();
+        let timeout = mcp_stdio_timeout();
         let service = self
             .service
             .as_mut()
@@ -634,12 +703,17 @@ impl McpSessionAdapter for RmcpStdioSessionAdapter {
 
         let tools = self
             .runtime
-            .block_on(async { tokio::time::timeout(mcp_stdio_timeout(), service.list_all_tools()).await })
-            .map_err(|_| McpInvocationFailure::Timeout {
-                detail: format!(
-                    "stdio MCP request to list tools timed out after {:?}",
-                    mcp_stdio_timeout()
-                ),
+            .block_on(await_mcp_request(
+                cancellation,
+                timeout,
+                service.list_all_tools(),
+            ))
+            .map_err(|error| {
+                map_mcp_request_guard(
+                    error,
+                    format!("stdio MCP request to list tools timed out after {timeout:?}"),
+                    "stdio MCP request to list tools was cancelled",
+                )
             })?
             .map_err(|error| map_rmcp_service_error("stdio", "list tools", error))?;
 
@@ -657,6 +731,8 @@ impl McpSessionAdapter for RmcpStdioSessionAdapter {
         tool_name: &str,
         arguments: &BTreeMap<String, serde_json::Value>,
     ) -> Result<McpToolCallResult, McpInvocationFailure> {
+        let cancellation = self.cancellation.clone();
+        let timeout = mcp_stdio_timeout();
         let service = self
             .service
             .as_mut()
@@ -672,12 +748,17 @@ impl McpSessionAdapter for RmcpStdioSessionAdapter {
         let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments);
         let result = self
             .runtime
-            .block_on(async { tokio::time::timeout(mcp_stdio_timeout(), service.call_tool(params)).await })
-            .map_err(|_| McpInvocationFailure::Timeout {
-                detail: format!(
-                    "stdio MCP request to call tool timed out after {:?}",
-                    mcp_stdio_timeout()
-                ),
+            .block_on(await_mcp_request(
+                cancellation,
+                timeout,
+                service.call_tool(params),
+            ))
+            .map_err(|error| {
+                map_mcp_request_guard(
+                    error,
+                    format!("stdio MCP request to call tool timed out after {timeout:?}"),
+                    "stdio MCP request to call tool was cancelled",
+                )
             })?
             .map_err(|error| map_rmcp_service_error("stdio", "call tool", error))?;
 
@@ -714,6 +795,7 @@ impl Drop for RmcpStdioSessionAdapter {
 struct RmcpStreamableHttpSessionAdapter {
     url: String,
     headers: HashMap<HeaderName, HeaderValue>,
+    cancellation: HostCancellation,
     runtime: TokioRuntime,
     service: Option<RunningService<RoleClient, ()>>,
 }
@@ -723,6 +805,7 @@ impl RmcpStreamableHttpSessionAdapter {
         plugin_id: &str,
         url: String,
         headers: HashMap<HeaderName, HeaderValue>,
+        cancellation: HostCancellation,
     ) -> Result<Self, ContractError> {
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -735,6 +818,7 @@ impl RmcpStreamableHttpSessionAdapter {
         Ok(Self {
             url,
             headers,
+            cancellation,
             runtime,
             service: None,
         })
@@ -749,6 +833,7 @@ impl McpSessionAdapter for RmcpStreamableHttpSessionAdapter {
 
         let url = self.url.clone();
         let headers = self.headers.clone();
+        let cancellation = self.cancellation.clone();
         let service = self.runtime.block_on(async move {
             let mut config = StreamableHttpClientTransportConfig::with_uri(url);
             if !headers.is_empty() {
@@ -756,15 +841,20 @@ impl McpSessionAdapter for RmcpStreamableHttpSessionAdapter {
             }
             let transport = StreamableHttpClientTransport::from_config(config);
 
-            tokio::time::timeout(
+            await_mcp_request(
+                cancellation,
                 MCP_STREAMABLE_HTTP_TIMEOUT,
                 rmcp::service::serve_client((), transport),
             )
             .await
-            .map_err(|_| McpInvocationFailure::Timeout {
-                detail: format!(
-                    "streamable HTTP MCP initialize request timed out after {MCP_STREAMABLE_HTTP_TIMEOUT:?}"
-                ),
+            .map_err(|error| {
+                map_mcp_request_guard(
+                    error,
+                    format!(
+                        "streamable HTTP MCP initialize request timed out after {MCP_STREAMABLE_HTTP_TIMEOUT:?}"
+                    ),
+                    "streamable HTTP MCP initialize request was cancelled",
+                )
             })?
             .map_err(|error| map_rmcp_client_initialize_error("streamable HTTP", error))
         })?;
@@ -774,6 +864,7 @@ impl McpSessionAdapter for RmcpStreamableHttpSessionAdapter {
     }
 
     fn list_tools(&mut self) -> Result<Vec<McpDiscoveredTool>, McpInvocationFailure> {
+        let cancellation = self.cancellation.clone();
         let service = self
             .service
             .as_mut()
@@ -784,13 +875,19 @@ impl McpSessionAdapter for RmcpStreamableHttpSessionAdapter {
 
         let tools = self
             .runtime
-            .block_on(async {
-                tokio::time::timeout(MCP_STREAMABLE_HTTP_TIMEOUT, service.list_all_tools()).await
-            })
-            .map_err(|_| McpInvocationFailure::Timeout {
-                detail: format!(
-                    "streamable HTTP MCP request to list tools timed out after {MCP_STREAMABLE_HTTP_TIMEOUT:?}"
-                ),
+            .block_on(await_mcp_request(
+                cancellation,
+                MCP_STREAMABLE_HTTP_TIMEOUT,
+                service.list_all_tools(),
+            ))
+            .map_err(|error| {
+                map_mcp_request_guard(
+                    error,
+                    format!(
+                        "streamable HTTP MCP request to list tools timed out after {MCP_STREAMABLE_HTTP_TIMEOUT:?}"
+                    ),
+                    "streamable HTTP MCP request to list tools was cancelled",
+                )
             })?
             .map_err(|error| map_rmcp_service_error("streamable HTTP", "list tools", error))?;
 
@@ -808,6 +905,7 @@ impl McpSessionAdapter for RmcpStreamableHttpSessionAdapter {
         tool_name: &str,
         arguments: &BTreeMap<String, serde_json::Value>,
     ) -> Result<McpToolCallResult, McpInvocationFailure> {
+        let cancellation = self.cancellation.clone();
         let service = self
             .service
             .as_mut()
@@ -824,13 +922,19 @@ impl McpSessionAdapter for RmcpStreamableHttpSessionAdapter {
         let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments);
         let result = self
             .runtime
-            .block_on(async {
-                tokio::time::timeout(MCP_STREAMABLE_HTTP_TIMEOUT, service.call_tool(params)).await
-            })
-            .map_err(|_| McpInvocationFailure::Timeout {
-                detail: format!(
-                    "streamable HTTP MCP request to call tool timed out after {MCP_STREAMABLE_HTTP_TIMEOUT:?}"
-                ),
+            .block_on(await_mcp_request(
+                cancellation,
+                MCP_STREAMABLE_HTTP_TIMEOUT,
+                service.call_tool(params),
+            ))
+            .map_err(|error| {
+                map_mcp_request_guard(
+                    error,
+                    format!(
+                        "streamable HTTP MCP request to call tool timed out after {MCP_STREAMABLE_HTTP_TIMEOUT:?}"
+                    ),
+                    "streamable HTTP MCP request to call tool was cancelled",
+                )
             })?
             .map_err(|error| map_rmcp_service_error("streamable HTTP", "call tool", error))?;
 
@@ -1301,6 +1405,51 @@ fn extract_error_detail_from_value(value: &serde_json::Value) -> Option<String> 
     }
 }
 
+fn map_subprocess_failure(
+    manifest: &PluginManifest,
+    executable: PathBuf,
+    limits: PluginProcessLimits,
+    failure: PluginProcessFailure,
+) -> ContractError {
+    match failure {
+        PluginProcessFailure::TimedOut => ContractError::NodePluginTimedOut {
+            plugin_id: manifest.plugin_id.clone(),
+        },
+        PluginProcessFailure::Cancelled => ContractError::NodePluginCancelled {
+            plugin_id: manifest.plugin_id.clone(),
+        },
+        PluginProcessFailure::StdoutLimitExceeded => ContractError::NodePluginOutputLimitExceeded {
+            plugin_id: manifest.plugin_id.clone(),
+            stream: "stdout",
+            max_bytes: limits.max_stdout_bytes,
+        },
+        PluginProcessFailure::StderrLimitExceeded => ContractError::NodePluginOutputLimitExceeded {
+            plugin_id: manifest.plugin_id.clone(),
+            stream: "stderr",
+            max_bytes: limits.max_stderr_bytes,
+        },
+        PluginProcessFailure::FrameLimitExceeded => ContractError::NodePluginProtocolContractViolation {
+            plugin_id: manifest.plugin_id.clone(),
+            detail: "plugin output frame exceeded its configured limit".to_owned(),
+        },
+        PluginProcessFailure::Spawn(source) => ContractError::NodePluginSpawnFailed {
+            plugin_id: manifest.plugin_id.clone(),
+            executable,
+            source,
+        },
+        PluginProcessFailure::Io(source) => ContractError::NodePluginProcessIo {
+            plugin_id: manifest.plugin_id.clone(),
+            operation: "execute bounded plugin process",
+            source,
+        },
+        PluginProcessFailure::Exit { code, stderr } => ContractError::NodePluginProcessFailed {
+            plugin_id: manifest.plugin_id.clone(),
+            exit_code: code,
+            stderr,
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeInvokerKind {
     LegacySubprocess,
@@ -1357,10 +1506,8 @@ fn map_mcp_invocation_failure(plugin_id: &str, failure: McpInvocationFailure) ->
             operation: "execute mcp node invocation with timeout guard",
             source: std::io::Error::new(std::io::ErrorKind::TimedOut, detail),
         },
-        McpInvocationFailure::Cancelled { detail } => ContractError::NodePluginProcessIo {
+        McpInvocationFailure::Cancelled { .. } => ContractError::NodePluginCancelled {
             plugin_id: plugin_id.to_owned(),
-            operation: "execute mcp node invocation with cancellation guard",
-            source: std::io::Error::new(std::io::ErrorKind::Interrupted, detail),
         },
         McpInvocationFailure::Protocol { detail } => {
             ContractError::NodePluginProtocolContractViolation {
@@ -1658,6 +1805,24 @@ mod tests {
     }
 
     #[test]
+    fn mcp_request_guard_observes_host_cancellation() {
+        let cancellation = HostCancellation::default();
+        cancellation.shutdown();
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+
+        let result = runtime.block_on(await_mcp_request(
+            cancellation,
+            Duration::from_secs(1),
+            std::future::pending::<()>(),
+        ));
+
+        assert_eq!(result, Err(McpRequestGuardError::Cancelled));
+    }
+
+    #[test]
     fn mcp_error_mapping_unit() {
         let timeout = map_mcp_invocation_failure(
             "mcp-quote",
@@ -1681,10 +1846,7 @@ mod tests {
         );
         assert!(matches!(
             cancelled,
-            ContractError::NodePluginProcessIo {
-                operation: "execute mcp node invocation with cancellation guard",
-                ..
-            }
+            ContractError::NodePluginCancelled { plugin_id } if plugin_id == "mcp-quote"
         ));
 
         let protocol = map_mcp_invocation_failure(
