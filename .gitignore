@@ -84,3 +84,4 @@ mcp-debug.log
 /.opencode/
 /.gstack/
 .alma-snapshots
+.pi/
