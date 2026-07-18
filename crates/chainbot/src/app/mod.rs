@@ -11,4 +11,5 @@ pub mod cli;
 pub mod definitions;
 pub(crate) mod runtime;
 
-pub use runtime::execution::{ExecutionPlane, PluginActivationRuntime};
+pub use runtime::execution::ExecutionPlane;
+pub use runtime::plugin_activation::PluginActivationRuntime;
