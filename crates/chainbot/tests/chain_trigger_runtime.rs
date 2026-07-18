@@ -238,7 +238,7 @@ fn chain_trigger_runtime_rejects_missing_required_allowed_origins_activation() {
         secrets_root_dir: secrets_root,
     };
 
-    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
+    let error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         vec![definition],
         vec![manifest],
@@ -246,11 +246,7 @@ fn chain_trigger_runtime_rejects_missing_required_allowed_origins_activation() {
         BTreeMap::new(),
         1_710_100_000_000,
     )
-    .expect("trigger plane should open");
-
-    let error = plane
-        .collect_run_requests(1_710_100_000_010)
-        .expect_err("missing trigger activation must fail closed");
+    .expect_err("missing trigger activation must fail closed before acceptance");
     assert!(matches!(
         error,
         chainbot::domain::trigger::TriggerPlaneError::Contract(

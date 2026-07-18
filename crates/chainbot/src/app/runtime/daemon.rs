@@ -883,13 +883,8 @@ pub(crate) fn serve_once_with_lease(
     let trigger_store = RuntimeStateStore::open(&runtime.storage_config, accepted_at_ms)
         .map_err(|error| map_runtime_state_error("open trigger runtime state store", error))?;
 
-    let mut trigger_plane = TriggerPlane::open_with_store_acceptance_only(
-        trigger_store,
-        trigger_definitions,
-        trigger_manifests,
-        policy,
-        builtin_events,
-    )
+    let mut trigger_plane =
+        TriggerPlane::open_with_store(trigger_store, trigger_definitions, builtin_events)
     .map_err(map_trigger_error)?;
 
     let run_requests = trigger_plane
