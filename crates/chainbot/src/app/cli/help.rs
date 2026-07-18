@@ -540,7 +540,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
         HelpTopic::Validate => render_help_card(
             "validate",
             "Validate config and package contracts",
-            &["chainbot validate"],
+            &["chainbot validate [--json]"],
             &[
                 "you want to confirm a root is structurally valid",
                 "you changed config and want a fast contract check before `run` or `serve`",
@@ -555,7 +555,8 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
             &[],
             &["workflow runs", "trigger snapshots"],
             &[
-                "prints `validated root: <path>` on success",
+                "prints `validated root: <path>` and compatibility warnings on success",
+                "prints `{ valid, root, warnings }` with `--json`",
                 "prints file-aware validation diagnostics on failure",
             ],
             &[
@@ -576,6 +577,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
             ],
             &[
                 "chainbot validate",
+                "chainbot validate --json",
                 "CHAINBOT_CONFIG_DIR=/tmp/demo-root chainbot validate",
             ],
             &["status", "run", "serve", "catalog"],

@@ -18,7 +18,8 @@ pub(crate) mod view;
 
 pub(crate) use commands::{
     build_trigger_host_policy, collect_external_trigger_manifests, current_time_ms,
-    execute_single_run, load_replayable_trigger_requests, map_ingress_error,
+    execute_single_run_with_fence_and_cancellation, load_replayable_trigger_requests,
+    map_ingress_error,
     map_runtime_state_error, merge_trigger_requests, normalized_request_from_trigger,
     RuntimeContext,
 };

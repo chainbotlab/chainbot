@@ -122,7 +122,15 @@ pub enum PluginKind {
 #[serde(rename_all = "snake_case")]
 pub enum TriggerRuntimeLifecycle {
     ProcessShortLived,
+    ProcessDaemonSession,
     WasmDaemonPersistentSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WasmTriggerAbi {
+    ComponentV1,
+    CoreV0,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -159,6 +167,8 @@ pub struct ExternalTriggerRuntimeContract {
     pub host_error_categories: Vec<TriggerHostErrorCategory>,
     #[serde(default)]
     pub module: Option<String>,
+    #[serde(default)]
+    pub abi: Option<WasmTriggerAbi>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -731,6 +741,14 @@ fn validate_external_trigger_runtime_contract(
 
     match lifecycle {
         TriggerRuntimeLifecycle::ProcessShortLived => {
+            if trigger_runtime.abi.is_some() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.abi",
+                    detail: "process_short_lived lifecycle does not allow trigger_runtime.abi"
+                        .to_owned(),
+                });
+            }
             validate_non_empty(
                 executable.unwrap_or_default(),
                 "plugin.executable",
@@ -757,6 +775,45 @@ fn validate_external_trigger_runtime_contract(
                     plugin_id: plugin_id.to_owned(),
                     field: "plugin.trigger_runtime.durable_ack",
                     detail: "process_short_lived lifecycle requires durable_ack=caller_scope"
+                        .to_owned(),
+                });
+            }
+        }
+        TriggerRuntimeLifecycle::ProcessDaemonSession => {
+            if trigger_runtime.abi.is_some() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.abi",
+                    detail: "process_daemon_session lifecycle does not allow trigger_runtime.abi"
+                        .to_owned(),
+                });
+            }
+            validate_non_empty(
+                executable.unwrap_or_default(),
+                "plugin.executable",
+                plugin_id,
+            )?;
+            if trigger_runtime.module.is_some() {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.module",
+                    detail: "process_daemon_session lifecycle does not allow trigger_runtime.module"
+                        .to_owned(),
+                });
+            }
+            if push_callback != TriggerPushCallbackSemantics::InlineResponse {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.push_callback",
+                    detail: "process_daemon_session lifecycle requires push_callback=inline_response"
+                        .to_owned(),
+                });
+            }
+            if durable_ack != TriggerDurableAckSemantics::AfterStorePersist {
+                return Err(ContractError::NodePluginInvalidField {
+                    plugin_id: plugin_id.to_owned(),
+                    field: "plugin.trigger_runtime.durable_ack",
+                    detail: "process_daemon_session lifecycle requires durable_ack=after_store_persist"
                         .to_owned(),
                 });
             }
@@ -1162,11 +1219,11 @@ fn validate_allowed_origin(
             field,
             detail: format!("invalid allowed origin {origin}: {source}"),
         })?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return Err(ContractError::NodePluginInvalidField {
             plugin_id: plugin_id.to_owned(),
             field,
-            detail: format!("allowed origin {origin} must use http or https"),
+            detail: format!("allowed origin {origin} must use http, https, ws, or wss"),
         });
     }
     if parsed.host_str().is_none() {
@@ -1348,6 +1405,7 @@ mod tests {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         }
     }
 
@@ -1362,6 +1420,7 @@ mod tests {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: Some("bin/external_trigger.wasm".to_owned()),
+            abi: Some(WasmTriggerAbi::ComponentV1),
         }
     }
 
@@ -1588,6 +1647,26 @@ mod tests {
     }
 
     #[test]
+    fn plugin_manifest_accepts_release_n_core_v0_compatibility() {
+        let mut manifest = base_manifest();
+        manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
+        manifest.capabilities = vec!["trigger.listen.event".to_owned()];
+        manifest.executable = None;
+        let mut runtime = wasm_persistent_contract();
+        runtime.abi = None;
+        manifest.trigger_runtime = Some(runtime);
+        manifest.event_schema = Some(PluginEventSchemaDescriptor {
+            summary: Some("tick".to_owned()),
+            fields: vec!["symbol".to_owned(), "price".to_owned()],
+            ..PluginEventSchemaDescriptor::default()
+        });
+
+        manifest
+            .validate()
+            .expect("missing wasm ABI should remain valid during Release N");
+    }
+
+    #[test]
     fn plugin_manifest_accepts_wasm_persistent_trigger_runtime_contract() {
         let mut manifest = base_manifest();
         manifest.kind = PLUGIN_KIND_EXTERNAL_TRIGGER.to_owned();
@@ -1642,6 +1721,7 @@ mod tests {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         });
         manifest.event_schema = Some(PluginEventSchemaDescriptor {
             summary: Some("tick".to_owned()),

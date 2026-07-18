@@ -13,16 +13,20 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use crate::app::runtime::external_triggers::wasmtime::push_event_with_host_callback;
+use crate::app::runtime::external_triggers::process_listener::ProcessTriggerSession;
 use crate::app::runtime::external_triggers::wasmtime::{
     host_push_result_from_staged_append, map_control_flow_source_to_push_outcome,
-    HostPushControlFlowSource, HostPushError, HostPushErrorSource, HostPushOutcome, HostPushResult,
-    TriggerPushHost, WasmGuestTransportEnvelope, WasmTriggerSession, WasmTriggerSessionConfig,
+    ComponentWasmTriggerSession, HostPushControlFlowSource, HostPushError, HostPushErrorSource,
+    HostPushOutcome, HostPushResult, TriggerPushHost, WasmGuestTransportEnvelope,
+    WasmTriggerSession, WasmTriggerSessionConfig,
 };
 use crate::domain::state::StagedTriggerEventRecord;
 use crate::domain::trigger::{TriggerDefinition, TriggerKind};
 use crate::errors::ContractError;
 use crate::infrastructure::state::RuntimeStateStore;
-use crate::plugin::{PluginManifest, TriggerRuntimeLifecycle};
+use crate::plugin::{
+    HostCancellation, PluginManifest, TriggerRuntimeLifecycle, WasmTriggerAbi,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalTriggerSupervisorBudget {
@@ -54,7 +58,9 @@ pub struct ExternalTriggerPollBudget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalTriggerSessionRuntime {
     Process,
+    ProcessDaemon,
     Wasm,
+    WasmComponent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +95,9 @@ pub struct ExternalTriggerSession {
     pub state: ExternalTriggerSessionState,
     pub started_at_ms: i64,
     pub push_control_state: ExternalTriggerPushControlState,
+    pub process_session: Option<ProcessTriggerSession>,
     pub wasm_session: Option<WasmTriggerSession>,
+    pub component_session: Option<ComponentWasmTriggerSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +113,7 @@ pub struct ExternalTriggerSupervisor {
     sessions: BTreeMap<String, ExternalTriggerSession>,
     settings: ExternalTriggerSupervisorSettings,
     next_cycle_start_index: usize,
+    cancellation: HostCancellation,
 }
 
 impl ExternalTriggerSupervisor {
@@ -121,14 +130,31 @@ impl ExternalTriggerSupervisor {
             sessions: BTreeMap::new(),
             settings,
             next_cycle_start_index: 0,
+            cancellation: HostCancellation::default(),
         }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: HostCancellation) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub fn sessions(&self) -> &BTreeMap<String, ExternalTriggerSession> {
         &self.sessions
     }
 
+    #[cfg(test)]
     pub fn start_session(&mut self, spec: ExternalTriggerSessionSpec, now_ms: i64) -> bool {
+        self.try_start_session_with_process(spec, now_ms, None)
+            .expect("test external trigger session should start")
+    }
+
+    fn try_start_session_with_process(
+        &mut self,
+        spec: ExternalTriggerSessionSpec,
+        now_ms: i64,
+        process_session: Option<ProcessTriggerSession>,
+    ) -> Result<bool, ContractError> {
         let ExternalTriggerSessionSpec {
             trigger_id,
             plugin_id,
@@ -136,18 +162,64 @@ impl ExternalTriggerSupervisor {
             wasm_component,
         } = spec;
         if self.sessions.contains_key(&trigger_id) {
-            return false;
+            return Ok(false);
         }
 
-        let wasm_session = matches!(runtime, ExternalTriggerSessionRuntime::Wasm).then(|| {
-            WasmTriggerSession::new_with_config(
-                trigger_id.clone(),
-                plugin_id.clone(),
-                wasm_component.unwrap_or_default(),
-                now_ms,
-                self.settings.wasm_session,
+        let component_path = wasm_component.clone().unwrap_or_default();
+        let wasm_session = if runtime == ExternalTriggerSessionRuntime::Wasm {
+            #[cfg(test)]
+            {
+                Some(WasmTriggerSession::new_with_config(
+                    trigger_id.clone(),
+                    plugin_id.clone(),
+                    component_path.clone(),
+                    now_ms,
+                    self.settings.wasm_session,
+                ))
+            }
+            #[cfg(not(test))]
+            {
+                Some(
+                    WasmTriggerSession::try_new_with_config(
+                        trigger_id.clone(),
+                        plugin_id.clone(),
+                        component_path.clone(),
+                        now_ms,
+                        self.settings.wasm_session,
+                    )
+                    .map_err(|error| ContractError::TriggerPluginWasmHostFailure {
+                        plugin_id: plugin_id.clone(),
+                        operation: "compile or instantiate core_v0",
+                        detail: error.to_string(),
+                    })?,
+                )
+            }
+        } else {
+            None
+        };
+        let component_session = if runtime == ExternalTriggerSessionRuntime::WasmComponent {
+            Some(
+                ComponentWasmTriggerSession::try_new_with_config(
+                    component_path,
+                    now_ms,
+                    self.settings.wasm_session,
+                )
+                .map_err(|error| ContractError::TriggerPluginWasmHostFailure {
+                    plugin_id: plugin_id.clone(),
+                    operation: "compile or instantiate component_v1",
+                    detail: error.to_string(),
+                })?,
             )
-        });
+        } else {
+            None
+        };
+
+        if runtime == ExternalTriggerSessionRuntime::ProcessDaemon && process_session.is_none() {
+            return Err(ContractError::TriggerPluginProtocolContractViolation {
+                plugin_id,
+                detail: "managed process session requires a runtime owner".to_owned(),
+            });
+        }
 
         self.sessions.insert(
             trigger_id.clone(),
@@ -159,14 +231,27 @@ impl ExternalTriggerSupervisor {
                 state: ExternalTriggerSessionState::Active,
                 started_at_ms: now_ms,
                 push_control_state: ExternalTriggerPushControlState::Ready,
+                process_session,
                 wasm_session,
+                component_session,
             },
         );
-        true
+        Ok(true)
     }
 
+    #[cfg(test)]
     pub fn stop_session(&mut self, trigger_id: &str) -> bool {
-        self.sessions.remove(trigger_id).is_some()
+        self.try_stop_session(trigger_id).unwrap_or(false)
+    }
+
+    fn try_stop_session(&mut self, trigger_id: &str) -> Result<bool, ContractError> {
+        let Some(mut session) = self.sessions.remove(trigger_id) else {
+            return Ok(false);
+        };
+        if let Some(process_session) = session.process_session.as_mut() {
+            process_session.shutdown("supervisor_reconcile")?;
+        }
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -217,7 +302,9 @@ impl ExternalTriggerSupervisor {
             state: session.state,
             started_at_ms: session.started_at_ms,
             push_control_state: session.push_control_state,
+            process_session: None,
             wasm_session: None,
+            component_session: None,
         };
 
         let mut host = DurableStagedEventHost {
@@ -226,17 +313,28 @@ impl ExternalTriggerSupervisor {
             decode_to_staged_record: &mut decode_to_staged_record,
         };
 
-        let Some(wasm_session) = session.wasm_session.as_mut() else {
-            return map_control_flow_source_to_push_outcome(HostPushControlFlowSource::LeaseLost);
+        let outcome = match session.runtime {
+            ExternalTriggerSessionRuntime::Wasm => session
+                .wasm_session
+                .as_mut()
+                .ok_or(())
+                .and_then(|wasm| wasm.execute_guest_turn(now_ms, &mut host).map_err(|_| ())),
+            ExternalTriggerSessionRuntime::WasmComponent => session
+                .component_session
+                .as_mut()
+                .ok_or(())
+                .and_then(|wasm| wasm.execute_guest_turn(now_ms, &mut host).map_err(|_| ())),
+            ExternalTriggerSessionRuntime::Process
+            | ExternalTriggerSessionRuntime::ProcessDaemon => Err(()),
         };
-
-        wasm_session
-            .execute_guest_turn(now_ms, &mut host)
-            .unwrap_or_else(|_| {
-                map_control_flow_source_to_push_outcome(
-                    HostPushControlFlowSource::DaemonShuttingDown,
-                )
-            })
+        if outcome.is_err() {
+            session.state = ExternalTriggerSessionState::Stopping;
+        }
+        outcome.unwrap_or_else(|_| {
+            map_control_flow_source_to_push_outcome(
+                HostPushControlFlowSource::DaemonShuttingDown,
+            )
+        })
     }
 
     pub fn stage_wasm_guest_turn(
@@ -358,6 +456,115 @@ impl ExternalTriggerSupervisor {
         push_event_with_host_callback(&mut host, event_bytes)
     }
 
+    pub(crate) fn drain_process_sessions(
+        &mut self,
+        definitions: &[TriggerDefinition],
+        state_store: &mut RuntimeStateStore,
+        now_ms: i64,
+    ) -> Result<usize, ContractError> {
+        let definitions = definitions
+            .iter()
+            .map(|definition| (definition.trigger_id.as_str(), definition))
+            .collect::<BTreeMap<_, _>>();
+        let mut staged = 0usize;
+        for session in self.sessions.values_mut() {
+            if session.runtime != ExternalTriggerSessionRuntime::ProcessDaemon {
+                continue;
+            }
+            let definition = definitions.get(session.trigger_id.as_str()).ok_or_else(|| {
+                ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: session.trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "managed process session is missing trigger definition".to_owned(),
+                }
+            })?;
+            let process_session = session.process_session.as_mut().ok_or_else(|| {
+                ContractError::TriggerPluginProtocolContractViolation {
+                    plugin_id: session.plugin_id.clone(),
+                    detail: "managed process session is missing its runtime owner".to_owned(),
+                }
+            })?;
+            staged = staged.saturating_add(process_session.drain(
+                state_store,
+                definition,
+                now_ms,
+            )?);
+        }
+        Ok(staged)
+    }
+
+    pub(crate) fn try_reconcile_with_process<F>(
+        &mut self,
+        desired: BTreeMap<String, ExternalTriggerSessionSpec>,
+        now_ms: i64,
+        mut start_process: F,
+    ) -> Result<ExternalTriggerReconcileReport, ContractError>
+    where
+        F: FnMut(&ExternalTriggerSessionSpec, HostCancellation)
+            -> Result<Option<ProcessTriggerSession>, ContractError>,
+    {
+        let existing_ids = self.sessions.keys().cloned().collect::<Vec<_>>();
+        let mut report = ExternalTriggerReconcileReport {
+            started: Vec::new(),
+            stopped: Vec::new(),
+            retained: Vec::new(),
+        };
+
+        for trigger_id in existing_ids {
+            let should_stop_for_disable = !desired.contains_key(&trigger_id);
+            let should_stop_for_lease_loss = self.cancellation.is_cancelled()
+                || self
+                    .sessions
+                    .get(&trigger_id)
+                    .is_some_and(|session| session_is_lease_lost(session, &self.owner_id));
+            if should_stop_for_lease_loss
+                && let Some(session) = self.sessions.get_mut(&trigger_id)
+            {
+                session.state = ExternalTriggerSessionState::Stopping;
+                session.push_control_state = ExternalTriggerPushControlState::LeaseLost;
+            }
+            if (should_stop_for_disable || should_stop_for_lease_loss)
+                && self.try_stop_session(&trigger_id)?
+            {
+                report.stopped.push(trigger_id);
+            }
+        }
+
+        if self.cancellation.is_cancelled() {
+            return Ok(report);
+        }
+
+        for (trigger_id, spec) in desired {
+            if let Some(session) = self.sessions.get_mut(&trigger_id) {
+                if session_matches_spec(session, &spec, &self.owner_id) {
+                    if let Some(wasm_session) = session.wasm_session.as_mut() {
+                        wasm_session.mark_reconciled(now_ms);
+                    }
+                    if let Some(component_session) = session.component_session.as_mut() {
+                        component_session.mark_reconciled(now_ms);
+                    }
+                    report.retained.push(trigger_id);
+                    continue;
+                }
+            }
+
+            if self.try_stop_session(&trigger_id)? {
+                report.stopped.push(trigger_id.clone());
+            }
+            let process_session = if spec.runtime == ExternalTriggerSessionRuntime::ProcessDaemon {
+                start_process(&spec, self.cancellation.clone())?
+            } else {
+                None
+            };
+            if self.try_start_session_with_process(spec, now_ms, process_session)? {
+                report.started.push(trigger_id);
+            }
+        }
+
+        Ok(report)
+    }
+
+    #[cfg(test)]
     pub fn reconcile(
         &mut self,
         desired: BTreeMap<String, ExternalTriggerSessionSpec>,
@@ -377,11 +584,11 @@ impl ExternalTriggerSupervisor {
                 .get(&trigger_id)
                 .is_some_and(|session| session_is_lease_lost(session, &self.owner_id));
 
-            if should_stop_for_lease_loss {
-                if let Some(session) = self.sessions.get_mut(&trigger_id) {
-                    session.state = ExternalTriggerSessionState::Stopping;
-                    session.push_control_state = ExternalTriggerPushControlState::LeaseLost;
-                }
+            if should_stop_for_lease_loss
+                && let Some(session) = self.sessions.get_mut(&trigger_id)
+            {
+                session.state = ExternalTriggerSessionState::Stopping;
+                session.push_control_state = ExternalTriggerPushControlState::LeaseLost;
             }
 
             if (should_stop_for_disable || should_stop_for_lease_loss)
@@ -396,6 +603,9 @@ impl ExternalTriggerSupervisor {
                 if session_matches_spec(session, &spec, &self.owner_id) {
                     if let Some(wasm_session) = session.wasm_session.as_mut() {
                         wasm_session.mark_reconciled(now_ms);
+                    }
+                    if let Some(component_session) = session.component_session.as_mut() {
+                        component_session.mark_reconciled(now_ms);
                     }
                     report.retained.push(trigger_id);
                     continue;
@@ -427,11 +637,25 @@ fn session_matches_spec(
         return false;
     }
 
+    if session.runtime == ExternalTriggerSessionRuntime::ProcessDaemon {
+        let expected_identity = spec.wasm_component.as_deref().unwrap_or_default();
+        return session
+            .process_session
+            .as_ref()
+            .is_some_and(|process| process.is_active() && process.identity() == expected_identity);
+    }
+    let expected_component = spec.wasm_component.as_deref().unwrap_or_default();
+    if session.runtime == ExternalTriggerSessionRuntime::WasmComponent {
+        return session
+            .component_session
+            .as_ref()
+            .map(ComponentWasmTriggerSession::component)
+            == Some(expected_component);
+    }
     if session.runtime != ExternalTriggerSessionRuntime::Wasm {
         return true;
     }
 
-    let expected_component = spec.wasm_component.as_deref().unwrap_or_default();
     session
         .wasm_session
         .as_ref()
@@ -451,7 +675,10 @@ fn classify_push_control_flow_source(
     if session.owner_id != expected_owner_id {
         return Some(HostPushControlFlowSource::LeaseLost);
     }
-    if session.runtime != ExternalTriggerSessionRuntime::Wasm {
+    if !matches!(
+        session.runtime,
+        ExternalTriggerSessionRuntime::Wasm | ExternalTriggerSessionRuntime::WasmComponent
+    ) {
         return Some(HostPushControlFlowSource::LeaseLost);
     }
 
@@ -460,7 +687,7 @@ fn classify_push_control_flow_source(
     } else {
         None
     };
-    state_source.or_else(|| match session.push_control_state {
+    state_source.or(match session.push_control_state {
         ExternalTriggerPushControlState::Ready => None,
         #[cfg(test)]
         ExternalTriggerPushControlState::QueueSaturated => {
@@ -568,13 +795,29 @@ pub fn build_desired_external_trigger_sessions(
             .as_ref()
             .and_then(|runtime| runtime.lifecycle)
         {
+            Some(TriggerRuntimeLifecycle::ProcessDaemonSession) => {
+                ExternalTriggerSessionRuntime::ProcessDaemon
+            }
             Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession) => {
-                ExternalTriggerSessionRuntime::Wasm
+                if plugin
+                    .trigger_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.abi)
+                    == Some(WasmTriggerAbi::ComponentV1)
+                {
+                    ExternalTriggerSessionRuntime::WasmComponent
+                } else {
+                    ExternalTriggerSessionRuntime::Wasm
+                }
             }
             _ => ExternalTriggerSessionRuntime::Process,
         };
 
-        let wasm_component = resolve_wasm_module_for_session(plugin)?;
+        let wasm_component = if runtime == ExternalTriggerSessionRuntime::ProcessDaemon {
+            Some(process_session_identity(definition, plugin))
+        } else {
+            resolve_wasm_module_for_session(plugin)?
+        };
 
         desired.insert(
             definition.trigger_id.clone(),
@@ -588,6 +831,13 @@ pub fn build_desired_external_trigger_sessions(
     }
 
     Ok(desired)
+}
+
+fn process_session_identity(
+    definition: &TriggerDefinition,
+    plugin: &PluginManifest,
+) -> String {
+    format!("{definition:?}|{plugin:?}")
 }
 
 fn resolve_wasm_module_for_session(
@@ -1143,6 +1393,26 @@ mod tests {
     }
 
     #[test]
+    fn process_daemon_session_requires_runtime_owner() {
+        let mut supervisor = ExternalTriggerSupervisor::new("daemon-owner");
+        let error = supervisor
+            .try_start_session_with_process(
+                ExternalTriggerSessionSpec {
+                    trigger_id: String::from("tr-process-daemon"),
+                    plugin_id: String::from("plugin-process"),
+                    runtime: ExternalTriggerSessionRuntime::ProcessDaemon,
+                    wasm_component: None,
+                },
+                100,
+                None,
+            )
+            .expect_err("managed process session without owner should be rejected");
+
+        assert!(error.to_string().contains("runtime owner"));
+        assert!(supervisor.sessions().is_empty());
+    }
+
+    #[test]
     fn reconcile_stops_disabled_trigger_sessions_and_removes_registry_entry() {
         let mut supervisor = ExternalTriggerSupervisor::new("daemon-owner");
         assert!(supervisor.start_session(
@@ -1654,6 +1924,7 @@ mod tests {
                         memories: 4,
                         trap_on_grow_failure: true,
                     },
+                fuel_per_turn: 1_000_000,
             },
         };
         let mut supervisor = ExternalTriggerSupervisor::with_settings("daemon-owner", settings);
@@ -1676,14 +1947,48 @@ mod tests {
     }
 
     #[test]
+    fn build_desired_sessions_selects_component_v1_explicitly() {
+        let definitions = vec![trigger_definition(
+            "tr-component",
+            true,
+            Some("plugin-component"),
+        )];
+        let mut manifest = plugin_manifest(
+            "plugin-component",
+            TriggerRuntimeLifecycle::WasmDaemonPersistentSession,
+        );
+        manifest
+            .trigger_runtime
+            .as_mut()
+            .expect("wasm fixture should have runtime")
+            .abi = Some(WasmTriggerAbi::ComponentV1);
+
+        let desired = build_desired_external_trigger_sessions(&definitions, &[manifest])
+            .expect("component desired state should build");
+
+        assert_eq!(
+            desired
+                .get("tr-component")
+                .expect("component session should exist")
+                .runtime,
+            ExternalTriggerSessionRuntime::WasmComponent
+        );
+    }
+
+    #[test]
     fn build_desired_sessions_matches_daemon_external_trigger_composition() {
         let definitions = vec![
             trigger_definition("tr-process", true, Some("plugin-process")),
+            trigger_definition("tr-managed", true, Some("plugin-managed")),
             trigger_definition("tr-wasm", true, Some("plugin-wasm")),
             trigger_definition("tr-disabled", false, Some("plugin-process")),
         ];
         let plugin_manifests = vec![
             plugin_manifest("plugin-process", TriggerRuntimeLifecycle::ProcessShortLived),
+            plugin_manifest(
+                "plugin-managed",
+                TriggerRuntimeLifecycle::ProcessDaemonSession,
+            ),
             plugin_manifest(
                 "plugin-wasm",
                 TriggerRuntimeLifecycle::WasmDaemonPersistentSession,
@@ -1693,7 +1998,7 @@ mod tests {
         let desired = build_desired_external_trigger_sessions(&definitions, &plugin_manifests)
             .expect("desired external trigger sessions should build");
 
-        assert_eq!(desired.len(), 2);
+        assert_eq!(desired.len(), 3);
         assert_eq!(
             desired
                 .get("tr-process")
@@ -1706,6 +2011,19 @@ mod tests {
             .expect("process trigger should be included")
             .wasm_component
             .is_none());
+        assert_eq!(
+            desired
+                .get("tr-managed")
+                .expect("managed trigger should be included")
+                .runtime,
+            ExternalTriggerSessionRuntime::ProcessDaemon
+        );
+        assert!(desired
+            .get("tr-managed")
+            .expect("managed trigger should be included")
+            .wasm_component
+            .as_deref()
+            .is_some_and(|identity| identity.contains("tr-managed")));
         assert_eq!(
             desired
                 .get("tr-wasm")
@@ -1752,6 +2070,12 @@ mod tests {
                 "process_short_lived",
                 "inline_response",
                 "caller_scope",
+                None,
+            ),
+            TriggerRuntimeLifecycle::ProcessDaemonSession => (
+                "process_daemon_session",
+                "inline_response",
+                "after_store_persist",
                 None,
             ),
             TriggerRuntimeLifecycle::WasmDaemonPersistentSession => (

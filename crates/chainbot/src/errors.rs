@@ -150,6 +150,9 @@ pub enum ContractError {
         workflow_id: String,
         blocked_node_ids: Vec<String>,
     },
+    WorkflowExecutionCancelled {
+        workflow_id: String,
+    },
     UnsupportedNodeKindForScheduler {
         workflow_id: String,
         node_id: String,
@@ -187,6 +190,10 @@ pub enum ContractError {
         context: &'static str,
         namespace: String,
         key: String,
+    },
+    AmbiguousLegacyNodeOutput {
+        key: String,
+        producer_ids: Vec<String>,
     },
     InvalidWorkflowNodeField {
         workflow_id: String,
@@ -266,6 +273,11 @@ pub enum ContractError {
         status: i32,
         stderr: String,
     },
+    TriggerPluginWasmHostFailure {
+        plugin_id: String,
+        operation: &'static str,
+        detail: String,
+    },
     TriggerPluginProtocolEncode {
         plugin_id: String,
         source: serde_json::Error,
@@ -325,6 +337,17 @@ pub enum ContractError {
         plugin_id: String,
         exit_code: Option<i32>,
         stderr: String,
+    },
+    NodePluginTimedOut {
+        plugin_id: String,
+    },
+    NodePluginCancelled {
+        plugin_id: String,
+    },
+    NodePluginOutputLimitExceeded {
+        plugin_id: String,
+        stream: &'static str,
+        max_bytes: usize,
     },
     NodePluginProtocolEncode {
         plugin_id: String,
@@ -658,6 +681,9 @@ impl Display for ContractError {
                 "workflow {workflow_id} scheduler stalled with blocked nodes: {}",
                 blocked_node_ids.join(", ")
             ),
+            Self::WorkflowExecutionCancelled { workflow_id } => {
+                write!(f, "workflow {workflow_id} execution was cancelled")
+            }
             Self::UnsupportedNodeKindForScheduler {
                 workflow_id,
                 node_id,
@@ -727,6 +753,11 @@ impl Display for ContractError {
             } => write!(
                 f,
                 "workflow {workflow_id} node {node_id} has invalid {context} reference {namespace}:{key}"
+            ),
+            Self::AmbiguousLegacyNodeOutput { key, producer_ids } => write!(
+                f,
+                "legacy node output reference node.{key} is ambiguous across producers: {}",
+                producer_ids.join(", ")
             ),
             Self::InvalidWorkflowNodeField {
                 workflow_id,
@@ -836,6 +867,14 @@ impl Display for ContractError {
                 f,
                 "trigger plugin {plugin_id} exited with status {status}: {stderr}"
             ),
+            Self::TriggerPluginWasmHostFailure {
+                plugin_id,
+                operation,
+                detail,
+            } => write!(
+                f,
+                "trigger plugin {plugin_id} wasm host failed to {operation}: {detail}"
+            ),
             Self::TriggerPluginProtocolEncode { plugin_id, source } => write!(
                 f,
                 "failed to encode trigger plugin {plugin_id} input JSON: {source}"
@@ -912,6 +951,20 @@ impl Display for ContractError {
                 "node plugin {plugin_id} exited with status {:?}: {}",
                 exit_code,
                 stderr.trim()
+            ),
+            Self::NodePluginTimedOut { plugin_id } => {
+                write!(f, "node plugin {plugin_id} exceeded its execution timeout")
+            }
+            Self::NodePluginCancelled { plugin_id } => {
+                write!(f, "node plugin {plugin_id} was cancelled")
+            }
+            Self::NodePluginOutputLimitExceeded {
+                plugin_id,
+                stream,
+                max_bytes,
+            } => write!(
+                f,
+                "node plugin {plugin_id} exceeded the {stream} output limit of {max_bytes} bytes"
             ),
             Self::NodePluginProtocolEncode { plugin_id, source } => write!(
                 f,

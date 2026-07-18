@@ -11,10 +11,23 @@ use serde::{Deserialize, Serialize};
 
 pub const SERVE_OWNER_ID_PREFIX: &str = "chainbot-serve-pid-";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeLeaseGrant {
+    pub owner_id: String,
+    pub generation: u64,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunExecutionFence {
+    pub owner_id: String,
+    pub lease_generation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseAcquireResult {
-    Acquired,
-    Renewed,
+    Acquired { grant: ServeLeaseGrant },
+    Renewed { grant: ServeLeaseGrant },
     Rejected {
         current_owner: String,
         expires_at_ms: i64,

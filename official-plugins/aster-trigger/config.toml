@@ -6,9 +6,9 @@ capabilities = ["trigger.listen.event"]
 executable = "bin/aster-trigger"
 
 [trigger_runtime]
-lifecycle = "process_short_lived"
+lifecycle = "process_daemon_session"
 push_callback = "inline_response"
-durable_ack = "caller_scope"
+durable_ack = "after_store_persist"
 host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
 
 [event_schema]

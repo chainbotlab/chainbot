@@ -402,6 +402,9 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
                     crate::plugin::TriggerRuntimeLifecycle::ProcessShortLived => {
                         String::from("process_short_lived")
                     }
+                    crate::plugin::TriggerRuntimeLifecycle::ProcessDaemonSession => {
+                        String::from("process_daemon_session")
+                    }
                     crate::plugin::TriggerRuntimeLifecycle::WasmDaemonPersistentSession => {
                         String::from("wasm_daemon_persistent_session")
                     }
@@ -412,14 +415,22 @@ fn build_plugin_detail(manifest: &PluginManifest) -> Result<PluginDetail, String
             let protocol = if is_wasm {
                 None
             } else {
+                let mut start_message = vec![
+                    String::from("protocol_version"),
+                    String::from("trigger_id"),
+                    String::from("source"),
+                    String::from("params"),
+                    String::from("resume_checkpoint"),
+                ];
+                if lifecycle.as_deref() == Some("process_daemon_session") {
+                    start_message.extend([
+                        String::from("activation"),
+                        String::from("heartbeat_interval_ms"),
+                        String::from("shutdown_grace_ms"),
+                    ]);
+                }
                 Some(PluginProtocolDetail {
-                    start_message: vec![
-                        String::from("protocol_version"),
-                        String::from("trigger_id"),
-                        String::from("source"),
-                        String::from("params"),
-                        String::from("resume_checkpoint"),
-                    ],
+                    start_message,
                     event_message: vec![
                         String::from("checkpoint"),
                         String::from("event_key"),

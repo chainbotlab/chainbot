@@ -33,7 +33,7 @@ fn sqlite_coordination_migrations() {
         store
             .applied_migration_versions()
             .expect("migration versions should load"),
-        vec![1]
+        vec![1, 2]
     );
 
     let sqlite = Connection::open(store.database_path()).expect("sqlite db should be readable");
@@ -64,7 +64,7 @@ fn sqlite_coordination_migrations() {
         reopened
             .applied_migration_versions()
             .expect("migration versions should still load"),
-        vec![1]
+        vec![1, 2]
     );
 }
 
@@ -77,7 +77,10 @@ fn serve_single_owner_lease() {
     let first = store
         .try_acquire_serve_lease("owner-alpha", 1_710_000_010_000, 5_000)
         .expect("first owner should acquire lease");
-    assert!(matches!(first, LeaseAcquireResult::Acquired));
+    assert!(matches!(
+        first,
+        LeaseAcquireResult::Acquired { grant } if grant.generation == 0
+    ));
 
     let second = store
         .try_acquire_serve_lease("owner-beta", 1_710_000_012_000, 5_000)
@@ -93,7 +96,10 @@ fn serve_single_owner_lease() {
     let renewed = store
         .try_acquire_serve_lease("owner-alpha", 1_710_000_013_000, 5_000)
         .expect("same owner should be able to renew lease");
-    assert!(matches!(renewed, LeaseAcquireResult::Renewed));
+    assert!(matches!(
+        renewed,
+        LeaseAcquireResult::Renewed { grant } if grant.generation == 0
+    ));
 
     assert!(!store
         .release_serve_lease("owner-beta")
@@ -105,7 +111,10 @@ fn serve_single_owner_lease() {
     let third = store
         .try_acquire_serve_lease("owner-beta", 1_710_000_014_000, 5_000)
         .expect("lease should be free after release");
-    assert!(matches!(third, LeaseAcquireResult::Acquired));
+    assert!(matches!(
+        third,
+        LeaseAcquireResult::Acquired { grant } if grant.generation == 1
+    ));
 }
 
 #[test]
@@ -150,7 +159,7 @@ fn serve_lease_can_transfer_after_expiry_across_restart_without_manual_release()
     let first = first_store
         .try_acquire_serve_lease("owner-alpha", 1_710_000_030_000, 5_000)
         .expect("first owner should acquire lease");
-    assert!(matches!(first, LeaseAcquireResult::Acquired));
+    assert!(matches!(first, LeaseAcquireResult::Acquired { .. }));
 
     let rejected = first_store
         .try_acquire_serve_lease("owner-beta", 1_710_000_030_100, 5_000)
@@ -163,7 +172,10 @@ fn serve_lease_can_transfer_after_expiry_across_restart_without_manual_release()
     let transferred = reopened_store
         .try_acquire_serve_lease("owner-beta", 1_710_000_036_001, 5_000)
         .expect("new owner should acquire after previous lease expiry");
-    assert!(matches!(transferred, LeaseAcquireResult::Acquired));
+    assert!(matches!(
+        transferred,
+        LeaseAcquireResult::Acquired { grant } if grant.generation == 1
+    ));
 
     let snapshot = reopened_store
         .inspect_serve_lease(1_710_000_036_002)
@@ -188,6 +200,8 @@ fn file_backed_runtime_logs() {
         status: RunStatus::Running,
         started_at_ms: 1_710_000_100_000,
         finished_at_ms: None,
+        owner_id: None,
+        lease_generation: None,
     };
     let summary_path = store
         .write_run_summary(&summary)
@@ -292,6 +306,8 @@ fn file_backed_run_summary_recovery() {
         status: RunStatus::Running,
         started_at_ms: 1_710_000_200_000,
         finished_at_ms: None,
+        owner_id: None,
+        lease_generation: None,
     };
 
     let staged_only_path = layout.staged_run_summary_path("run-recover");
@@ -324,6 +340,8 @@ fn file_backed_run_summary_recovery() {
         status: RunStatus::Succeeded,
         started_at_ms: 1_710_000_200_000,
         finished_at_ms: Some(1_710_000_205_000),
+        owner_id: None,
+        lease_generation: None,
     };
     store
         .write_run_summary(&committed_summary)
@@ -336,6 +354,8 @@ fn file_backed_run_summary_recovery() {
         status: RunStatus::Failed,
         started_at_ms: 1_710_000_200_000,
         finished_at_ms: Some(1_710_000_204_000),
+        owner_id: None,
+        lease_generation: None,
     };
     let stale_staged_path = layout.staged_run_summary_path("run-recover");
     fs::write(

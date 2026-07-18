@@ -53,7 +53,17 @@ fn runtime_state_backends_share_core_semantics() {
         let lease_result = store
             .try_acquire_serve_lease("owner-a", 1_710_900_000_000, 30_000)
             .expect("lease acquisition should succeed");
-        assert!(matches!(lease_result, LeaseAcquireResult::Acquired));
+        assert!(matches!(
+            lease_result,
+            LeaseAcquireResult::Acquired { grant } if grant.generation == 0
+        ));
+        let renewed = store
+            .try_acquire_serve_lease("owner-a", 1_710_900_000_500, 30_000)
+            .expect("same owner renewal should succeed");
+        assert!(matches!(
+            renewed,
+            LeaseAcquireResult::Renewed { grant } if grant.generation == 0
+        ));
         store
             .register_daemon_start("owner-a", Some(321), 1_710_900_000_000, 1_710_900_030_000)
             .expect("daemon session start should persist");
@@ -83,6 +93,13 @@ fn runtime_state_backends_share_core_semantics() {
         assert!(store
             .release_serve_lease("owner-a")
             .expect("lease release should succeed"));
+        let takeover = store
+            .try_acquire_serve_lease("owner-b", 1_710_900_001_400, 30_000)
+            .expect("released lease takeover should succeed");
+        assert!(matches!(
+            takeover,
+            LeaseAcquireResult::Acquired { grant } if grant.generation == 1
+        ));
 
         store
             .write_run_summary(&RunRecordSummary {
@@ -92,6 +109,8 @@ fn runtime_state_backends_share_core_semantics() {
                 status: RunStatus::Running,
                 started_at_ms: 1_710_900_002_000,
                 finished_at_ms: None,
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("run summary upsert should succeed");
         store
@@ -102,6 +121,8 @@ fn runtime_state_backends_share_core_semantics() {
                 status: RunStatus::Succeeded,
                 started_at_ms: 1_710_900_002_000,
                 finished_at_ms: Some(1_710_900_003_000),
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("run summary update should succeed");
         let summaries = store
@@ -209,6 +230,8 @@ fn runtime_state_backends_share_core_semantics() {
                 status: RunStatus::Failed,
                 started_at_ms: record.accepted_at_ms,
                 finished_at_ms: Some(record.accepted_at_ms.saturating_add(1_000)),
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("run summary for replay suppression should persist");
         assert!(store
@@ -351,6 +374,69 @@ fn runtime_state_backends_share_core_semantics() {
 }
 
 #[test]
+fn stale_lease_generation_cannot_finalize_a_run() {
+    let _guard = backend_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    for backend in available_backends() {
+        backend.ensure_initialized();
+        backend.reset();
+        let mut store = RuntimeStateStore::open(&backend.config, 1_710_905_000_000)
+            .unwrap_or_else(|error| panic!("{} store should open: {error}", backend.name));
+
+        let first_grant = match store
+            .try_acquire_serve_lease("owner-a", 1_710_905_000_000, 30_000)
+            .expect("first lease acquisition should succeed")
+        {
+            LeaseAcquireResult::Acquired { grant } => grant,
+            other => panic!("expected first lease grant, got {other:?}"),
+        };
+        let running = RunRecordSummary {
+            schema_version: "1.0.0".to_owned(),
+            run_id: format!("{}-fenced-run", backend.slug),
+            workflow_id: "wf-alpha".to_owned(),
+            status: RunStatus::Running,
+            started_at_ms: 1_710_905_000_010,
+            finished_at_ms: None,
+            owner_id: Some(first_grant.owner_id.clone()),
+            lease_generation: Some(first_grant.generation),
+        };
+        store
+            .write_run_summary(&running)
+            .expect("fenced running summary should persist");
+        assert!(store
+            .release_serve_lease("owner-a")
+            .expect("first owner should release its lease"));
+        assert!(matches!(
+            store
+                .try_acquire_serve_lease("owner-b", 1_710_905_000_020, 30_000)
+                .expect("successor lease acquisition should succeed"),
+            LeaseAcquireResult::Acquired { grant } if grant.generation == first_grant.generation + 1
+        ));
+
+        let stale_terminal = RunRecordSummary {
+            status: RunStatus::Succeeded,
+            finished_at_ms: Some(1_710_905_000_030),
+            ..running.clone()
+        };
+        assert!(
+            !store
+                .write_fenced_terminal_run_summary(&stale_terminal, 1_710_905_000_030)
+                .expect("stale conditional terminal update should evaluate"),
+            "{} stale lease generation must not finalize the run",
+            backend.name
+        );
+        let persisted = store
+            .list_run_summaries()
+            .expect("fenced summary should remain readable");
+        assert_eq!(persisted, vec![running]);
+
+        backend.reset();
+    }
+}
+
+#[test]
 fn runtime_state_backends_archive_expired_history() {
     let _guard = backend_lock()
         .lock()
@@ -372,6 +458,8 @@ fn runtime_state_backends_archive_expired_history() {
                 status: RunStatus::Succeeded,
                 started_at_ms: 1_710_000_000_000,
                 finished_at_ms: Some(1_710_000_010_000),
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("expired run summary should persist");
         store
@@ -497,6 +585,8 @@ fn runtime_state_backends_preserve_live_state_during_retention() {
                 status: RunStatus::Running,
                 started_at_ms: 1_710_000_000_000,
                 finished_at_ms: None,
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("running run should persist");
         store
@@ -507,6 +597,8 @@ fn runtime_state_backends_preserve_live_state_during_retention() {
                 status: RunStatus::Succeeded,
                 started_at_ms: 1_710_000_010_000,
                 finished_at_ms: Some(1_710_000_020_000),
+                owner_id: None,
+                lease_generation: None,
             })
             .expect("finished run should persist");
 
@@ -680,7 +772,7 @@ fn runtime_state_backends_allow_only_one_serve_lease_winner_under_contention() {
             .filter(|result| {
                 matches!(
                     result,
-                    LeaseAcquireResult::Acquired | LeaseAcquireResult::Renewed
+                    LeaseAcquireResult::Acquired { .. } | LeaseAcquireResult::Renewed { .. }
                 )
             })
             .count();

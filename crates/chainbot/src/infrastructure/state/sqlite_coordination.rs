@@ -16,14 +16,14 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::domain::state::{
-    LeaseAcquireResult, ServeLeaseSnapshot, ServeLeaseState, TriggerEventRecord,
+    LeaseAcquireResult, ServeLeaseGrant, ServeLeaseSnapshot, ServeLeaseState, TriggerEventRecord,
     TriggerSnapshotRecord, SERVE_OWNER_ID_PREFIX,
 };
 
 use super::file_store::StateLayout;
 
 const SERVE_LEASE_KEY: &str = "serve";
-const SQLITE_COORDINATION_SCHEMA_VERSION: i64 = 1;
+const SQLITE_COORDINATION_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoordinationTokenKind {
@@ -174,9 +174,15 @@ impl CoordinationStore {
 
         let current_lease = transaction
             .query_row(
-                "SELECT owner_id, expires_at_ms FROM serve_leases WHERE lease_key = ?1",
+                "SELECT owner_id, expires_at_ms, generation FROM serve_leases WHERE lease_key = ?1",
                 params![SERVE_LEASE_KEY],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|source| CoordinationError::Sqlite {
@@ -186,7 +192,7 @@ impl CoordinationStore {
             })?;
 
         let acquire_result = match current_lease {
-            Some((current_owner, current_expires_at_ms))
+            Some((current_owner, current_expires_at_ms, _))
                 if current_expires_at_ms > now_ms
                     && current_owner != owner_id
                     && serve_lease_owner_is_active(&current_owner) =>
@@ -196,15 +202,59 @@ impl CoordinationStore {
                     expires_at_ms: current_expires_at_ms,
                 }
             }
-            Some((current_owner, current_expires_at_ms))
+            Some((current_owner, current_expires_at_ms, generation))
                 if current_expires_at_ms > now_ms && current_owner == owner_id =>
             {
-                write_lease_row(&transaction, owner_id, now_ms, expires_at_ms, &self.db_path)?;
-                LeaseAcquireResult::Renewed
+                write_lease_row(
+                    &transaction,
+                    owner_id,
+                    now_ms,
+                    expires_at_ms,
+                    generation,
+                    &self.db_path,
+                )?;
+                LeaseAcquireResult::Renewed {
+                    grant: ServeLeaseGrant {
+                        owner_id: owner_id.to_owned(),
+                        generation: u64::try_from(generation).unwrap_or(0),
+                        expires_at_ms,
+                    },
+                }
             }
-            _ => {
-                write_lease_row(&transaction, owner_id, now_ms, expires_at_ms, &self.db_path)?;
-                LeaseAcquireResult::Acquired
+            Some((_, _, generation)) => {
+                let generation = generation.saturating_add(1);
+                write_lease_row(
+                    &transaction,
+                    owner_id,
+                    now_ms,
+                    expires_at_ms,
+                    generation,
+                    &self.db_path,
+                )?;
+                LeaseAcquireResult::Acquired {
+                    grant: ServeLeaseGrant {
+                        owner_id: owner_id.to_owned(),
+                        generation: u64::try_from(generation).unwrap_or(0),
+                        expires_at_ms,
+                    },
+                }
+            }
+            None => {
+                write_lease_row(
+                    &transaction,
+                    owner_id,
+                    now_ms,
+                    expires_at_ms,
+                    0,
+                    &self.db_path,
+                )?;
+                LeaseAcquireResult::Acquired {
+                    grant: ServeLeaseGrant {
+                        owner_id: owner_id.to_owned(),
+                        generation: 0,
+                        expires_at_ms,
+                    },
+                }
             }
         };
 
@@ -223,7 +273,9 @@ impl CoordinationStore {
         let rows = self
             .connection
             .execute(
-                "DELETE FROM serve_leases WHERE lease_key = ?1 AND owner_id = ?2",
+                "UPDATE serve_leases
+                 SET expires_at_ms = 0
+                 WHERE lease_key = ?1 AND owner_id = ?2",
                 params![SERVE_LEASE_KEY, owner_id],
             )
             .map_err(|source| CoordinationError::Sqlite {
@@ -516,17 +568,19 @@ fn write_lease_row(
     owner_id: &str,
     acquired_at_ms: i64,
     expires_at_ms: i64,
+    generation: i64,
     db_path: &Path,
 ) -> Result<(), CoordinationError> {
     transaction
         .execute(
-            "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO serve_leases (lease_key, owner_id, acquired_at_ms, expires_at_ms, generation)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(lease_key)
              DO UPDATE SET owner_id = excluded.owner_id,
                            acquired_at_ms = excluded.acquired_at_ms,
-                           expires_at_ms = excluded.expires_at_ms",
-            params![SERVE_LEASE_KEY, owner_id, acquired_at_ms, expires_at_ms],
+                           expires_at_ms = excluded.expires_at_ms,
+                           generation = excluded.generation",
+            params![SERVE_LEASE_KEY, owner_id, acquired_at_ms, expires_at_ms, generation],
         )
         .map_err(|source| CoordinationError::Sqlite {
             path: db_path.to_path_buf(),
@@ -616,23 +670,6 @@ fn run_sqlite_migrations(
             source,
         })?;
 
-    let version_exists = connection
-        .query_row(
-            "SELECT version FROM schema_migrations WHERE version = ?1",
-            params![SQLITE_COORDINATION_SCHEMA_VERSION],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(|source| CoordinationError::Sqlite {
-            path: db_path.to_path_buf(),
-            operation: "query schema migration version",
-            source,
-        })?;
-
-    if version_exists.is_some() {
-        return Ok(());
-    }
-
     let transaction = connection
         .transaction()
         .map_err(|source| CoordinationError::Sqlite {
@@ -647,7 +684,8 @@ fn run_sqlite_migrations(
                 lease_key TEXT PRIMARY KEY,
                 owner_id TEXT NOT NULL,
                 acquired_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
+                expires_at_ms INTEGER NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS coordination_tokens (
@@ -664,16 +702,43 @@ fn run_sqlite_migrations(
             source,
         })?;
 
-    transaction
-        .execute(
-            "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
-            params![SQLITE_COORDINATION_SCHEMA_VERSION, now_ms],
+    let has_generation = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('serve_leases') WHERE name = 'generation'",
+            [],
+            |row| row.get::<_, i64>(0),
         )
         .map_err(|source| CoordinationError::Sqlite {
             path: db_path.to_path_buf(),
-            operation: "record schema migration",
+            operation: "inspect coordination lease generation migration",
             source,
-        })?;
+        })?
+        > 0;
+    if !has_generation {
+        transaction
+            .execute(
+                "ALTER TABLE serve_leases ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|source| CoordinationError::Sqlite {
+                path: db_path.to_path_buf(),
+                operation: "apply coordination lease generation migration",
+                source,
+            })?;
+    }
+
+    for version in 1..=SQLITE_COORDINATION_SCHEMA_VERSION {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+                params![version, now_ms],
+            )
+            .map_err(|source| CoordinationError::Sqlite {
+                path: db_path.to_path_buf(),
+                operation: "record coordination schema migration",
+                source,
+            })?;
+    }
 
     transaction
         .commit()

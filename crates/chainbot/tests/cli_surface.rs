@@ -554,6 +554,89 @@ fn validate_accepts_basic_root() {
 }
 
 #[test]
+fn validate_json_returns_machine_readable_error_for_invalid_root() {
+    let _lock = acquire_fixture_lock();
+    let invalid_root = unique_root("invalid-validate-json");
+    let _ = fs::remove_dir_all(&invalid_root);
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &invalid_root)
+        .args(["validate", "--json"])
+        .output()
+        .expect("JSON validation should execute for an invalid root");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("invalid validation output should be JSON");
+    assert_eq!(payload["valid"], false);
+    assert!(payload["error"]["code"].is_string());
+    assert!(payload["error"]["message"].is_string());
+}
+
+#[test]
+fn validate_surfaces_legacy_node_reference_in_human_and_json_output() {
+    let _lock = acquire_fixture_lock();
+    ensure_basic_root_fixture();
+    fs::write(
+        basic_root()
+            .join("workflows")
+            .join("wf-alpha")
+            .join("config.toml"),
+        "[workflow]\nmanifest_version = \"2.0.0\"\nid = \"wf-alpha\"\nname = \"alpha\"\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"node-1\"\nkind = \"plugin\"\nplugin = \"quote-plugin\"\noperation = \"normalize\"\ndepends_on = []\n\n[[nodes]]\nmanifest_version = \"2.0.0\"\nid = \"node-2\"\nkind = \"plugin\"\nplugin = \"quote-plugin\"\noperation = \"normalize\"\ndepends_on = [\"node-1\"]\n\n[[nodes.inputs]]\ntarget = \"price\"\nsource = \"node.price\"\n",
+    )
+    .expect("legacy workflow fixture should be writable");
+    let legacy_plugin_root = basic_root().join("plugins").join("legacy-wasm");
+    fs::create_dir_all(&legacy_plugin_root)
+        .expect("legacy Wasm plugin directory should be creatable");
+    fs::write(
+        legacy_plugin_root.join("config.toml"),
+        "manifest_version = \"2.0.0\"\nplugin_id = \"legacy-wasm\"\nkind = \"external_trigger\"\nentrypoint = \"trigger.exec.v1\"\ncapabilities = [\"trigger.listen.event\"]\n\n[trigger_runtime]\nlifecycle = \"wasm_daemon_persistent_session\"\npush_callback = \"host_callback\"\ndurable_ack = \"after_store_persist\"\nhost_error_categories = [\"transport\", \"protocol_contract\", \"plugin_fatal\"]\nmodule = \"bin/external_trigger.wasm\"\n\n[event_schema]\nsummary = \"legacy Wasm\"\nfields = [\"price\"]\n",
+    )
+    .expect("legacy Wasm manifest should be writable");
+
+    let human = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .arg("validate")
+        .output()
+        .expect("human validation should execute");
+    assert!(human.status.success());
+    let human_stdout = String::from_utf8(human.stdout).expect("stdout should be UTF-8");
+    assert!(human_stdout.contains("warning[legacy_node_output_reference]"));
+    assert!(human_stdout.contains("node.<producer_id>.price"));
+    assert!(human_stdout.contains("warning[legacy_wasm_core_v0_abi]"));
+
+    let json = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", basic_root())
+        .args(["validate", "--json"])
+        .output()
+        .expect("JSON validation should execute");
+    assert!(json.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("validation output should be JSON");
+    assert_eq!(payload["valid"], true);
+    let warnings = payload["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+    assert_eq!(warnings.len(), 2);
+    let node_warning = warnings
+        .iter()
+        .find(|warning| warning["code"] == "legacy_node_output_reference")
+        .expect("legacy node warning should exist");
+    assert_eq!(node_warning["consumer_node_id"], "node-2");
+    assert_eq!(node_warning["original_reference"], "node.price");
+    let wasm_warning = warnings
+        .iter()
+        .find(|warning| warning["code"] == "legacy_wasm_core_v0_abi")
+        .expect("legacy Wasm warning should exist");
+    assert_eq!(wasm_warning["plugin_id"], "legacy-wasm");
+    assert_eq!(wasm_warning["original_reference"], "<missing>");
+
+    fs::remove_dir_all(legacy_plugin_root).expect("legacy Wasm fixture should be removable");
+    ensure_basic_root_fixture();
+}
+
+#[test]
 fn validate_accepts_curated_examples() {
     let single_workflow_root = workspace_root().join("examples").join("single-workflow");
     let core_builtins_root = workspace_root().join("examples").join("core-builtins");
@@ -1408,6 +1491,7 @@ fn ensure_basic_root_fixture() {
     let _ = fs::remove_dir_all(state_root.join("triggers"));
     let _ = fs::remove_file(state_root.join("coordination.sqlite3"));
     let _ = fs::remove_file(state_root.join("runtime.sqlite3"));
+    let _ = fs::remove_dir_all(root.join("plugins").join("legacy-wasm"));
 
     fs::create_dir_all(root.join("workflows")).expect("workflows directory should be creatable");
     fs::create_dir_all(root.join("triggers")).expect("triggers directory should be creatable");

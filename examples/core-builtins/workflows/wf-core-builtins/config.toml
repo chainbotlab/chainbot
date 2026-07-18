@@ -39,7 +39,7 @@ depends_on = ["parse-payload"]
 
 [[nodes.inputs]]
 target = "input"
-source = "run.result"
+source = "node.parse-payload.result"
 
 [[nodes.inputs]]
 target = "path"
@@ -67,7 +67,7 @@ depends_on = ["parse-fallbacks"]
 
 [[nodes.inputs]]
 target = "values"
-source = "run.result"
+source = "node.parse-fallbacks.result"
 
 [[nodes]]
 manifest_version = "2.0.0"
@@ -79,7 +79,7 @@ depends_on = ["coalesce-symbol"]
 
 [[nodes.inputs]]
 target = "value"
-source = "run.result"
+source = "node.coalesce-symbol.result"
 
 [[nodes.inputs]]
 target = "expected"
@@ -155,7 +155,7 @@ depends_on = ["round-price"]
 
 [[nodes.inputs]]
 target = "left"
-source = "run.result"
+source = "node.round-price.result"
 
 [[nodes.inputs]]
 target = "right"

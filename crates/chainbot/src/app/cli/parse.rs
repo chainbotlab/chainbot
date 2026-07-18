@@ -103,14 +103,13 @@ impl CliRequest {
         })
     }
 
-    fn parse_command_args<I>(command: CliCommand, mut args: I) -> Result<Self, UserFacingError>
+    fn parse_command_args<I>(command: CliCommand, args: I) -> Result<Self, UserFacingError>
     where
         I: Iterator<Item = OsString>,
     {
         let mut json_output = false;
-        let mut position = 0usize;
-        while let Some(arg) = args.next() {
-            position += 1;
+        for (index, arg) in args.enumerate() {
+            let position = index + 1;
             let raw = arg.to_string_lossy().into_owned();
             match raw.as_str() {
                 "-h" | "--help" => {
@@ -124,22 +123,28 @@ impl CliRequest {
                         daemon_owner_id: None,
                     });
                 }
-                "--json" if matches!(command, CliCommand::Status | CliCommand::Observe) => {
+                "--json"
+                    if matches!(
+                        command,
+                        CliCommand::Status | CliCommand::Observe | CliCommand::Validate
+                    ) => {
                     json_output = true;
                 }
                 _ => {
-                    if let Some((flag, value)) = raw.split_once('=') {
-                        if flag == "--json"
-                            && matches!(command, CliCommand::Status | CliCommand::Observe)
-                        {
-                            json_output = parse_bool_flag_value(
-                                "--json",
-                                value,
-                                position,
-                                &format!("chainbot {}", command_name(command)),
-                            )?;
-                            continue;
-                        }
+                    if let Some((flag, value)) = raw.split_once('=')
+                        && flag == "--json"
+                        && matches!(
+                            command,
+                            CliCommand::Status | CliCommand::Observe | CliCommand::Validate
+                        )
+                    {
+                        json_output = parse_bool_flag_value(
+                            "--json",
+                            value,
+                            position,
+                            &format!("chainbot {}", command_name(command)),
+                        )?;
+                        continue;
                     }
 
                     return Err(UserFacingError::usage(format!(

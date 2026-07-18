@@ -52,9 +52,9 @@ use crate::domain::runtime::{
 use crate::domain::workflow::{DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, WorkflowDefinition};
 use crate::errors::ContractError;
 use crate::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, PluginActivationEnvelope,
-    PluginHostSecretMode, PluginKind, PluginManifest, NODE_PLUGIN_CONTRACT_VERSION,
-    NODE_PLUGIN_EXECUTE_CAPABILITY,
+    ExternalNodePluginHost, ExternalNodePluginRequest, HostCancellation,
+    PluginActivationEnvelope, PluginHostSecretMode, PluginKind, PluginManifest,
+    NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
 };
 use crate::secrets::{
     redact_text, GpgSecretDecryptor, PlaintextSecretDecryptor, SecretProvider, SecretReference,
@@ -62,6 +62,7 @@ use crate::secrets::{
 };
 
 pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
+const DEFAULT_MAX_CONCURRENT_NODES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PluginActivationRuntime {
@@ -79,6 +80,7 @@ pub struct ExecutionPlane {
     secrets_dir: PathBuf,
     secret_mode: SecretDecryptMode,
     max_subflow_depth: usize,
+    cancellation: HostCancellation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +169,13 @@ impl ExecutionPlane {
             secrets_dir,
             secret_mode,
             max_subflow_depth,
+            cancellation: HostCancellation::default(),
         })
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: HostCancellation) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub fn execute(
@@ -183,6 +191,7 @@ impl ExecutionPlane {
         active_stack: &mut Vec<String>,
         depth: usize,
     ) -> Result<WorkflowRunReport, ContractError> {
+        self.ensure_not_cancelled(&request.workflow_id)?;
         if depth > self.max_subflow_depth {
             return Err(ContractError::SubflowDepthExceeded {
                 workflow_id: request.workflow_id.clone(),
@@ -205,7 +214,7 @@ impl ExecutionPlane {
     fn execute_workflow_frame(
         &self,
         request: &NormalizedRunRequest,
-        active_stack: &mut Vec<String>,
+        active_stack: &[String],
         depth: usize,
     ) -> Result<WorkflowRunReport, ContractError> {
         let workflow = self
@@ -240,6 +249,7 @@ impl ExecutionPlane {
         let mut schedule_waves = Vec::new();
 
         loop {
+            self.ensure_not_cancelled(&workflow.workflow_id)?;
             if node_states.values().copied().all(ScheduledNodeState::is_terminal) {
                 break;
             }
@@ -274,7 +284,7 @@ impl ExecutionPlane {
                     }
                     DependencyDecision::Ready => {
                         if let Some(when) = &node.when
-                            && !when.evaluate(&runtime_namespaces)
+                            && !when.try_evaluate(&runtime_namespaces)?
                         {
                             node_states.insert(node_id.clone(), ScheduledNodeState::Skipped);
                             state_changed = true;
@@ -314,30 +324,74 @@ impl ExecutionPlane {
             }
 
             schedule_waves.push(ready_nodes.clone());
+            let wave_snapshot = runtime_namespaces.clone();
+            let wave_stack = active_stack.to_vec();
+            let wave_nodes = ready_nodes
+                .iter()
+                .map(|node_id| {
+                    let node = node_index.get(node_id).cloned().ok_or_else(|| {
+                        ContractError::MissingDagNodeIndex {
+                            workflow_id: workflow.workflow_id.clone(),
+                            node_id: node_id.clone(),
+                        }
+                    })?;
+                    node_states.insert(node_id.clone(), ScheduledNodeState::Running);
+                    Ok(node)
+                })
+                .collect::<Result<Vec<_>, ContractError>>()?;
+            let mut outcomes = BTreeMap::new();
+
+            std::thread::scope(|scope| -> Result<(), ContractError> {
+                let workflow = &workflow;
+                for node_batch in wave_nodes.chunks(DEFAULT_MAX_CONCURRENT_NODES) {
+                    self.ensure_not_cancelled(&workflow.workflow_id)?;
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    for node in node_batch {
+                        let sender = sender.clone();
+                        let node = node.clone();
+                        let snapshot = wave_snapshot.clone();
+                        let mut node_stack = wave_stack.clone();
+                        scope.spawn(move || {
+                            let outcome = self.execute_node(
+                                request,
+                                workflow,
+                                &node,
+                                &snapshot,
+                                &mut node_stack,
+                                depth,
+                            );
+                            let _ = sender.send((node.node_id.clone(), outcome));
+                        });
+                    }
+                    drop(sender);
+                    for _ in node_batch {
+                        let (node_id, outcome) = receiver.recv().map_err(|_| {
+                            ContractError::SchedulerStalled {
+                                workflow_id: workflow.workflow_id.clone(),
+                                blocked_node_ids: ready_nodes.clone(),
+                            }
+                        })?;
+                        outcomes.insert(node_id, outcome);
+                    }
+                    self.ensure_not_cancelled(&workflow.workflow_id)?;
+                }
+                Ok(())
+            })?;
 
             for node_id in ready_nodes {
-                node_states.insert(node_id.clone(), ScheduledNodeState::Running);
-                let Some(node) = node_index.get(&node_id) else {
-                    return Err(ContractError::MissingDagNodeIndex {
+                let outcome = outcomes.remove(&node_id).ok_or_else(|| {
+                    ContractError::SchedulerStalled {
                         workflow_id: workflow.workflow_id.clone(),
-                        node_id,
-                    });
-                };
-
-                match self.execute_node(
-                    request,
-                    &workflow,
-                    node,
-                    &runtime_namespaces,
-                    active_stack,
-                    depth,
-                ) {
+                        blocked_node_ids: vec![node_id.clone()],
+                    }
+                })?;
+                match outcome {
                     Ok(result) => {
-                        node_states.insert(node.node_id.clone(), ScheduledNodeState::Succeeded);
-                        node_outputs.insert(node.node_id.clone(), result.outputs.clone());
-                        for (key, value) in result.outputs {
-                            runtime_namespaces.node_outputs.insert(key, value);
-                        }
+                        node_states.insert(node_id.clone(), ScheduledNodeState::Succeeded);
+                        node_outputs.insert(node_id.clone(), result.outputs.clone());
+                        runtime_namespaces
+                            .node_outputs_by_producer
+                            .insert(node_id.clone(), result.outputs.clone());
                         for (key, value) in result.run_scoped {
                             runtime_namespaces.run_scoped.insert(key, value);
                         }
@@ -346,8 +400,8 @@ impl ExecutionPlane {
                         }
                     }
                     Err(error) => {
-                        node_states.insert(node.node_id.clone(), ScheduledNodeState::Failed);
-                        node_failures.insert(node.node_id.clone(), error.to_string());
+                        node_states.insert(node_id.clone(), ScheduledNodeState::Failed);
+                        node_failures.insert(node_id, error.to_string());
                     }
                 }
             }
@@ -383,9 +437,10 @@ impl ExecutionPlane {
         active_stack: &mut Vec<String>,
         depth: usize,
     ) -> Result<BuiltinNodeResult, ContractError> {
+        self.ensure_not_cancelled(&workflow.workflow_id)?;
         let mut inputs = BTreeMap::new();
         for binding in &node.inputs {
-            if let Some(value) = runtime_namespaces.resolve(&binding.source) {
+            if let Some(value) = runtime_namespaces.try_resolve(&binding.source)? {
                 inputs.insert(binding.target.clone(), value.clone());
             }
         }
@@ -469,7 +524,8 @@ impl ExecutionPlane {
             self.plugins_root.clone(),
             self.secrets_dir.clone(),
             secret_mode,
-        );
+        )
+        .with_cancellation(self.cancellation.clone());
         let response = host.execute_node_invocation(
             manifest,
             &ExternalNodePluginRequest {
@@ -485,8 +541,7 @@ impl ExecutionPlane {
         .map_err(|error| redact_plugin_contract_error(error, &activation_secrets))?;
 
         Ok(BuiltinNodeResult {
-            outputs: response.output.clone(),
-            run_scoped: response.output,
+            outputs: response.output,
             ..BuiltinNodeResult::default()
         })
     }
@@ -513,7 +568,7 @@ impl ExecutionPlane {
             cli_args: BTreeMap::new(),
             manual_invocation_input: BTreeMap::new(),
             trigger_payload_mapping: BTreeMap::new(),
-            subflow_input: contract.build_child_inputs(runtime_namespaces),
+            subflow_input: contract.try_build_child_inputs(runtime_namespaces)?,
         };
 
         let child_report = self.execute_internal(&child_request, active_stack, depth)?;
@@ -533,6 +588,15 @@ impl ExecutionPlane {
 }
 
 impl ExecutionPlane {
+    fn ensure_not_cancelled(&self, workflow_id: &str) -> Result<(), ContractError> {
+        if self.cancellation.is_cancelled() {
+            return Err(ContractError::WorkflowExecutionCancelled {
+                workflow_id: workflow_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn resolve_plugin_activation(
         &self,
         plugin_id: &str,
@@ -655,4 +719,61 @@ fn normalized_dependencies(depends_on: &[String]) -> Vec<String> {
         dependencies.insert(dependency.clone());
     }
     dependencies.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::runtime::NodeDefinition;
+    use crate::domain::workflow::RuntimeVariableLayers;
+
+    #[test]
+    fn cancellation_joins_the_active_batch_and_prevents_the_next_wave() {
+        let cancellation = HostCancellation::default();
+        let cancellation_from_handler = cancellation.clone();
+        let mut registry = BuiltinNodeRegistry::new();
+        registry.register("cancel-kind", move |_| {
+            cancellation_from_handler.shutdown();
+            Ok(BuiltinNodeResult::default())
+        });
+        let workflow = WorkflowDefinition {
+            api_version: String::from("2.0.0"),
+            workflow_id: String::from("wf-cancel"),
+            name: String::from("cancel"),
+            runtime: RuntimeVariableLayers::default(),
+            nodes: vec![
+                test_node("first", "cancel-kind", Vec::new()),
+                test_node("second", "cancel-kind", vec![String::from("first")]),
+            ],
+            package_root: PathBuf::new(),
+        };
+        let plane = ExecutionPlane::new(vec![workflow], BTreeMap::new(), registry)
+            .expect("cancellation workflow should validate")
+            .with_cancellation(cancellation);
+
+        let error = plane
+            .execute(&NormalizedRunRequest::new("run-cancel", "wf-cancel"))
+            .expect_err("cancellation should stop scheduling");
+
+        assert!(matches!(
+            error,
+            ContractError::WorkflowExecutionCancelled { workflow_id }
+                if workflow_id == "wf-cancel"
+        ));
+    }
+
+    fn test_node(node_id: &str, kind: &str, depends_on: Vec<String>) -> NodeDefinition {
+        NodeDefinition {
+            api_version: String::from("2.0.0"),
+            node_id: node_id.to_owned(),
+            kind: String::from("builtin"),
+            plugin_id: kind.to_owned(),
+            operation: String::from("run"),
+            depends_mode: DependsMode::All,
+            depends_on,
+            inputs: Vec::new(),
+            when: None,
+            subflow: None,
+        }
+    }
 }

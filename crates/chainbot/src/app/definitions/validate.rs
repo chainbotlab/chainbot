@@ -7,14 +7,131 @@
 //! [ROLE]
 //! Enforces cross-package application invariants before the runtime consumes a loaded root bundle.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use serde::Serialize;
+
 use crate::domain::trigger::{TriggerDefinition, TriggerKind};
-use crate::domain::workflow::WorkflowDefinition;
+use crate::domain::workflow::{
+    RuntimeVariableNamespace, VariableReference, WorkflowDefinition,
+};
 use crate::errors::ContractError;
 use crate::infrastructure::config::RootConfigDefinition;
 use crate::ingress::build_desired_ingress_state;
-use crate::plugin::{PluginActivationContract, PluginKind, PluginManifest};
+use crate::plugin::{
+    PluginActivationContract, PluginKind, PluginManifest, TriggerRuntimeLifecycle, WasmTriggerAbi,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CompatibilityWarning {
+    pub code: &'static str,
+    pub source_location: String,
+    pub original_reference: String,
+    pub replacement: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+}
+
+pub fn collect_compatibility_warnings(
+    workflows: &[WorkflowDefinition],
+    plugins: &[PluginManifest],
+) -> Vec<CompatibilityWarning> {
+    let mut warnings = BTreeSet::new();
+    for workflow in workflows {
+        for node in &workflow.nodes {
+            for (index, binding) in node.inputs.iter().enumerate() {
+                collect_legacy_node_reference_warning(
+                    &mut warnings,
+                    workflow,
+                    &node.node_id,
+                    format!("node.inputs[{index}].source"),
+                    &binding.source,
+                );
+            }
+            if let Some(when) = &node.when {
+                collect_legacy_node_reference_warning(
+                    &mut warnings,
+                    workflow,
+                    &node.node_id,
+                    "node.when.source".to_owned(),
+                    &when.source,
+                );
+            }
+            if let Some(subflow) = &node.subflow {
+                for (index, import) in subflow.imports.iter().enumerate() {
+                    collect_legacy_node_reference_warning(
+                        &mut warnings,
+                        workflow,
+                        &node.node_id,
+                        format!("node.subflow.imports[{index}].source"),
+                        &import.source,
+                    );
+                }
+            }
+        }
+    }
+
+    for plugin in plugins {
+        let Some(runtime) = plugin.trigger_runtime.as_ref() else {
+            continue;
+        };
+        if runtime.lifecycle != Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession) {
+            continue;
+        }
+        let abi = runtime.abi.unwrap_or(WasmTriggerAbi::CoreV0);
+        if abi == WasmTriggerAbi::ComponentV1 {
+            continue;
+        }
+        warnings.insert(CompatibilityWarning {
+            code: "legacy_wasm_core_v0_abi",
+            source_location: format!(
+                "{}:trigger_runtime.abi",
+                plugin.manifest_path.display()
+            ),
+            original_reference: runtime
+                .abi
+                .map(|_| "core_v0".to_owned())
+                .unwrap_or_else(|| "<missing>".to_owned()),
+            replacement: "trigger_runtime.abi = \"component_v1\"".to_owned(),
+            workflow_id: None,
+            consumer_node_id: None,
+            plugin_id: Some(plugin.plugin_id.clone()),
+        });
+    }
+
+    warnings.into_iter().collect()
+}
+
+fn collect_legacy_node_reference_warning(
+    warnings: &mut BTreeSet<CompatibilityWarning>,
+    workflow: &WorkflowDefinition,
+    consumer_node_id: &str,
+    source_location: String,
+    reference: &VariableReference,
+) {
+    if reference.namespace != RuntimeVariableNamespace::NodeOutputs
+        || !reference.is_legacy_node_output()
+    {
+        return;
+    }
+    warnings.insert(CompatibilityWarning {
+        code: "legacy_node_output_reference",
+        source_location: format!(
+            "workflow.{}.nodes.{}.{}",
+            workflow.workflow_id, consumer_node_id, source_location
+        ),
+        original_reference: format!("node.{}", reference.key),
+        replacement: format!("node.<producer_id>.{}", reference.key),
+        workflow_id: Some(workflow.workflow_id.clone()),
+        consumer_node_id: Some(consumer_node_id.to_owned()),
+        plugin_id: None,
+    });
+}
 
 const LEGACY_OFFICIAL_PLUGIN_IDS: &[&str] = &[
     "eth-node-official-plugin",

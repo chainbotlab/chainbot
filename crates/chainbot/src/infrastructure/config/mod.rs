@@ -344,11 +344,11 @@ fn validate_allowed_origin(
                 plugin_id, origin, source
             ),
         })?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return Err(ContractError::InvalidRootConfigField {
             field,
             detail: format!(
-                "plugin_activation.{}.allowed_origins origin {} must use http or https",
+                "plugin_activation.{}.allowed_origins origin {} must use http, https, ws, or wss",
                 plugin_id, origin
             ),
         });

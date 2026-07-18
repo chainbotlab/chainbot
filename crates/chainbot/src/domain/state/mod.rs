@@ -22,7 +22,10 @@ pub mod lease;
 pub mod model;
 pub mod records;
 
-pub use lease::{LeaseAcquireResult, ServeLeaseSnapshot, ServeLeaseState, SERVE_OWNER_ID_PREFIX};
+pub use lease::{
+    LeaseAcquireResult, RunExecutionFence, ServeLeaseGrant, ServeLeaseSnapshot, ServeLeaseState,
+    SERVE_OWNER_ID_PREFIX,
+};
 pub use model::{
     accepted_trigger_key, default_schema_version, retain_unexpired_tokens, sanitize_path_component,
     upsert_token_snapshot, RunStatus, CURRENT_SCHEMA_MAJOR,

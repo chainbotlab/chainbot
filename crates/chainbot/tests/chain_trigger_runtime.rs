@@ -71,6 +71,7 @@ fn chain_trigger_runtime_injects_activation_secrets_into_start_message() {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         }),
         operations: Vec::new(),
         event_schema: Some(PluginEventSchemaDescriptor {
@@ -196,6 +197,7 @@ fn chain_trigger_runtime_rejects_missing_required_allowed_origins_activation() {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         }),
         operations: Vec::new(),
         event_schema: Some(PluginEventSchemaDescriptor {
@@ -309,6 +311,7 @@ fn chain_trigger_runtime_injects_gate_activation_secrets_into_start_message() {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         }),
         operations: Vec::new(),
         event_schema: Some(PluginEventSchemaDescriptor {
@@ -449,6 +452,7 @@ fn chain_trigger_runtime_stages_event_before_ack_and_accepts_same_cycle() {
                 TriggerHostErrorCategory::PluginFatal,
             ],
             module: None,
+            abi: None,
         }),
         operations: Vec::new(),
         event_schema: Some(PluginEventSchemaDescriptor {
