@@ -153,15 +153,20 @@ pub(crate) fn run_bounded_process(
 
     let deadline = Instant::now() + limits.wall_timeout;
     let failure = loop {
-        match child.try_wait().map_err(PluginProcessFailure::Io)? {
-            Some(_) => break None,
-            None if cancellation.is_cancelled() => break Some(PluginProcessFailure::Cancelled),
-            None if Instant::now() >= deadline => break Some(PluginProcessFailure::TimedOut),
-            None => match stream_limit.load(Ordering::Acquire) {
+        match child.try_wait() {
+            Ok(Some(_)) => break None,
+            Ok(None) if cancellation.is_cancelled() => {
+                break Some(PluginProcessFailure::Cancelled)
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                break Some(PluginProcessFailure::TimedOut)
+            }
+            Ok(None) => match stream_limit.load(Ordering::Acquire) {
                 STDOUT_LIMIT => break Some(PluginProcessFailure::StdoutLimitExceeded),
                 STDERR_LIMIT => break Some(PluginProcessFailure::StderrLimitExceeded),
                 _ => thread::sleep(POLL_INTERVAL),
             },
+            Err(source) => break Some(PluginProcessFailure::Io(source)),
         }
     };
 

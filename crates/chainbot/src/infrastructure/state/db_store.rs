@@ -1235,6 +1235,37 @@ impl RuntimeStateStore {
         Ok(rows > 0)
     }
 
+    pub fn write_fenced_terminal_run_with_log(
+        &mut self,
+        summary: &RunRecordSummary,
+        event: &str,
+        message: &str,
+        now_ms: i64,
+    ) -> Result<bool, RuntimeStateError> {
+        self.begin_trigger_acceptance_transaction()?;
+        let result = (|| {
+            if !self.write_fenced_terminal_run_summary(summary, now_ms)? {
+                return Ok(false);
+            }
+            self.append_workflow_log_entry(&summary.run_id, event, message, now_ms)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(committed) => {
+                if let Err(error) = self.commit_trigger_acceptance_transaction() {
+                    let _ = self.rollback_trigger_acceptance_transaction();
+                    Err(error)
+                } else {
+                    Ok(committed)
+                }
+            }
+            Err(error) => {
+                let _ = self.rollback_trigger_acceptance_transaction();
+                Err(error)
+            }
+        }
+    }
+
     pub fn append_workflow_log_entry(
         &mut self,
         run_id: &str,
@@ -2682,10 +2713,80 @@ impl RuntimeStateStore {
         trigger_id: &str,
         event_id: &str,
     ) -> Result<Option<TriggerEventRecord>, RuntimeStateError> {
-        Ok(self
-            .load_trigger_records_after_sequence(trigger_id, 0)?
-            .into_iter()
-            .find(|record| record.event_id == event_id))
+        match &mut self.connection {
+            RuntimeStorageConnection::Sqlite { path, connection } => {
+                let row = connection
+                    .query_row(
+                        "SELECT schema_version, run_id, sequence, trigger_id, workflow_id, event_id,
+                                checkpoint, source, accepted_at_ms, payload_json,
+                                dedup_key, dedup_expires_at_ms, cooldown_key, cooldown_expires_at_ms
+                         FROM trigger_event_records
+                         WHERE trigger_id = ?1 AND event_id = ?2
+                         LIMIT 1",
+                        params![trigger_id, event_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
+                                row.get::<_, Option<String>>(6)?,
+                                row.get::<_, String>(7)?,
+                                row.get::<_, i64>(8)?,
+                                row.get::<_, String>(9)?,
+                                row.get::<_, Option<String>>(10)?,
+                                row.get::<_, Option<i64>>(11)?,
+                                row.get::<_, Option<String>>(12)?,
+                                row.get::<_, Option<i64>>(13)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|source| RuntimeStateError::Sqlite {
+                        path: path.clone(),
+                        operation: "query sqlite trigger record by event",
+                        source,
+                    })?;
+                row.map(decode_trigger_record_row).transpose()
+            }
+            RuntimeStorageConnection::Postgres { client, .. } => {
+                let row = client
+                    .query_opt(
+                        "SELECT schema_version, run_id, sequence, trigger_id, workflow_id, event_id,
+                                checkpoint, source, accepted_at_ms, payload_json,
+                                dedup_key, dedup_expires_at_ms, cooldown_key, cooldown_expires_at_ms
+                         FROM trigger_event_records
+                         WHERE trigger_id = $1 AND event_id = $2
+                         LIMIT 1",
+                        &[&trigger_id, &event_id],
+                    )
+                    .map_err(|source| RuntimeStateError::Postgres {
+                        operation: "query postgres trigger record by event",
+                        source,
+                    })?;
+                row.map(|row| {
+                    decode_trigger_record_row((
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                        row.get(5),
+                        row.get(6),
+                        row.get(7),
+                        row.get(8),
+                        row.get(9),
+                        row.get(10),
+                        row.get(11),
+                        row.get(12),
+                        row.get(13),
+                    ))
+                })
+                .transpose()
+            }
+        }
     }
 
     pub fn write_trigger_record(

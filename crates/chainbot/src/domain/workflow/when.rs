@@ -47,10 +47,6 @@ impl WhenCondition {
         }
     }
 
-    pub fn evaluate(&self, namespaces: &RuntimeVariableNamespaces) -> bool {
-        self.try_evaluate(namespaces).unwrap_or(false)
-    }
-
     pub fn try_evaluate(
         &self,
         namespaces: &RuntimeVariableNamespaces,

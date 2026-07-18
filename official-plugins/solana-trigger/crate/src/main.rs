@@ -8,15 +8,22 @@ async fn main() {
     }
     watch_host_control();
 
-    let _ = solana_trigger_official_plugin::run_from_stdin(&input).await;
+    if let Err(error) = solana_trigger_official_plugin::run_from_stdin(&input).await {
+        eprintln!("{error}");
+    }
 }
 
 fn watch_host_control() {
     std::thread::spawn(|| {
-        for line in io::stdin().lock().lines().map_while(Result::ok) {
-            if line.contains("\"type\":\"stop\"") {
-                std::process::exit(0);
+        for line in io::stdin().lock().lines() {
+            match line {
+                Ok(line) if line.contains("\"type\":\"stop\"") => {
+                    std::process::exit(0);
+                }
+                Ok(_) => {}
+                Err(_) => std::process::exit(0),
             }
         }
+        std::process::exit(0);
     });
 }

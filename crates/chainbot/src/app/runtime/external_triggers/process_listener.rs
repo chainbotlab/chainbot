@@ -36,6 +36,10 @@ const MAX_TRIGGER_STDERR_BYTES: usize = 256 * 1024;
 const MAX_PENDING_TRIGGER_FRAMES: usize = 256;
 const MAX_SHORT_LIVED_TRIGGER_EVENTS: u64 = 256;
 const SHORT_LIVED_TRIGGER_DEADLINE: Duration = Duration::from_secs(60);
+const MANAGED_DRAIN_FRAME_BUDGET: usize = 256;
+const MANAGED_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(10);
+const MANAGED_CONTROL_QUEUE_CAPACITY: usize = 16;
+const MANAGED_CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct ExternalTriggerPlugin {
@@ -373,48 +377,46 @@ impl ExternalTriggerPlugin {
                 })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
+            if let Err(source) = stdin
                 .write_all(encoded_input.as_bytes())
-                .map_err(|source| ContractError::TriggerPluginProcessIo {
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.flush())
+            {
+                terminate_child_group(&mut child, Duration::ZERO);
+                let _ = child.wait();
+                return Err(ContractError::TriggerPluginProcessIo {
                     plugin_id: self.plugin_id.clone(),
                     operation: "write stdin",
                     source,
-                })?;
-            stdin
-                .write_all(b"\n")
-                .map_err(|source| ContractError::TriggerPluginProcessIo {
-                    plugin_id: self.plugin_id.clone(),
-                    operation: "write stdin delimiter",
-                    source,
-                })?;
-            stdin
-                .flush()
-                .map_err(|source| ContractError::TriggerPluginProcessIo {
-                    plugin_id: self.plugin_id.clone(),
-                    operation: "flush stdin",
-                    source,
-                })?;
+                });
+            }
 
-            let stdout =
-                child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| ContractError::TriggerPluginProcessIo {
+            let stdout = match child.stdout.take() {
+                Some(stdout) => stdout,
+                None => {
+                    terminate_child_group(&mut child, Duration::ZERO);
+                    let _ = child.wait();
+                    return Err(ContractError::TriggerPluginProcessIo {
                         plugin_id: self.plugin_id.clone(),
                         operation: "capture stdout",
                         source: std::io::Error::other("missing stdout pipe"),
-                    })?;
-            let stderr =
-                child
-                    .stderr
-                    .take()
-                    .ok_or_else(|| ContractError::TriggerPluginProcessIo {
+                    });
+                }
+            };
+            let stderr = match child.stderr.take() {
+                Some(stderr) => stderr,
+                None => {
+                    terminate_child_group(&mut child, Duration::ZERO);
+                    let _ = child.wait();
+                    return Err(ContractError::TriggerPluginProcessIo {
                         plugin_id: self.plugin_id.clone(),
                         operation: "capture stderr",
                         source: std::io::Error::other("missing stderr pipe"),
-                    })?;
+                    });
+                }
+            };
 
-            let stderr_handle = thread::spawn(move || -> std::io::Result<String> {
+            let mut stderr_handle = Some(thread::spawn(move || -> std::io::Result<String> {
                 let mut reader = BufReader::new(stderr);
                 let mut tail = Vec::new();
                 let mut chunk = [0_u8; 8192];
@@ -429,15 +431,28 @@ impl ExternalTriggerPlugin {
                         tail.drain(..excess);
                     }
                 }
-            });
+            }));
 
             let (stdout_tx, stdout_rx) = mpsc::sync_channel(MAX_PENDING_TRIGGER_FRAMES);
-            let stdout_handle =
-                thread::spawn(move || read_managed_stdout(stdout, stdout_tx));
+            let mut stdout_handle = Some(
+                thread::spawn(move || read_managed_stdout(stdout, stdout_tx)),
+            );
 
             let mut state = ListenerSessionState::WaitingReady;
             let heartbeat_interval_ms = input_heartbeat_interval_ms(&input);
-            let mut last_activity_ms = contract_now_ms(definition)?;
+            let mut last_activity_ms = match contract_now_ms(definition) {
+                Ok(now_ms) => now_ms,
+                Err(error) => {
+                    cleanup_short_lived_process(
+                        &self.plugin_id,
+                        &mut child,
+                        &mut stdin,
+                        &mut stdout_handle,
+                        &mut stderr_handle,
+                    );
+                    return Err(error);
+                }
+            };
             let mut staged_sequence = 0_u64;
             let deadline = Instant::now() + SHORT_LIVED_TRIGGER_DEADLINE;
 
@@ -452,14 +467,26 @@ impl ExternalTriggerPlugin {
                         },
                     );
                     terminate_child_group(&mut child, Duration::from_secs(3));
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                    let _ = stdout_handle.take().map(|handle| handle.join());
+                    let _ = stderr_handle.take().map(|handle| handle.join());
                     return Err(ContractError::TriggerPluginProtocolContractViolation {
                         plugin_id: self.plugin_id.clone(),
                         detail: String::from("short-lived listener exceeded 60 second deadline"),
                     });
                 }
-                let now_ms = contract_now_ms(definition)?;
+                let now_ms = match contract_now_ms(definition) {
+                    Ok(now_ms) => now_ms,
+                    Err(error) => {
+                        cleanup_short_lived_process(
+                            &self.plugin_id,
+                            &mut child,
+                            &mut stdin,
+                            &mut stdout_handle,
+                            &mut stderr_handle,
+                        );
+                        return Err(error);
+                    }
+                };
                 let timeout_ms = match state {
                     ListenerSessionState::WaitingReady => heartbeat_interval_ms,
                     ListenerSessionState::Active => {
@@ -475,19 +502,61 @@ impl ExternalTriggerPlugin {
                     Duration::from_millis(timeout_ms as u64).min(remaining),
                 ) {
                     Ok(ListenerFrame::Bytes(frame)) => {
-                        on_progress().map_err(progress_to_contract_error(definition))?;
+                        if let Err(error) = on_progress().map_err(progress_to_contract_error(definition)) {
+                            cleanup_short_lived_process(
+                                &self.plugin_id,
+                                &mut child,
+                                &mut stdin,
+                                &mut stdout_handle,
+                                &mut stderr_handle,
+                            );
+                            return Err(error);
+                        }
                         if frame.iter().all(u8::is_ascii_whitespace) {
                             continue;
                         }
-                        let message: TriggerPluginMessage =
-                            serde_json::from_slice(&frame).map_err(|source| {
-                                ContractError::TriggerPluginOutputDecode {
+                        let message: TriggerPluginMessage = match serde_json::from_slice(&frame) {
+                            Ok(message) => message,
+                            Err(source) => {
+                                cleanup_short_lived_process(
+                                    &self.plugin_id,
+                                    &mut child,
+                                    &mut stdin,
+                                    &mut stdout_handle,
+                                    &mut stderr_handle,
+                                );
+                                return Err(ContractError::TriggerPluginOutputDecode {
                                     plugin_id: self.plugin_id.clone(),
                                     source,
-                                }
-                            })?;
-                        state = state.handle_message(&self.plugin_id, &message)?;
-                        last_activity_ms = contract_now_ms(definition)?;
+                                });
+                            }
+                        };
+                        state = match state.handle_message(&self.plugin_id, &message) {
+                            Ok(state) => state,
+                            Err(error) => {
+                                cleanup_short_lived_process(
+                                    &self.plugin_id,
+                                    &mut child,
+                                    &mut stdin,
+                                    &mut stdout_handle,
+                                    &mut stderr_handle,
+                                );
+                                return Err(error);
+                            }
+                        };
+                        last_activity_ms = match contract_now_ms(definition) {
+                            Ok(now_ms) => now_ms,
+                            Err(error) => {
+                                cleanup_short_lived_process(
+                                    &self.plugin_id,
+                                    &mut child,
+                                    &mut stdin,
+                                    &mut stdout_handle,
+                                    &mut stderr_handle,
+                                );
+                                return Err(error);
+                            }
+                        };
 
                         match message {
                             TriggerPluginMessage::Ready(_) | TriggerPluginMessage::Heartbeat(_) => {
@@ -501,7 +570,8 @@ impl ExternalTriggerPlugin {
                                     },
                                 );
                                 let _ = child.kill();
-                                let _ = stdout_handle.join();
+                                let _ = stdout_handle.take().map(|handle| handle.join());
+                                let _ = stderr_handle.take().map(|handle| handle.join());
                                 return Err(ContractError::TriggerPluginReturnedFailure {
                                     plugin_id: self.plugin_id.clone(),
                                     message: redact_text(
@@ -520,8 +590,8 @@ impl ExternalTriggerPlugin {
                                         },
                                     );
                                     terminate_child_group(&mut child, Duration::from_secs(3));
-                                    let _ = stdout_handle.join();
-                                    let _ = stderr_handle.join();
+                                    let _ = stdout_handle.take().map(|handle| handle.join());
+                                    let _ = stderr_handle.take().map(|handle| handle.join());
                                     return Err(ContractError::TriggerPluginProtocolContractViolation {
                                         plugin_id: self.plugin_id.clone(),
                                         detail: format!(
@@ -546,7 +616,19 @@ impl ExternalTriggerPlugin {
                                     ),
                                     source: definition.source.clone(),
                                     occurred_at_ms: event.occurred_at_ms,
-                                    staged_at_ms: contract_now_ms(definition)?,
+                                    staged_at_ms: match contract_now_ms(definition) {
+                                        Ok(now_ms) => now_ms,
+                                        Err(error) => {
+                                            cleanup_short_lived_process(
+                                                &self.plugin_id,
+                                                &mut child,
+                                                &mut stdin,
+                                                &mut stdout_handle,
+                                                &mut stderr_handle,
+                                            );
+                                            return Err(error);
+                                        }
+                                    },
                                     checkpoint: Some(event.checkpoint.clone()),
                                     payload: event.payload,
                                     dedup_key: event.dedup_key,
@@ -556,42 +638,67 @@ impl ExternalTriggerPlugin {
                                     accepted_at_ms: None,
                                     last_error: None,
                                 };
-                                state_store
-                                    .append_staged_trigger_event_record_for_acceptance(
-                                        &staged_record,
-                                    )
-                                    .map_err(progress_to_contract_error(definition))?;
+                                if let Err(error) = state_store
+                                    .append_staged_trigger_event_record_for_acceptance(&staged_record)
+                                    .map_err(progress_to_contract_error(definition))
+                                {
+                                    cleanup_short_lived_process(
+                                        &self.plugin_id,
+                                        &mut child,
+                                        &mut stdin,
+                                        &mut stdout_handle,
+                                        &mut stderr_handle,
+                                    );
+                                    return Err(error);
+                                }
                                 staged_sequence = staged_sequence.saturating_add(1);
 
                                 let ack = TriggerHostMessage::Ack(TriggerAck {
                                     checkpoint: event.checkpoint,
                                 });
-                                let encoded_ack =
-                                    serde_json::to_string(&ack).map_err(|source| {
-                                        ContractError::TriggerPluginProtocolEncode {
+                                let encoded_ack = match serde_json::to_string(&ack) {
+                                    Ok(encoded_ack) => encoded_ack,
+                                    Err(source) => {
+                                        cleanup_short_lived_process(
+                                            &self.plugin_id,
+                                            &mut child,
+                                            &mut stdin,
+                                            &mut stdout_handle,
+                                            &mut stderr_handle,
+                                        );
+                                        return Err(ContractError::TriggerPluginProtocolEncode {
                                             plugin_id: self.plugin_id.clone(),
                                             source,
-                                        }
-                                    })?;
+                                        });
+                                    }
+                                };
                                 if let Err(source) = stdin
                                     .write_all(encoded_ack.as_bytes())
                                     .and_then(|_| stdin.write_all(b"\n"))
                                     .and_then(|_| stdin.flush())
                                     && source.kind() != std::io::ErrorKind::BrokenPipe
                                 {
-                                    return Err(ContractError::TriggerPluginProcessIo {
+                                    let error = ContractError::TriggerPluginProcessIo {
                                         plugin_id: self.plugin_id.clone(),
                                         operation: "write ack to plugin stdin",
                                         source,
-                                    });
+                                    };
+                                    cleanup_short_lived_process(
+                                        &self.plugin_id,
+                                        &mut child,
+                                        &mut stdin,
+                                        &mut stdout_handle,
+                                        &mut stderr_handle,
+                                    );
+                                    return Err(error);
                                 }
                             }
                         }
                     }
                     Ok(ListenerFrame::FrameTooLarge) => {
                         terminate_child_group(&mut child, Duration::from_secs(3));
-                        let _ = stdout_handle.join();
-                        let _ = stderr_handle.join();
+                        let _ = stdout_handle.take().map(|handle| handle.join());
+                        let _ = stderr_handle.take().map(|handle| handle.join());
                         return Err(ContractError::TriggerPluginProtocolContractViolation {
                             plugin_id: self.plugin_id.clone(),
                             detail: format!("trigger frame exceeds {MAX_TRIGGER_FRAME_BYTES} bytes"),
@@ -602,15 +709,44 @@ impl ExternalTriggerPlugin {
                         break;
                     }
                     Ok(ListenerFrame::StdoutError(source)) => {
-                        return Err(ContractError::TriggerPluginProcessIo {
+                        let error = ContractError::TriggerPluginProcessIo {
                             plugin_id: self.plugin_id.clone(),
                             operation: "read stdout",
                             source,
-                        });
+                        };
+                        cleanup_short_lived_process(
+                            &self.plugin_id,
+                            &mut child,
+                            &mut stdin,
+                            &mut stdout_handle,
+                            &mut stderr_handle,
+                        );
+                        return Err(error);
                     }
                     Err(RecvTimeoutError::Timeout) => {
-                        on_progress().map_err(progress_to_contract_error(definition))?;
-                        let now_ms = contract_now_ms(definition)?;
+                        if let Err(error) = on_progress().map_err(progress_to_contract_error(definition)) {
+                            cleanup_short_lived_process(
+                                &self.plugin_id,
+                                &mut child,
+                                &mut stdin,
+                                &mut stdout_handle,
+                                &mut stderr_handle,
+                            );
+                            return Err(error);
+                        }
+                        let now_ms = match contract_now_ms(definition) {
+                            Ok(now_ms) => now_ms,
+                            Err(error) => {
+                                cleanup_short_lived_process(
+                                    &self.plugin_id,
+                                    &mut child,
+                                    &mut stdin,
+                                    &mut stdout_handle,
+                                    &mut stderr_handle,
+                                );
+                                return Err(error);
+                            }
+                        };
                         if heartbeat_timed_out(
                             state,
                             last_activity_ms,
@@ -625,7 +761,8 @@ impl ExternalTriggerPlugin {
                                 },
                             );
                             let _ = child.kill();
-                            let _ = stdout_handle.join();
+                            let _ = stdout_handle.take().map(|handle| handle.join());
+                            let _ = stderr_handle.take().map(|handle| handle.join());
                             return Err(ContractError::TriggerPluginProtocolContractViolation {
                                 plugin_id: self.plugin_id.clone(),
                                 detail: String::from("heartbeat timed out after ready"),
@@ -639,23 +776,44 @@ impl ExternalTriggerPlugin {
                 }
             }
 
-            let _ = stdout_handle.join();
+            let _ = stdout_handle.take().map(|handle| handle.join());
 
             if state == ListenerSessionState::WaitingReady {
-                return Err(ContractError::TriggerPluginProtocolContractViolation {
+                let error = ContractError::TriggerPluginProtocolContractViolation {
                     plugin_id: self.plugin_id.clone(),
                     detail: String::from("listener exited before ready"),
-                });
+                };
+                cleanup_short_lived_process(
+                    &self.plugin_id,
+                    &mut child,
+                    &mut stdin,
+                    &mut stdout_handle,
+                    &mut stderr_handle,
+                );
+                return Err(error);
             }
 
-            let status = child
-                .wait()
-                .map_err(|source| ContractError::TriggerPluginProcessIo {
-                    plugin_id: self.plugin_id.clone(),
-                    operation: "wait for process",
-                    source,
-                })?;
+            let status = match child.wait() {
+                Ok(status) => status,
+                Err(source) => {
+                    let error = ContractError::TriggerPluginProcessIo {
+                        plugin_id: self.plugin_id.clone(),
+                        operation: "wait for process",
+                        source,
+                    };
+                    terminate_child_group(&mut child, Duration::ZERO);
+                    let _ = child.wait();
+                    let _ = stderr_handle.take().map(|handle| handle.join());
+                    return Err(error);
+                }
+            };
             let stderr = stderr_handle
+                .take()
+                .ok_or_else(|| ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "join stderr reader",
+                    source: std::io::Error::other("stderr reader handle missing"),
+                })?
                 .join()
                 .map_err(|_| ContractError::TriggerPluginProcessIo {
                     plugin_id: self.plugin_id.clone(),
@@ -692,7 +850,9 @@ pub(crate) struct ProcessTriggerSession {
     plugin_id: String,
     identity: String,
     child: Child,
-    stdin: ChildStdin,
+    control_tx: Option<mpsc::SyncSender<Vec<u8>>>,
+    control_error_rx: mpsc::Receiver<std::io::Error>,
+    control_handle: Option<thread::JoinHandle<std::io::Result<()>>>,
     frame_rx: mpsc::Receiver<ListenerFrame>,
     stdout_handle: Option<thread::JoinHandle<()>>,
     stderr_handle: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
@@ -828,21 +988,34 @@ impl ProcessTriggerSession {
             });
         }
 
+        let (control_tx, control_error_rx, control_handle) = spawn_control_writer(stdin);
         let (frame_tx, frame_rx) = mpsc::sync_channel(MAX_PENDING_TRIGGER_FRAMES);
         let stdout_handle = thread::spawn(move || read_managed_stdout(stdout, frame_tx));
         let stderr_handle = thread::spawn(move || read_stderr_tail(stderr));
         let heartbeat_interval_ms = input_heartbeat_interval_ms(&input);
+        let last_activity_ms = match contract_now_ms(definition) {
+            Ok(now_ms) => now_ms,
+            Err(error) => {
+                terminate_child_group(&mut child, Duration::ZERO);
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(error);
+            }
+        };
         Ok(Self {
             trigger_id: definition.trigger_id.clone(),
             plugin_id: manifest.plugin_id.clone(),
             identity,
             child,
-            stdin,
+            control_tx: Some(control_tx),
+            control_error_rx,
+            control_handle: Some(control_handle),
             frame_rx,
             stdout_handle: Some(stdout_handle),
             stderr_handle: Some(stderr_handle),
             state: ListenerSessionState::WaitingReady,
-            last_activity_ms: contract_now_ms(definition)?,
+            last_activity_ms,
             heartbeat_interval_ms,
             shutdown_grace: Duration::from_secs(10),
             staged_sequence: 0,
@@ -875,9 +1048,18 @@ impl ProcessTriggerSession {
         }
 
         let mut staged = 0usize;
+        let drain_deadline = Instant::now() + MANAGED_DRAIN_TIME_BUDGET;
+        let mut frames_processed = 0usize;
         loop {
+            if frames_processed >= MANAGED_DRAIN_FRAME_BUDGET || Instant::now() >= drain_deadline {
+                break;
+            }
+            if let Some(source) = self.take_control_error() {
+                return Err(self.control_error(source));
+            }
             match self.frame_rx.try_recv() {
                 Ok(ListenerFrame::Bytes(frame)) => {
+                    frames_processed = frames_processed.saturating_add(1);
                     if frame.iter().all(u8::is_ascii_whitespace) {
                         continue;
                     }
@@ -981,12 +1163,18 @@ impl ProcessTriggerSession {
     }
 
     pub(crate) fn shutdown(&mut self, reason: &str) -> Result<(), ContractError> {
-        if self.terminal && self.stdout_handle.is_none() && self.stderr_handle.is_none() {
+        if self.terminal
+            && self.stdout_handle.is_none()
+            && self.stderr_handle.is_none()
+            && self.control_handle.is_none()
+        {
             return Ok(());
         }
-        let _ = self.write_message(&TriggerHostMessage::Stop(TriggerStop {
-            reason: reason.to_owned(),
-        }));
+        let stop_error = self
+            .write_message(&TriggerHostMessage::Stop(TriggerStop {
+                reason: reason.to_owned(),
+            }))
+            .err();
         let deadline = Instant::now() + self.shutdown_grace;
         while Instant::now() < deadline {
             while self.frame_rx.try_recv().is_ok() {}
@@ -994,6 +1182,12 @@ impl ProcessTriggerSession {
                 Ok(Some(_)) => break,
                 Ok(None) => thread::sleep(Duration::from_millis(25)),
                 Err(source) => {
+                    terminate_child_group(&mut self.child, Duration::ZERO);
+                    let _ = self.child.wait();
+                    self.control_tx.take();
+                    let _ = self.control_handle.take().map(|handle| handle.join());
+                    let _ = self.stdout_handle.take().map(|handle| handle.join());
+                    let _ = self.stderr_handle.take().map(|handle| handle.join());
                     return Err(ContractError::TriggerPluginProcessIo {
                         plugin_id: self.plugin_id.clone(),
                         operation: "wait for managed listener shutdown",
@@ -1013,6 +1207,21 @@ impl ProcessTriggerSession {
             }
         }
         while self.frame_rx.try_recv().is_ok() {}
+        self.control_tx.take();
+        if let Some(handle) = self.control_handle.take() {
+            let writer_result = handle.join().map_err(|_| {
+                ContractError::TriggerPluginProcessIo {
+                    plugin_id: self.plugin_id.clone(),
+                    operation: "join managed stdin writer",
+                    source: std::io::Error::other("stdin writer panicked"),
+                }
+            })?;
+            if let Err(source) = writer_result
+                && stop_error.is_none()
+            {
+                return Err(self.control_error(source));
+            }
+        }
         if let Some(handle) = self.stdout_handle.take() {
             handle.join().map_err(|_| ContractError::TriggerPluginProcessIo {
                 plugin_id: self.plugin_id.clone(),
@@ -1036,25 +1245,54 @@ impl ProcessTriggerSession {
         }
         self.terminal = true;
         self.state = ListenerSessionState::Stopped;
+        if let Some(error) = stop_error {
+            return Err(error);
+        }
+        if let Ok(source) = self.control_error_rx.try_recv() {
+            return Err(self.control_error(source));
+        }
         Ok(())
     }
 
+    fn take_control_error(&self) -> Option<std::io::Error> {
+        self.control_error_rx.try_recv().ok()
+    }
+
+    fn control_error(&self, source: std::io::Error) -> ContractError {
+        ContractError::TriggerPluginProcessIo {
+            plugin_id: self.plugin_id.clone(),
+            operation: "write managed listener control message",
+            source,
+        }
+    }
+
     fn write_message(&mut self, message: &TriggerHostMessage) -> Result<(), ContractError> {
-        let encoded = serde_json::to_vec(message).map_err(|source| {
+        if let Some(source) = self.take_control_error() {
+            return Err(self.control_error(source));
+        }
+        let mut encoded = serde_json::to_vec(message).map_err(|source| {
             ContractError::TriggerPluginProtocolEncode {
                 plugin_id: self.plugin_id.clone(),
                 source,
             }
         })?;
-        self.stdin
-            .write_all(&encoded)
-            .and_then(|_| self.stdin.write_all(b"\n"))
-            .and_then(|_| self.stdin.flush())
-            .map_err(|source| ContractError::TriggerPluginProcessIo {
-                plugin_id: self.plugin_id.clone(),
-                operation: "write managed listener control message",
-                source,
-            })
+        encoded.push(b'\n');
+        let sender = self.control_tx.as_ref().ok_or_else(|| self.control_error(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "managed stdin writer is closed"),
+        ))?;
+        sender.try_send(encoded).map_err(|error| {
+            let source = match error {
+                mpsc::TrySendError::Full(_) => std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "managed stdin writer queue is full",
+                ),
+                mpsc::TrySendError::Disconnected(_) => std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "managed stdin writer has stopped",
+                ),
+            };
+            self.control_error(source)
+        })
     }
 }
 
@@ -1062,6 +1300,105 @@ impl Drop for ProcessTriggerSession {
     fn drop(&mut self) {
         let _ = self.shutdown("supervisor_drop");
     }
+}
+
+fn spawn_control_writer(
+    stdin: ChildStdin,
+) -> (
+    mpsc::SyncSender<Vec<u8>>,
+    mpsc::Receiver<std::io::Error>,
+    thread::JoinHandle<std::io::Result<()>>,
+) {
+    let (control_tx, control_rx): (
+        mpsc::SyncSender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+    ) = mpsc::sync_channel(MANAGED_CONTROL_QUEUE_CAPACITY);
+    let (error_tx, error_rx) = mpsc::channel();
+    let control_handle = thread::spawn(move || {
+        if let Err(source) = set_control_stdin_nonblocking(&stdin) {
+            let _ = error_tx.send(std::io::Error::new(source.kind(), source.to_string()));
+            return Err(source);
+        }
+        let mut stdin = stdin;
+        while let Ok(message) = control_rx.recv() {
+            if let Err(source) = write_control_message(&mut stdin, &message) {
+                let _ = error_tx.send(std::io::Error::new(source.kind(), source.to_string()));
+                return Err(source);
+            }
+        }
+        Ok(())
+    });
+    (control_tx, error_rx, control_handle)
+}
+
+fn write_control_message(stdin: &mut ChildStdin, message: &[u8]) -> std::io::Result<()> {
+    let deadline = Instant::now() + MANAGED_CONTROL_WRITE_TIMEOUT;
+    let mut offset = 0usize;
+    while offset < message.len() {
+        match stdin.write(&message[offset..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "managed stdin closed while writing",
+                ));
+            }
+            Ok(written) => offset = offset.saturating_add(written),
+            Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "managed stdin write exceeded deadline",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(source) => return Err(source),
+        }
+    }
+    stdin.flush()
+
+}
+
+#[cfg(unix)]
+fn set_control_stdin_nonblocking(stdin: &ChildStdin) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let fd = stdin.as_raw_fd();
+    // SAFETY: fcntl only reads and updates flags for this owned pipe descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fcntl updates flags for the same valid pipe descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_control_stdin_nonblocking(_: &ChildStdin) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn cleanup_short_lived_process(
+    plugin_id: &str,
+    child: &mut Child,
+    stdin: &mut ChildStdin,
+    stdout_handle: &mut Option<thread::JoinHandle<()>>,
+    stderr_handle: &mut Option<thread::JoinHandle<std::io::Result<String>>>,
+) {
+    let _ = request_plugin_stop(
+        plugin_id,
+        stdin,
+        TriggerStop {
+            reason: String::from("host_error"),
+        },
+    );
+    terminate_child_group(child, Duration::from_secs(3));
+    let _ = child.wait();
+    let _ = stdout_handle.take().map(|handle| handle.join());
+    let _ = stderr_handle.take().map(|handle| handle.join());
 }
 
 fn read_managed_stdout(stdout: std::process::ChildStdout, frame_tx: mpsc::SyncSender<ListenerFrame>) {
@@ -1428,12 +1765,13 @@ mod tests {
                 .len(),
             1
         );
-        while !ack_path.exists() {
+        while !std::fs::read_to_string(&ack_path)
+            .ok()
+            .is_some_and(|ack| ack.contains("cp-managed"))
+        {
             assert!(Instant::now() < deadline, "durable ACK should reach listener");
             thread::sleep(Duration::from_millis(10));
         }
-        let ack = std::fs::read_to_string(&ack_path).expect("ack fixture should be readable");
-        assert!(ack.contains("cp-managed"));
         assert!(session.is_active());
         session
             .shutdown("test_complete")

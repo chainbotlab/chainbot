@@ -214,6 +214,13 @@ impl ExternalTriggerSupervisor {
             None
         };
 
+        if runtime == ExternalTriggerSessionRuntime::ProcessDaemon && process_session.is_none() {
+            return Err(ContractError::TriggerPluginProtocolContractViolation {
+                plugin_id,
+                detail: "managed process session requires a runtime owner".to_owned(),
+            });
+        }
+
         self.sessions.insert(
             trigger_id.clone(),
             ExternalTriggerSession {
@@ -1383,6 +1390,26 @@ mod tests {
 
         drop(state_store);
         let _ = fs::remove_file(sqlite_path);
+    }
+
+    #[test]
+    fn process_daemon_session_requires_runtime_owner() {
+        let mut supervisor = ExternalTriggerSupervisor::new("daemon-owner");
+        let error = supervisor
+            .try_start_session_with_process(
+                ExternalTriggerSessionSpec {
+                    trigger_id: String::from("tr-process-daemon"),
+                    plugin_id: String::from("plugin-process"),
+                    runtime: ExternalTriggerSessionRuntime::ProcessDaemon,
+                    wasm_component: None,
+                },
+                100,
+                None,
+            )
+            .expect_err("managed process session without owner should be rejected");
+
+        assert!(error.to_string().contains("runtime owner"));
+        assert!(supervisor.sessions().is_empty());
     }
 
     #[test]

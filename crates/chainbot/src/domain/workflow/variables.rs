@@ -231,10 +231,6 @@ pub struct RuntimeVariableNamespaces {
 }
 
 impl RuntimeVariableNamespaces {
-    pub fn resolve(&self, reference: &VariableReference) -> Option<&serde_json::Value> {
-        self.try_resolve(reference).ok().flatten()
-    }
-
     pub fn try_resolve(
         &self,
         reference: &VariableReference,

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chainbot::domain::state::{RunRecordSummary, RunStatus, TriggerEventRecord};
+use chainbot::domain::state::{LeaseAcquireResult, RunRecordSummary, RunStatus, TriggerEventRecord};
 use chainbot::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig};
 use chainbot::infrastructure::state::RuntimeStateStore;
 use rusqlite::Connection;
@@ -110,6 +110,63 @@ fn sqlite_runtime_read_queries_keep_indexed_plans() {
             .any(|detail| detail.contains("idx_trigger_event_records_accepted_at")),
         "recent trigger events should use accepted_at index: {trigger_plan:?}"
     );
+}
+
+#[test]
+fn fenced_terminal_log_and_summary_are_committed_together() {
+    let database_path = unique_sqlite_path("runtime-guardrails-fenced-terminal");
+    let config = sqlite_config(database_path.clone());
+    let mut store = RuntimeStateStore::open(&config, 1_711_200_000_000)
+        .expect("runtime store should initialize for fenced terminal test");
+    let first_grant = match store
+        .try_acquire_serve_lease("owner-alpha", 1_711_200_000_000, 100)
+        .expect("first owner should acquire lease")
+    {
+        LeaseAcquireResult::Acquired { grant } => grant,
+        result => panic!("unexpected first lease result: {result:?}"),
+    };
+    store
+        .write_run_summary(&RunRecordSummary {
+            schema_version: "1.0.0".to_owned(),
+            run_id: "fenced-run".to_owned(),
+            workflow_id: "wf-alpha".to_owned(),
+            status: RunStatus::Running,
+            started_at_ms: 1_711_200_000_000,
+            finished_at_ms: None,
+            owner_id: Some(String::from("owner-alpha")),
+            lease_generation: Some(first_grant.generation),
+        })
+        .expect("running summary should persist");
+
+    let second = store
+        .try_acquire_serve_lease("owner-beta", 1_711_200_000_101, 100)
+        .expect("successor owner should acquire expired lease");
+    assert!(matches!(second, LeaseAcquireResult::Acquired { .. }));
+
+    let committed = store
+        .write_fenced_terminal_run_with_log(
+            &RunRecordSummary {
+                schema_version: "1.0.0".to_owned(),
+                run_id: "fenced-run".to_owned(),
+                workflow_id: "wf-alpha".to_owned(),
+                status: RunStatus::Succeeded,
+                started_at_ms: 1_711_200_000_000,
+                finished_at_ms: Some(1_711_200_000_110),
+                owner_id: Some(String::from("owner-alpha")),
+                lease_generation: Some(first_grant.generation),
+            },
+            "run_finished",
+            "stale completion",
+            1_711_200_000_110,
+        )
+        .expect("stale fenced terminal write should be evaluated");
+
+    assert!(!committed);
+    assert!(store
+        .list_recent_workflow_log_entries(10, Some("fenced-run"))
+        .expect("fenced logs should be queryable")
+        .is_empty());
+    let _ = fs::remove_file(database_path);
 }
 
 #[test]

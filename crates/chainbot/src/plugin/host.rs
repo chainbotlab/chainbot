@@ -343,7 +343,6 @@ impl ExternalNodePluginHost {
             .call_tool(&request.operation, &request.input)
             .map_err(|failure| map_mcp_invocation_failure(&manifest.plugin_id, failure))?;
 
-        self.ensure_not_cancelled(&manifest.plugin_id)?;
         let output = normalize_mcp_tool_result(&manifest.plugin_id, call_result)?;
         validate_output_schema(&manifest.plugin_id, &operation.output_schema, &output)?;
 

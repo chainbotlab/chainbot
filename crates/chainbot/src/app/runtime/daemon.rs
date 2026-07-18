@@ -676,7 +676,7 @@ pub(crate) fn run_internal_serve_daemon_loop(
                 teardown_external_trigger_sessions(
                     &mut external_trigger_supervisor,
                     observed_at_ms,
-                );
+                )?;
                 let mut error_store = RuntimeStateStore::open(storage_config, current_time_ms()?)
                     .map_err(|open_error| {
                     map_runtime_state_error("open runtime state store", open_error)
@@ -731,24 +731,26 @@ pub(crate) fn run_internal_serve_daemon_loop(
     })();
 
     cancellation.shutdown();
-    teardown_external_trigger_sessions(
+    let teardown_result = teardown_external_trigger_sessions(
         &mut external_trigger_supervisor,
         current_time_ms().unwrap_or_default(),
     );
     let shutdown_result = ingress_supervisor.shutdown().map_err(map_ingress_error);
     let heartbeat_result = lease_heartbeat.shutdown();
-    loop_result.and(shutdown_result).and(heartbeat_result)
+    loop_result
+        .and(teardown_result)
+        .and(shutdown_result)
+        .and(heartbeat_result)
 }
 
 pub(crate) fn teardown_external_trigger_sessions(
     supervisor: &mut ExternalTriggerSupervisor,
     observed_at_ms: i64,
-) {
-    let _ = supervisor.try_reconcile_with_process(
-        BTreeMap::new(),
-        observed_at_ms,
-        |_, _| Ok(None),
-    );
+) -> Result<(), UserFacingError> {
+    supervisor
+        .try_reconcile_with_process(BTreeMap::new(), observed_at_ms, |_, _| Ok(None))
+        .map(|_| ())
+        .map_err(UserFacingError::from_contract)
 }
 
 pub(crate) fn serve_once_with_lease(

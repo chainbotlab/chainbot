@@ -83,6 +83,14 @@ struct ValidationOutput {
     valid: bool,
     root: String,
     warnings: Vec<CompatibilityWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ValidationErrorOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationErrorOutput {
+    code: &'static str,
+    message: String,
 }
 
 #[derive(Debug)]
@@ -360,9 +368,23 @@ impl CliRequest {
         &self,
         json_output: bool,
     ) -> Result<CliOutput, UserFacingError> {
-        let layout = self.resolve_existing_root()?;
-        let definitions =
-            load_root_definition_bundle(&layout).map_err(UserFacingError::from_contract)?;
+        let layout = match self.resolve_existing_root() {
+            Ok(layout) => layout,
+            Err(error) if json_output => {
+                return Ok(render_validation_json_error(None, error));
+            }
+            Err(error) => return Err(error),
+        };
+        let definitions = match load_root_definition_bundle(&layout) {
+            Ok(definitions) => definitions,
+            Err(error) if json_output => {
+                return Ok(render_validation_json_error(
+                    Some(layout.root.display().to_string()),
+                    UserFacingError::from_contract(error),
+                ));
+            }
+            Err(error) => return Err(UserFacingError::from_contract(error)),
+        };
         let warnings =
             collect_compatibility_warnings(&definitions.workflows, &definitions.plugins);
         if json_output {
@@ -370,6 +392,7 @@ impl CliRequest {
                 valid: true,
                 root: layout.root.display().to_string(),
                 warnings,
+                error: None,
             };
             let stdout = serde_json::to_string_pretty(&payload).map_err(|source| {
                 UserFacingError::state(format!(
@@ -962,29 +985,23 @@ pub(crate) fn execute_single_run_with_fence_and_cancellation(
                 RunStatus::Failed
             };
 
-            write_log_entry(
-                &mut runtime.state_store,
-                &run_id,
-                "run_finished",
-                &format!(
-                    "execution finished with {} and {} node failure(s)",
-                    render_run_status(status),
-                    report.node_failures.len()
-                ),
-                finished_at_ms,
-            )
-            .map_err(|error| map_runtime_state_error("write run_finished log", error))?;
-
-            write_run_status(
+            let terminal_message = format!(
+                "execution finished with {} and {} node failure(s)",
+                render_run_status(status),
+                report.node_failures.len()
+            );
+            write_terminal_run(
                 &mut runtime.state_store,
                 &run_id,
                 &workflow_id,
                 status,
                 started_at_ms,
-                Some(finished_at_ms),
+                finished_at_ms,
+                "run_finished",
+                &terminal_message,
                 fence,
             )
-            .map_err(|error| map_runtime_state_error("persist finished run summary", error))?;
+            .map_err(|error| map_runtime_state_error("persist finished run", error))?;
 
             if status == RunStatus::Failed {
                 return Err(UserFacingError::unavailable(format!(
@@ -1006,27 +1023,18 @@ pub(crate) fn execute_single_run_with_fence_and_cancellation(
         }
         Err(error) => {
             let detail = error.to_string();
-            write_log_entry(
-                &mut runtime.state_store,
-                &run_id,
-                "run_failed",
-                &detail,
-                finished_at_ms,
-            )
-            .map_err(|write_error| map_runtime_state_error("write run_failed log", write_error))?;
-
-            write_run_status(
+            write_terminal_run(
                 &mut runtime.state_store,
                 &run_id,
                 &workflow_id,
                 RunStatus::Failed,
                 started_at_ms,
-                Some(finished_at_ms),
+                finished_at_ms,
+                "run_failed",
+                &detail,
                 fence,
             )
-            .map_err(|write_error| {
-                map_runtime_state_error("persist failed run summary", write_error)
-            })?;
+            .map_err(|write_error| map_runtime_state_error("persist failed run", write_error))?;
 
             Err(UserFacingError::unavailable(format!(
                 "Run {run_id} failed: {detail}"
@@ -1243,6 +1251,71 @@ fn write_run_status(
         return Ok(());
     }
     state_store.write_run_summary(&summary)
+}
+
+fn write_terminal_run(
+    state_store: &mut RuntimeStateStore,
+    run_id: &str,
+    workflow_id: &str,
+    status: RunStatus,
+    started_at_ms: i64,
+    finished_at_ms: i64,
+    event: &str,
+    message: &str,
+    fence: Option<&RunExecutionFence>,
+) -> Result<(), RuntimeStateError> {
+    if let Some(fence) = fence {
+        let summary = RunRecordSummary {
+            schema_version: "1.0.0".to_owned(),
+            run_id: run_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            status,
+            started_at_ms,
+            finished_at_ms: Some(finished_at_ms),
+            owner_id: Some(fence.owner_id.clone()),
+            lease_generation: Some(fence.lease_generation),
+        };
+        if !state_store.write_fenced_terminal_run_with_log(
+            &summary,
+            event,
+            message,
+            finished_at_ms,
+        )? {
+            return Err(RuntimeStateError::LeaseFenceLost {
+                run_id: run_id.to_owned(),
+            });
+        }
+        return Ok(());
+    }
+
+    write_log_entry(state_store, run_id, event, message, finished_at_ms)?;
+    write_run_status(
+        state_store,
+        run_id,
+        workflow_id,
+        status,
+        started_at_ms,
+        Some(finished_at_ms),
+        None,
+    )
+}
+
+fn render_validation_json_error(
+    root: Option<String>,
+    error: UserFacingError,
+) -> CliOutput {
+    let payload = ValidationOutput {
+        valid: false,
+        root: root.unwrap_or_default(),
+        warnings: Vec::new(),
+        error: Some(ValidationErrorOutput {
+            code: error.error_code(),
+            message: error.to_string(),
+        }),
+    };
+    let stdout = serde_json::to_string_pretty(&payload)
+        .expect("validation error payload should serialize");
+    CliOutput::text(stdout)
 }
 
 fn write_log_entry(
@@ -1659,7 +1732,7 @@ mod tests {
         );
         assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
 
-        teardown_external_trigger_sessions(&mut supervisor, 1_710_300_400_250);
+        let _ = teardown_external_trigger_sessions(&mut supervisor, 1_710_300_400_250);
         assert!(
             supervisor.sessions().is_empty(),
             "daemon lifecycle teardown should reconcile external sessions to empty"

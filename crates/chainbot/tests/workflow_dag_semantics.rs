@@ -163,7 +163,9 @@ fn subflow_contract_boundaries() {
         ..RuntimeVariableNamespaces::default()
     };
 
-    let child_inputs = subflow.build_child_inputs(&namespaces);
+    let child_inputs = subflow
+        .try_build_child_inputs(&namespaces)
+        .expect("unambiguous child inputs should resolve");
     assert_eq!(child_inputs.len(), 2);
     assert_eq!(child_inputs.get("ticker"), Some(&json!("BTCUSDT")));
     assert_eq!(child_inputs.get("dry_run"), Some(&json!(true)));

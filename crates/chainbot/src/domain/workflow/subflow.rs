@@ -136,13 +136,6 @@ impl SubflowContract {
         Ok(())
     }
 
-    pub fn build_child_inputs(
-        &self,
-        namespaces: &RuntimeVariableNamespaces,
-    ) -> BTreeMap<String, serde_json::Value> {
-        self.try_build_child_inputs(namespaces).unwrap_or_default()
-    }
-
     pub fn try_build_child_inputs(
         &self,
         namespaces: &RuntimeVariableNamespaces,

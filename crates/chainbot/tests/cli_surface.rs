@@ -554,6 +554,27 @@ fn validate_accepts_basic_root() {
 }
 
 #[test]
+fn validate_json_returns_machine_readable_error_for_invalid_root() {
+    let _lock = acquire_fixture_lock();
+    let invalid_root = unique_root("invalid-validate-json");
+    let _ = fs::remove_dir_all(&invalid_root);
+
+    let output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &invalid_root)
+        .args(["validate", "--json"])
+        .output()
+        .expect("JSON validation should execute for an invalid root");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("invalid validation output should be JSON");
+    assert_eq!(payload["valid"], false);
+    assert!(payload["error"]["code"].is_string());
+    assert!(payload["error"]["message"].is_string());
+}
+
+#[test]
 fn validate_surfaces_legacy_node_reference_in_human_and_json_output() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
