@@ -14,7 +14,6 @@ use crate::app::runtime::external_triggers::process_listener::{
 };
 use crate::domain::trigger::{
     TriggerDefinition, TriggerEmission, TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy,
-    TriggerStateStore,
 };
 use crate::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig};
 use crate::infrastructure::state::{RuntimeStateStore, StateLayout};
@@ -33,8 +32,7 @@ impl TriggerPlane {
         builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
     ) -> Result<Self, TriggerPlaneError> {
         validate_external_trigger_manifests(&definitions, &plugin_manifests, &policy)?;
-        let collector = build_external_emission_collector(plugin_manifests, policy);
-        Self::open_domain_with_store(state_store, definitions, builtin_events, Some(collector))
+        Self::open_domain_with_store(state_store, definitions, builtin_events)
     }
 
     pub fn open_legacy_state_layout_for_tests(
@@ -45,7 +43,7 @@ impl TriggerPlane {
         builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
         now_ms: i64,
     ) -> Result<Self, TriggerPlaneError> {
-        let state_store = RuntimeStateStore::open(
+        let mut state_store = RuntimeStateStore::open(
             &RuntimeStorageConfig {
                 backend: RuntimeStorageBackend::Local {
                     database_path: state_layout.coordination_db_path,
@@ -58,82 +56,51 @@ impl TriggerPlane {
         )
         .map_err(|error| TriggerPlaneError::runtime_state(error.to_string()))?;
 
-        Self::open(
-            state_store,
-            definitions,
-            plugin_manifests,
-            policy,
-            builtin_events,
-        )
+        validate_external_trigger_manifests(&definitions, &plugin_manifests, &policy)?;
+        let manifests_by_id = plugin_manifests
+            .iter()
+            .map(|manifest| (manifest.plugin_id.as_str(), manifest))
+            .collect::<BTreeMap<_, _>>();
+        for definition in definitions.iter().filter(|definition| definition.enabled) {
+            if definition.kind()? != crate::domain::trigger::TriggerKind::ExternalPlugin {
+                continue;
+            }
+            let plugin_id = definition.plugin.as_deref().ok_or_else(|| {
+                TriggerPlaneError::Contract(
+                    crate::errors::ContractError::InvalidTriggerDefinitionField {
+                        trigger_id: definition.trigger_id.clone(),
+                        field: "trigger.plugin",
+                        detail: "value cannot be empty".to_owned(),
+                    },
+                )
+            })?;
+            let manifest = manifests_by_id.get(plugin_id).copied().ok_or_else(|| {
+                TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
+                    trigger_id: definition.trigger_id.clone(),
+                    plugin_id: plugin_id.to_owned(),
+                })
+            })?;
+            let mut on_progress = || Ok(());
+            let _ = collect_external_process_trigger_emissions(
+                &mut state_store,
+                definition,
+                manifest,
+                &policy,
+                &mut on_progress,
+            )?;
+        }
+
+        Self::open_domain_with_store(state_store, definitions, builtin_events)
     }
 
     pub fn open_with_store(
         state_store: RuntimeStateStore,
         definitions: Vec<TriggerDefinition>,
-        plugin_manifests: Vec<PluginManifest>,
-        policy: TriggerPluginHostPolicy,
         builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
     ) -> Result<Self, TriggerPlaneError> {
-        Self::open(
-            state_store,
-            definitions,
-            plugin_manifests,
-            policy,
-            builtin_events,
-        )
+        Self::open_domain_with_store(state_store, definitions, builtin_events)
     }
 
-    pub fn open_with_store_acceptance_only(
-        state_store: RuntimeStateStore,
-        definitions: Vec<TriggerDefinition>,
-        _plugin_manifests: Vec<PluginManifest>,
-        _policy: TriggerPluginHostPolicy,
-        builtin_events: BTreeMap<String, Vec<TriggerEmission>>,
-    ) -> Result<Self, TriggerPlaneError> {
-        Self::open_domain_with_store(state_store, definitions, builtin_events, None)
-    }
-}
-
-fn build_external_emission_collector(
-    plugin_manifests: Vec<PluginManifest>,
-    policy: TriggerPluginHostPolicy,
-) -> Box<
-    dyn FnMut(
-        &mut dyn TriggerStateStore,
-        &TriggerDefinition,
-        &mut dyn FnMut() -> Result<(), TriggerPlaneError>,
-    ) -> Result<Vec<TriggerEmission>, TriggerPlaneError>,
-> {
-    let manifests_by_id = plugin_manifests
-        .into_iter()
-        .map(|manifest| (manifest.plugin_id.clone(), manifest))
-        .collect::<BTreeMap<_, _>>();
-
-    Box::new(move |state_store, definition, on_progress| {
-        let plugin_id = definition.plugin.as_deref().ok_or_else(|| {
-            TriggerPlaneError::Contract(
-                crate::errors::ContractError::InvalidTriggerDefinitionField {
-                    trigger_id: definition.trigger_id.clone(),
-                    field: "trigger.plugin",
-                    detail: "value cannot be empty".to_owned(),
-                },
-            )
-        })?;
-        let manifest = manifests_by_id.get(plugin_id).ok_or_else(|| {
-            TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
-                trigger_id: definition.trigger_id.clone(),
-                plugin_id: plugin_id.to_owned(),
-            })
-        })?;
-
-        collect_external_process_trigger_emissions(
-            state_store,
-            definition,
-            manifest,
-            &policy,
-            on_progress,
-        )
-    })
 }
 
 fn validate_external_trigger_manifests(

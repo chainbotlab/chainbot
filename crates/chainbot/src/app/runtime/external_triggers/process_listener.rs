@@ -18,9 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::domain::state::StagedTriggerEventRecord;
 use crate::domain::trigger::{
     TriggerAck, TriggerDefinition, TriggerEmission, TriggerHostMessage, TriggerPlaneError,
-    TriggerPluginHostPolicy, TriggerPluginMessage, TriggerStartCommand, TriggerStateStore,
-    TriggerStop, REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+    TriggerPluginHostPolicy, TriggerPluginMessage, TriggerStartCommand, TriggerStop,
+    REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
+use crate::infrastructure::state::RuntimeStateStore;
 use crate::errors::ContractError;
 use crate::plugin::{
     configure_plugin_subprocess_environment, configure_process_group, terminate_child_group,
@@ -115,7 +116,7 @@ impl ListenerSessionState {
 }
 
 pub(crate) fn collect_external_process_trigger_emissions(
-    state_store: &mut dyn TriggerStateStore,
+    state_store: &mut RuntimeStateStore,
     definition: &TriggerDefinition,
     manifest: &PluginManifest,
     policy: &TriggerPluginHostPolicy,
@@ -318,7 +319,7 @@ fn resolve_executable_path(
 impl ExternalTriggerPlugin {
     fn stream_emissions(
         &self,
-        state_store: &mut dyn TriggerStateStore,
+        state_store: &mut RuntimeStateStore,
         definition: &TriggerDefinition,
         policy: &TriggerPluginHostPolicy,
         on_progress: &mut dyn FnMut() -> Result<(), TriggerPlaneError>,
@@ -339,7 +340,7 @@ impl ExternalTriggerPlugin {
             source: definition.source.clone(),
             params: definition.params.clone(),
             resume_checkpoint: state_store
-                .read_trigger_checkpoint_for_acceptance(&definition.trigger_id)
+                .read_trigger_checkpoint(&definition.trigger_id)
                 .map_err(|error| ContractError::InvalidTriggerEmission {
                     trigger_id: definition.trigger_id.clone(),
                     detail: error.to_string(),
@@ -639,7 +640,8 @@ impl ExternalTriggerPlugin {
                                     last_error: None,
                                 };
                                 if let Err(error) = state_store
-                                    .append_staged_trigger_event_record_for_acceptance(&staged_record)
+                                    .append_staged_trigger_event_record(&staged_record)
+                                    .map_err(TriggerPlaneError::from)
                                     .map_err(progress_to_contract_error(definition))
                                 {
                                     cleanup_short_lived_process(
@@ -880,7 +882,7 @@ impl std::fmt::Debug for ProcessTriggerSession {
 
 impl ProcessTriggerSession {
     pub(crate) fn start(
-        state_store: &mut dyn TriggerStateStore,
+        state_store: &mut RuntimeStateStore,
         definition: &TriggerDefinition,
         manifest: &PluginManifest,
         policy: &TriggerPluginHostPolicy,
@@ -918,7 +920,8 @@ impl ProcessTriggerSession {
             source: definition.source.clone(),
             params: definition.params.clone(),
             resume_checkpoint: state_store
-                .read_trigger_checkpoint_for_acceptance(&definition.trigger_id)
+                .read_trigger_checkpoint(&definition.trigger_id)
+                .map_err(TriggerPlaneError::from)
                 .map_err(progress_to_contract_error(definition))?
                 .map(|record| record.checkpoint),
             activation: activation.activation.clone(),
@@ -1035,7 +1038,7 @@ impl ProcessTriggerSession {
 
     pub(crate) fn drain(
         &mut self,
-        state_store: &mut dyn TriggerStateStore,
+        state_store: &mut RuntimeStateStore,
         definition: &TriggerDefinition,
         now_ms: i64,
     ) -> Result<usize, ContractError> {
@@ -1106,7 +1109,8 @@ impl ProcessTriggerSession {
                                 last_error: None,
                             };
                             state_store
-                                .append_staged_trigger_event_record_for_acceptance(&staged_record)
+                                .append_staged_trigger_event_record(&staged_record)
+                                .map_err(TriggerPlaneError::from)
                                 .map_err(progress_to_contract_error(definition))?;
                             self.staged_sequence = self.staged_sequence.saturating_add(1);
                             self.write_message(&TriggerHostMessage::Ack(TriggerAck {

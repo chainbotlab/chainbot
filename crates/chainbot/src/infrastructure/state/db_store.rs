@@ -1628,6 +1628,24 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    pub fn load_trigger_acceptance_state(
+        &mut self,
+        trigger_id: &str,
+    ) -> Result<TriggerSnapshotRecord, RuntimeStateError> {
+        let mut snapshot = self
+            .read_trigger_snapshot(trigger_id)?
+            .unwrap_or_else(|| TriggerSnapshotRecord::new(trigger_id.to_owned()));
+        let delta_records =
+            self.load_trigger_records_after_sequence(trigger_id, snapshot.last_sequence)?;
+        if !delta_records.is_empty() {
+            for record in &delta_records {
+                snapshot.apply_record(record);
+            }
+            self.write_trigger_snapshot(&snapshot)?;
+        }
+        Ok(snapshot)
+    }
+
     pub fn load_trigger_records_after_sequence(
         &mut self,
         trigger_id: &str,
@@ -2538,6 +2556,10 @@ impl RuntimeStateStore {
         self.begin_trigger_acceptance_transaction()?;
         let result = self.accept_trigger_event_in_transaction(command);
         match result {
+            Ok(TriggerAcceptanceOutcome::Conflict) => {
+                self.rollback_trigger_acceptance_transaction()?;
+                Ok(TriggerAcceptanceOutcome::Conflict)
+            }
             Ok(outcome) => {
                 if let Err(error) = self.commit_trigger_acceptance_transaction() {
                     let _ = self.rollback_trigger_acceptance_transaction();
