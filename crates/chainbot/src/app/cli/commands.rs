@@ -35,9 +35,7 @@ use crate::app::runtime::daemon;
 use crate::app::runtime::execution::ExecutionPlane;
 use crate::app::runtime::execution::PluginActivationRuntime;
 #[cfg(test)]
-use crate::app::runtime::external_triggers::supervisor::{
-    build_desired_external_trigger_sessions, ExternalTriggerSupervisor,
-};
+use crate::app::runtime::external_triggers::ExternalTriggerSupervisor;
 use crate::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
 use crate::builtins::{build_builtin_registry, BuiltinRuntimeContext, SecretDecryptMode};
 use crate::domain::runtime::{NormalizedRunRequest, WorkflowRunStatus};
@@ -1355,9 +1353,7 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, OnceLock};
 
-    use crate::app::runtime::daemon::{
-        serve_once_with_lease, teardown_external_trigger_sessions, ServeLeaseSupervisor,
-    };
+    use crate::app::runtime::daemon::{serve_once_with_lease, ServeLeaseSupervisor};
     use crate::infrastructure::config::RuntimeStorageBackend;
 
     const TEST_SERVE_LEASE_TTL_MS: i64 = 30_000;
@@ -1403,12 +1399,6 @@ mod tests {
             1_710_300_000_000,
         );
         let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
-        let desired_external_sessions = build_desired_external_trigger_sessions(
-            &runtime.definitions.triggers,
-            &collect_external_trigger_manifests(&runtime.definitions.plugins),
-        )
-        .expect("external trigger desired sessions should build");
-        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_000_000);
         let serve_output = serve_once_with_lease(
             &mut runtime,
             1_710_300_000_000,
@@ -1476,12 +1466,6 @@ mod tests {
             1_710_300_100_000,
         );
         let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
-        let desired_external_sessions = build_desired_external_trigger_sessions(
-            &runtime.definitions.triggers,
-            &collect_external_trigger_manifests(&runtime.definitions.plugins),
-        )
-        .expect("external trigger desired sessions should build");
-        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_100_000);
         let serve_output = serve_once_with_lease(
             &mut runtime,
             1_710_300_100_000,
@@ -1566,12 +1550,6 @@ mod tests {
             1_710_300_150_000,
         );
         let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
-        let desired_external_sessions = build_desired_external_trigger_sessions(
-            &runtime.definitions.triggers,
-            &collect_external_trigger_manifests(&runtime.definitions.plugins),
-        )
-        .expect("external trigger desired sessions should build");
-        let _ = external_trigger_supervisor.reconcile(desired_external_sessions, 1_710_300_150_000);
         let serve_output = serve_once_with_lease(
             &mut runtime,
             1_710_300_150_010,
@@ -1638,110 +1616,6 @@ mod tests {
         ));
         assert_eq!(snapshot.owner_id.as_deref(), Some("owner-renew"));
         assert_eq!(snapshot.expires_at_ms, Some(1_710_300_240_100));
-    }
-
-    #[test]
-    fn daemon_composes_external_trigger_supervisor_from_runtime_definitions() {
-        let _guard = fixture_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-
-        let root = prepare_fixture_root("success", "cli-external-trigger-supervisor-composition");
-        let request = CliRequest {
-            command: CliCommand::Serve,
-            json_output: false,
-            trigger_operation: None,
-            catalog_request: None,
-            plugin_command: None,
-            observe_request: None,
-            daemon_owner_id: None,
-        };
-
-        unsafe {
-            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
-            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
-        }
-
-        let runtime = request
-            .load_runtime_context()
-            .expect("runtime load should succeed for supervisor composition");
-        let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
-        let desired_sessions = build_desired_external_trigger_sessions(
-            &runtime.definitions.triggers,
-            &trigger_manifests,
-        )
-        .expect("external trigger desired sessions should build");
-        let mut supervisor = ExternalTriggerSupervisor::new("test-owner");
-        let report = supervisor.reconcile(desired_sessions, 1_710_300_300_000);
-
-        assert!(
-            report
-                .started
-                .iter()
-                .any(|trigger_id| trigger_id == "external-trigger-e2e"),
-            "daemon composition should include enabled external trigger session"
-        );
-        assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
-
-        unsafe {
-            std::env::remove_var("CHAINBOT_CONFIG_DIR");
-            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
-        }
-    }
-
-    #[test]
-    fn daemon_teardown_reconciles_external_trigger_sessions_to_empty() {
-        let _guard = fixture_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-
-        let root = prepare_fixture_root("success", "cli-external-trigger-supervisor-teardown");
-        let request = CliRequest {
-            command: CliCommand::Serve,
-            json_output: false,
-            trigger_operation: None,
-            catalog_request: None,
-            plugin_command: None,
-            observe_request: None,
-            daemon_owner_id: None,
-        };
-
-        unsafe {
-            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
-            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
-        }
-
-        let runtime = request
-            .load_runtime_context()
-            .expect("runtime load should succeed for supervisor teardown coverage");
-        let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
-        let desired_sessions = build_desired_external_trigger_sessions(
-            &runtime.definitions.triggers,
-            &trigger_manifests,
-        )
-        .expect("external trigger desired sessions should build");
-        let mut supervisor = ExternalTriggerSupervisor::new("test-owner");
-        let start_report = supervisor.reconcile(desired_sessions, 1_710_300_400_000);
-
-        assert!(
-            start_report
-                .started
-                .iter()
-                .any(|trigger_id| trigger_id == "external-trigger-e2e"),
-            "fixture should start at least one external trigger session before teardown"
-        );
-        assert!(supervisor.sessions().contains_key("external-trigger-e2e"));
-
-        let _ = teardown_external_trigger_sessions(&mut supervisor, 1_710_300_400_250);
-        assert!(
-            supervisor.sessions().is_empty(),
-            "daemon lifecycle teardown should reconcile external sessions to empty"
-        );
-
-        unsafe {
-            std::env::remove_var("CHAINBOT_CONFIG_DIR");
-            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
-        }
     }
 
     fn prepare_fixture_root(case_name: &str, root_name: &str) -> PathBuf {

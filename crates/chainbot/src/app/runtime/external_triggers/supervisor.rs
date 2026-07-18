@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use crate::app::runtime::external_triggers::wasmtime::push_event_with_host_callback;
-use crate::app::runtime::external_triggers::process_listener::ProcessTriggerSession;
+use crate::app::runtime::external_triggers::process_listener::{
+    collect_external_process_trigger_emissions, ProcessTriggerSession,
+};
 use crate::app::runtime::external_triggers::wasmtime::{
     host_push_result_from_staged_append, map_control_flow_source_to_push_outcome,
     ComponentWasmTriggerSession, HostPushControlFlowSource, HostPushError, HostPushErrorSource,
@@ -21,7 +23,9 @@ use crate::app::runtime::external_triggers::wasmtime::{
     WasmTriggerSession, WasmTriggerSessionConfig,
 };
 use crate::domain::state::StagedTriggerEventRecord;
-use crate::domain::trigger::{TriggerDefinition, TriggerKind};
+use crate::domain::trigger::{
+    TriggerDefinition, TriggerKind, TriggerPlaneError, TriggerPluginHostPolicy,
+};
 use crate::errors::ContractError;
 use crate::infrastructure::state::RuntimeStateStore;
 use crate::plugin::{
@@ -29,7 +33,7 @@ use crate::plugin::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExternalTriggerSupervisorBudget {
+struct ExternalTriggerSupervisorBudget {
     pub max_sessions_per_cycle: usize,
     pub max_polls_per_session: usize,
 }
@@ -44,19 +48,19 @@ impl Default for ExternalTriggerSupervisorBudget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ExternalTriggerSupervisorSettings {
+struct ExternalTriggerSupervisorSettings {
     pub budget: ExternalTriggerSupervisorBudget,
     pub wasm_session: WasmTriggerSessionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalTriggerPollBudget {
+struct ExternalTriggerPollBudget {
     pub trigger_id: String,
     pub poll_budget: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalTriggerSessionRuntime {
+enum ExternalTriggerSessionRuntime {
     Process,
     ProcessDaemon,
     Wasm,
@@ -64,7 +68,7 @@ pub enum ExternalTriggerSessionRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalTriggerSessionSpec {
+struct ExternalTriggerSessionSpec {
     pub trigger_id: String,
     pub plugin_id: String,
     pub runtime: ExternalTriggerSessionRuntime,
@@ -72,13 +76,13 @@ pub struct ExternalTriggerSessionSpec {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalTriggerSessionState {
+enum ExternalTriggerSessionState {
     Active,
     Stopping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalTriggerPushControlState {
+enum ExternalTriggerPushControlState {
     Ready,
     #[cfg(test)]
     QueueSaturated,
@@ -87,7 +91,7 @@ pub enum ExternalTriggerPushControlState {
 }
 
 #[derive(Debug)]
-pub struct ExternalTriggerSession {
+struct ExternalTriggerSession {
     pub trigger_id: String,
     pub plugin_id: String,
     pub runtime: ExternalTriggerSessionRuntime,
@@ -101,14 +105,14 @@ pub struct ExternalTriggerSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalTriggerReconcileReport {
+struct ExternalTriggerReconcileReport {
     pub started: Vec<String>,
     pub stopped: Vec<String>,
     pub retained: Vec<String>,
 }
 
 #[derive(Debug)]
-pub struct ExternalTriggerSupervisor {
+pub(crate) struct ExternalTriggerSupervisor {
     owner_id: String,
     sessions: BTreeMap<String, ExternalTriggerSession>,
     settings: ExternalTriggerSupervisorSettings,
@@ -117,11 +121,11 @@ pub struct ExternalTriggerSupervisor {
 }
 
 impl ExternalTriggerSupervisor {
-    pub fn new(owner_id: impl Into<String>) -> Self {
+    pub(crate) fn new(owner_id: impl Into<String>) -> Self {
         Self::with_settings(owner_id, ExternalTriggerSupervisorSettings::default())
     }
 
-    pub fn with_settings(
+    fn with_settings(
         owner_id: impl Into<String>,
         settings: ExternalTriggerSupervisorSettings,
     ) -> Self {
@@ -139,12 +143,90 @@ impl ExternalTriggerSupervisor {
         self
     }
 
-    pub fn sessions(&self) -> &BTreeMap<String, ExternalTriggerSession> {
+    pub(crate) fn run_cycle<F>(
+        &mut self,
+        definitions: &[TriggerDefinition],
+        manifests: &[PluginManifest],
+        policy: &TriggerPluginHostPolicy,
+        state_store: &mut RuntimeStateStore,
+        observed_at_ms: i64,
+        on_progress: &mut F,
+    ) -> Result<(), TriggerPlaneError>
+    where
+        F: FnMut() -> Result<(), TriggerPlaneError>,
+    {
+        let desired = build_desired_external_trigger_sessions(definitions, manifests)?;
+        let definitions_by_id = definitions
+            .iter()
+            .map(|definition| (definition.trigger_id.as_str(), definition))
+            .collect::<BTreeMap<_, _>>();
+        let manifests_by_id = manifests
+            .iter()
+            .map(|manifest| (manifest.plugin_id.as_str(), manifest))
+            .collect::<BTreeMap<_, _>>();
+
+        self.try_reconcile_with_process(
+            desired,
+            observed_at_ms,
+            |spec, cancellation| {
+                if spec.runtime != ExternalTriggerSessionRuntime::ProcessDaemon {
+                    return Ok(None);
+                }
+                let definition = definitions_by_id.get(spec.trigger_id.as_str()).ok_or_else(|| {
+                    ContractError::InvalidTriggerDefinitionField {
+                        trigger_id: spec.trigger_id.clone(),
+                        field: "trigger.trigger_id",
+                        detail: "managed process session is missing trigger definition".to_owned(),
+                    }
+                })?;
+                let manifest = manifests_by_id.get(spec.plugin_id.as_str()).ok_or_else(|| {
+                    ContractError::UnknownTriggerPlugin {
+                        trigger_id: spec.trigger_id.clone(),
+                        plugin_id: spec.plugin_id.clone(),
+                    }
+                })?;
+                ProcessTriggerSession::start(
+                    state_store,
+                    definition,
+                    manifest,
+                    policy,
+                    spec.wasm_component.clone().unwrap_or_default(),
+                    cancellation,
+                )
+                .map(Some)
+            },
+        )?;
+        self.drain_process_sessions(definitions, state_store, observed_at_ms)?;
+        stage_process_external_trigger_sessions(
+            definitions,
+            manifests,
+            policy,
+            self,
+            state_store,
+            observed_at_ms,
+            on_progress,
+        )?;
+        stage_wasm_external_trigger_sessions(
+            definitions,
+            manifests,
+            self,
+            state_store,
+            observed_at_ms,
+            on_progress,
+        )
+    }
+
+    pub(crate) fn shutdown(&mut self, observed_at_ms: i64) -> Result<(), ContractError> {
+        self.try_reconcile_with_process(BTreeMap::new(), observed_at_ms, |_, _| Ok(None))
+            .map(|_| ())
+    }
+
+    fn sessions(&self) -> &BTreeMap<String, ExternalTriggerSession> {
         &self.sessions
     }
 
     #[cfg(test)]
-    pub fn start_session(&mut self, spec: ExternalTriggerSessionSpec, now_ms: i64) -> bool {
+    fn start_session(&mut self, spec: ExternalTriggerSessionSpec, now_ms: i64) -> bool {
         self.try_start_session_with_process(spec, now_ms, None)
             .expect("test external trigger session should start")
     }
@@ -240,7 +322,7 @@ impl ExternalTriggerSupervisor {
     }
 
     #[cfg(test)]
-    pub fn stop_session(&mut self, trigger_id: &str) -> bool {
+    fn stop_session(&mut self, trigger_id: &str) -> bool {
         self.try_stop_session(trigger_id).unwrap_or(false)
     }
 
@@ -255,7 +337,7 @@ impl ExternalTriggerSupervisor {
     }
 
     #[cfg(test)]
-    pub fn record_session_turn(&mut self, trigger_id: &str, now_ms: i64) -> bool {
+    fn record_session_turn(&mut self, trigger_id: &str, now_ms: i64) -> bool {
         if let Some(session) = self.sessions.get_mut(trigger_id) {
             if let Some(wasm_session) = session.wasm_session.as_mut() {
                 wasm_session.begin_turn(now_ms);
@@ -267,7 +349,7 @@ impl ExternalTriggerSupervisor {
     }
 
     #[cfg(test)]
-    pub fn record_session_turns(&mut self, now_ms: i64) {
+    fn record_session_turns(&mut self, now_ms: i64) {
         for session in self.sessions.values_mut() {
             if let Some(wasm_session) = session.wasm_session.as_mut() {
                 wasm_session.begin_turn(now_ms);
@@ -275,7 +357,7 @@ impl ExternalTriggerSupervisor {
         }
     }
 
-    pub fn execute_wasm_guest_turn(
+    fn execute_wasm_guest_turn(
         &mut self,
         trigger_id: &str,
         now_ms: i64,
@@ -337,7 +419,7 @@ impl ExternalTriggerSupervisor {
         })
     }
 
-    pub fn stage_wasm_guest_turn(
+    fn stage_wasm_guest_turn(
         &mut self,
         trigger_id: &str,
         definition: &TriggerDefinition,
@@ -349,7 +431,7 @@ impl ExternalTriggerSupervisor {
         })
     }
 
-    pub fn plan_process_polls_for_cycle(&mut self, _now_ms: i64) -> Vec<ExternalTriggerPollBudget> {
+    fn plan_process_polls_for_cycle(&mut self, _now_ms: i64) -> Vec<ExternalTriggerPollBudget> {
         let session_ids = self.sessions.keys().cloned().collect::<Vec<_>>();
         let total_sessions = session_ids.len();
         if total_sessions == 0 {
@@ -417,7 +499,7 @@ impl ExternalTriggerSupervisor {
     }
 
     #[cfg(test)]
-    pub fn set_push_control_state(
+    fn set_push_control_state(
         &mut self,
         trigger_id: &str,
         control_state: ExternalTriggerPushControlState,
@@ -430,7 +512,7 @@ impl ExternalTriggerSupervisor {
     }
 
     #[cfg(test)]
-    pub fn push_wasm_guest_event<F>(
+    fn push_wasm_guest_event<F>(
         &mut self,
         trigger_id: &str,
         event_bytes: &[u8],
@@ -456,7 +538,7 @@ impl ExternalTriggerSupervisor {
         push_event_with_host_callback(&mut host, event_bytes)
     }
 
-    pub(crate) fn drain_process_sessions(
+    fn drain_process_sessions(
         &mut self,
         definitions: &[TriggerDefinition],
         state_store: &mut RuntimeStateStore,
@@ -493,7 +575,7 @@ impl ExternalTriggerSupervisor {
         Ok(staged)
     }
 
-    pub(crate) fn try_reconcile_with_process<F>(
+    fn try_reconcile_with_process<F>(
         &mut self,
         desired: BTreeMap<String, ExternalTriggerSessionSpec>,
         now_ms: i64,
@@ -565,7 +647,7 @@ impl ExternalTriggerSupervisor {
     }
 
     #[cfg(test)]
-    pub fn reconcile(
+    fn reconcile(
         &mut self,
         desired: BTreeMap<String, ExternalTriggerSessionSpec>,
         now_ms: i64,
@@ -759,7 +841,179 @@ where
     }
 }
 
-pub fn build_desired_external_trigger_sessions(
+fn stage_process_external_trigger_sessions<F>(
+    definitions: &[TriggerDefinition],
+    manifests: &[PluginManifest],
+    policy: &TriggerPluginHostPolicy,
+    supervisor: &mut ExternalTriggerSupervisor,
+    state_store: &mut RuntimeStateStore,
+    staged_at_ms: i64,
+    on_progress: &mut F,
+) -> Result<(), TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let process_poll_budget = supervisor.plan_process_polls_for_cycle(staged_at_ms);
+    let definitions_by_id: BTreeMap<String, &TriggerDefinition> = definitions
+        .iter()
+        .map(|definition| (definition.trigger_id.clone(), definition))
+        .collect();
+    let manifests_by_id: BTreeMap<String, &PluginManifest> = manifests
+        .iter()
+        .map(|manifest| (manifest.plugin_id.clone(), manifest))
+        .collect();
+
+    for poll_budget in &process_poll_budget {
+        let session = supervisor
+            .sessions()
+            .get(&poll_budget.trigger_id)
+            .ok_or_else(|| {
+                TriggerPlaneError::Contract(ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: poll_budget.trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "process polling budget references a missing supervisor session"
+                        .to_owned(),
+                })
+            })?;
+        if session.runtime != ExternalTriggerSessionRuntime::Process {
+            continue;
+        }
+
+        let definition = definitions_by_id.get(&session.trigger_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(ContractError::InvalidTriggerDefinitionField {
+                trigger_id: session.trigger_id.clone(),
+                field: "trigger.trigger_id",
+                detail: "process supervisor session is missing trigger definition".to_owned(),
+            })
+        })?;
+        let manifest = manifests_by_id.get(&session.plugin_id).ok_or_else(|| {
+            TriggerPlaneError::Contract(ContractError::UnknownTriggerPlugin {
+                trigger_id: session.trigger_id.clone(),
+                plugin_id: session.plugin_id.clone(),
+            })
+        })?;
+
+        for poll_ordinal in 0..poll_budget.poll_budget {
+            let emissions = collect_external_process_trigger_emissions(
+                state_store,
+                definition,
+                manifest,
+                policy,
+                on_progress,
+            )?;
+            for (index, emission) in emissions.into_iter().enumerate() {
+                on_progress()?;
+                let staged_record = StagedTriggerEventRecord {
+                    schema_version: String::from("1.0.0"),
+                    staging_id: format!(
+                        "process:{}:{}:{}:{poll_ordinal}:{index}",
+                        definition.trigger_id, emission.event_id, staged_at_ms
+                    ),
+                    trigger_id: definition.trigger_id.clone(),
+                    workflow_id: definition.workflow_id.clone(),
+                    event_id: emission.event_id,
+                    source: emission
+                        .source
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| definition.source.clone()),
+                    occurred_at_ms: emission.occurred_at_ms,
+                    staged_at_ms,
+                    checkpoint: emission.checkpoint,
+                    payload: emission.payload,
+                    dedup_key: emission.dedup_key,
+                    dedup_window_ms: emission.dedup_window_ms,
+                    cooldown_key: emission.cooldown_key,
+                    cooldown_ms: emission.cooldown_ms,
+                    accepted_at_ms: None,
+                    last_error: None,
+                };
+                let _ = state_store.append_staged_trigger_event_record(&staged_record)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn stage_wasm_external_trigger_sessions<F>(
+    definitions: &[TriggerDefinition],
+    manifests: &[PluginManifest],
+    supervisor: &mut ExternalTriggerSupervisor,
+    state_store: &mut RuntimeStateStore,
+    staged_at_ms: i64,
+    on_progress: &mut F,
+) -> Result<(), TriggerPlaneError>
+where
+    F: FnMut() -> Result<(), TriggerPlaneError>,
+{
+    let wasm_sessions = supervisor
+        .sessions()
+        .values()
+        .filter(|session| {
+            matches!(
+                session.runtime,
+                ExternalTriggerSessionRuntime::Wasm
+                    | ExternalTriggerSessionRuntime::WasmComponent
+            )
+        })
+        .map(|session| (session.trigger_id.clone(), session.plugin_id.clone()))
+        .collect::<Vec<_>>();
+
+    for (trigger_id, plugin_id) in wasm_sessions {
+        on_progress()?;
+
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.trigger_id == trigger_id)
+            .ok_or_else(|| {
+                TriggerPlaneError::Contract(ContractError::InvalidTriggerDefinitionField {
+                    trigger_id: trigger_id.clone(),
+                    field: "trigger.trigger_id",
+                    detail: "wasm supervisor session is missing trigger definition".to_owned(),
+                })
+            })?;
+        let manifest = manifests
+            .iter()
+            .find(|manifest| manifest.plugin_id == plugin_id)
+            .ok_or_else(|| {
+                TriggerPlaneError::Contract(ContractError::UnknownTriggerPlugin {
+                    trigger_id: trigger_id.clone(),
+                    plugin_id: plugin_id.clone(),
+                })
+            })?;
+
+        if manifest
+            .trigger_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lifecycle)
+            != Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession)
+        {
+            return Err(TriggerPlaneError::Contract(
+                ContractError::NodePluginInvalidField {
+                    plugin_id: manifest.plugin_id.clone(),
+                    field: "plugin.trigger_runtime.lifecycle",
+                    detail:
+                        "wasm supervisor session requires wasm_daemon_persistent_session lifecycle"
+                            .to_owned(),
+                },
+            ));
+        }
+
+        let outcome =
+            supervisor.stage_wasm_guest_turn(&trigger_id, definition, staged_at_ms, state_store);
+
+        if matches!(
+            outcome,
+            HostPushOutcome::DurableAck | HostPushOutcome::RetryableBackpressure
+        ) {
+            continue;
+        }
+    }
+
+    Ok(())
+}
+
+fn build_desired_external_trigger_sessions(
     definitions: &[TriggerDefinition],
     plugin_manifests: &[PluginManifest],
 ) -> Result<BTreeMap<String, ExternalTriggerSessionSpec>, ContractError> {

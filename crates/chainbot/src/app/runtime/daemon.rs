@@ -7,7 +7,6 @@
 //! [ROLE]
 //! Owns daemon runtime control paths separate from CLI parse/help and read-model rendering.
 
-use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
@@ -20,19 +19,12 @@ use crate::app::cli::{
     map_runtime_state_error, merge_trigger_requests, normalized_request_from_trigger, CliOutput,
     CliRequest, RuntimeContext,
 };
-use crate::app::runtime::external_triggers::process_listener::{
-    collect_external_process_trigger_emissions, ProcessTriggerSession,
-};
-use crate::app::runtime::external_triggers::supervisor::{
-    build_desired_external_trigger_sessions, ExternalTriggerPollBudget,
-    ExternalTriggerSessionRuntime, ExternalTriggerSupervisor,
-};
-use crate::app::runtime::external_triggers::wasmtime::HostPushOutcome;
+use crate::app::runtime::external_triggers::ExternalTriggerSupervisor;
 use crate::domain::state::{
     LeaseAcquireResult, RunExecutionFence, RunStatus, ServeLeaseGrant, ServeLeaseState,
-    StagedTriggerEventRecord, SERVE_OWNER_ID_PREFIX,
+    SERVE_OWNER_ID_PREFIX,
 };
-use crate::domain::trigger::{TriggerDefinition, TriggerPlane, TriggerPlaneError};
+use crate::domain::trigger::{TriggerPlane, TriggerPlaneError};
 use crate::errors::UserFacingError;
 use crate::infrastructure::config::RuntimeStorageConfig;
 use crate::infrastructure::state::RuntimeStateStore;
@@ -40,9 +32,7 @@ use crate::ingress::{
     build_desired_ingress_state, drain_ingress_emissions, DesiredIngressState,
     TriggerIngressSupervisor,
 };
-use crate::plugin::{
-    HostCancellation, HostCancellationReason, PluginManifest, TriggerRuntimeLifecycle,
-};
+use crate::plugin::{HostCancellation, HostCancellationReason};
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
 const SERVE_LEASE_RENEW_INTERVAL_MS: i64 = 10_000;
@@ -748,8 +738,7 @@ pub(crate) fn teardown_external_trigger_sessions(
     observed_at_ms: i64,
 ) -> Result<(), UserFacingError> {
     supervisor
-        .try_reconcile_with_process(BTreeMap::new(), observed_at_ms, |_, _| Ok(None))
-        .map(|_| ())
+        .shutdown(observed_at_ms)
         .map_err(UserFacingError::from_contract)
 }
 
@@ -770,61 +759,6 @@ pub(crate) fn serve_once_with_lease(
         &runtime.root_layout.plugins_dir,
         &runtime.root_layout.secrets_dir,
     );
-    let desired_external_sessions = build_desired_external_trigger_sessions(
-        &trigger_definitions,
-        &trigger_manifests,
-    )
-    .map_err(UserFacingError::from_contract)?;
-    let definitions_by_id = trigger_definitions
-        .iter()
-        .map(|definition| (definition.trigger_id.as_str(), definition))
-        .collect::<BTreeMap<_, _>>();
-    let manifests_by_id = trigger_manifests
-        .iter()
-        .map(|manifest| (manifest.plugin_id.as_str(), manifest))
-        .collect::<BTreeMap<_, _>>();
-    external_trigger_supervisor
-        .try_reconcile_with_process(
-            desired_external_sessions,
-            accepted_at_ms,
-            |spec, cancellation| {
-                if spec.runtime != ExternalTriggerSessionRuntime::ProcessDaemon {
-                    return Ok(None);
-                }
-                let definition = definitions_by_id.get(spec.trigger_id.as_str()).ok_or_else(|| {
-                    crate::errors::ContractError::InvalidTriggerDefinitionField {
-                        trigger_id: spec.trigger_id.clone(),
-                        field: "trigger.trigger_id",
-                        detail: "managed process session is missing trigger definition".to_owned(),
-                    }
-                })?;
-                let manifest = manifests_by_id.get(spec.plugin_id.as_str()).ok_or_else(|| {
-                    crate::errors::ContractError::UnknownTriggerPlugin {
-                        trigger_id: spec.trigger_id.clone(),
-                        plugin_id: spec.plugin_id.clone(),
-                    }
-                })?;
-                ProcessTriggerSession::start(
-                    &mut runtime.state_store,
-                    definition,
-                    manifest,
-                    &policy,
-                    spec.wasm_component.clone().unwrap_or_default(),
-                    cancellation,
-                )
-                .map(Some)
-            },
-        )
-        .map_err(UserFacingError::from_contract)?;
-    external_trigger_supervisor
-        .drain_process_sessions(
-            &trigger_definitions,
-            &mut runtime.state_store,
-            accepted_at_ms,
-        )
-        .map_err(UserFacingError::from_contract)?;
-    let process_poll_budget =
-        external_trigger_supervisor.plan_process_polls_for_cycle(accepted_at_ms);
     let mut renew_progress = || {
         let now_ms = current_time_ms().map_err(|error| {
             TriggerPlaneError::Contract(crate::errors::ContractError::InvalidTriggerEmission {
@@ -839,26 +773,16 @@ pub(crate) fn serve_once_with_lease(
             })
         })
     };
-    stage_process_external_trigger_sessions(
-        &trigger_definitions,
-        &trigger_manifests,
-        &policy,
-        external_trigger_supervisor,
-        &process_poll_budget,
-        &mut runtime.state_store,
-        accepted_at_ms,
-        &mut renew_progress,
-    )
-    .map_err(map_trigger_error)?;
-    stage_wasm_external_trigger_sessions(
-        &trigger_definitions,
-        &trigger_manifests,
-        external_trigger_supervisor,
-        &mut runtime.state_store,
-        accepted_at_ms,
-        &mut renew_progress,
-    )
-    .map_err(map_trigger_error)?;
+    external_trigger_supervisor
+        .run_cycle(
+            &trigger_definitions,
+            &trigger_manifests,
+            &policy,
+            &mut runtime.state_store,
+            accepted_at_ms,
+            &mut renew_progress,
+        )
+        .map_err(map_trigger_error)?;
 
     let builtin_events = crate::builtins::build_builtin_trigger_emissions(
         &trigger_definitions,
@@ -956,184 +880,6 @@ pub(crate) fn serve_once_with_lease(
     }
 
     Ok(CliOutput::text(output_lines.join("\n")))
-}
-
-fn stage_process_external_trigger_sessions<F>(
-    definitions: &[TriggerDefinition],
-    manifests: &[PluginManifest],
-    policy: &crate::domain::trigger::TriggerPluginHostPolicy,
-    supervisor: &ExternalTriggerSupervisor,
-    process_poll_budget: &[ExternalTriggerPollBudget],
-    state_store: &mut RuntimeStateStore,
-    staged_at_ms: i64,
-    on_progress: &mut F,
-) -> Result<(), TriggerPlaneError>
-where
-    F: FnMut() -> Result<(), TriggerPlaneError>,
-{
-    let definitions_by_id: BTreeMap<String, &TriggerDefinition> = definitions
-        .iter()
-        .map(|definition| (definition.trigger_id.clone(), definition))
-        .collect();
-    let manifests_by_id: BTreeMap<String, &PluginManifest> = manifests
-        .iter()
-        .map(|manifest| (manifest.plugin_id.clone(), manifest))
-        .collect();
-
-    for poll_budget in process_poll_budget {
-        let session = supervisor
-            .sessions()
-            .get(&poll_budget.trigger_id)
-            .ok_or_else(|| {
-                TriggerPlaneError::Contract(
-                    crate::errors::ContractError::InvalidTriggerDefinitionField {
-                        trigger_id: poll_budget.trigger_id.clone(),
-                        field: "trigger.trigger_id",
-                        detail: "process polling budget references a missing supervisor session"
-                            .to_owned(),
-                    },
-                )
-            })?;
-        if session.runtime != ExternalTriggerSessionRuntime::Process {
-            continue;
-        }
-
-        let definition = definitions_by_id.get(&session.trigger_id).ok_or_else(|| {
-            TriggerPlaneError::Contract(
-                crate::errors::ContractError::InvalidTriggerDefinitionField {
-                    trigger_id: session.trigger_id.clone(),
-                    field: "trigger.trigger_id",
-                    detail: "process supervisor session is missing trigger definition".to_owned(),
-                },
-            )
-        })?;
-        let manifest = manifests_by_id.get(&session.plugin_id).ok_or_else(|| {
-            TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
-                trigger_id: session.trigger_id.clone(),
-                plugin_id: session.plugin_id.clone(),
-            })
-        })?;
-
-        for poll_ordinal in 0..poll_budget.poll_budget {
-            let emissions = collect_external_process_trigger_emissions(
-                state_store,
-                definition,
-                manifest,
-                policy,
-                on_progress,
-            )?;
-            for (index, emission) in emissions.into_iter().enumerate() {
-                on_progress()?;
-                let staged_record = StagedTriggerEventRecord {
-                    schema_version: String::from("1.0.0"),
-                    staging_id: format!(
-                        "process:{}:{}:{}:{poll_ordinal}:{index}",
-                        definition.trigger_id, emission.event_id, staged_at_ms
-                    ),
-                    trigger_id: definition.trigger_id.clone(),
-                    workflow_id: definition.workflow_id.clone(),
-                    event_id: emission.event_id,
-                    source: emission
-                        .source
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or_else(|| definition.source.clone()),
-                    occurred_at_ms: emission.occurred_at_ms,
-                    staged_at_ms,
-                    checkpoint: emission.checkpoint,
-                    payload: emission.payload,
-                    dedup_key: emission.dedup_key,
-                    dedup_window_ms: emission.dedup_window_ms,
-                    cooldown_key: emission.cooldown_key,
-                    cooldown_ms: emission.cooldown_ms,
-                    accepted_at_ms: None,
-                    last_error: None,
-                };
-                let _ = state_store.append_staged_trigger_event_record(&staged_record)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn stage_wasm_external_trigger_sessions<F>(
-    definitions: &[TriggerDefinition],
-    manifests: &[PluginManifest],
-    supervisor: &mut ExternalTriggerSupervisor,
-    state_store: &mut RuntimeStateStore,
-    staged_at_ms: i64,
-    on_progress: &mut F,
-) -> Result<(), TriggerPlaneError>
-where
-    F: FnMut() -> Result<(), TriggerPlaneError>,
-{
-    let wasm_sessions = supervisor
-        .sessions()
-        .values()
-        .filter(|session| {
-            matches!(
-                session.runtime,
-                ExternalTriggerSessionRuntime::Wasm
-                    | ExternalTriggerSessionRuntime::WasmComponent
-            )
-        })
-        .map(|session| (session.trigger_id.clone(), session.plugin_id.clone()))
-        .collect::<Vec<_>>();
-
-    for (trigger_id, plugin_id) in wasm_sessions {
-        on_progress()?;
-
-        let definition = definitions
-            .iter()
-            .find(|definition| definition.trigger_id == trigger_id)
-            .ok_or_else(|| {
-                TriggerPlaneError::Contract(
-                    crate::errors::ContractError::InvalidTriggerDefinitionField {
-                        trigger_id: trigger_id.clone(),
-                        field: "trigger.trigger_id",
-                        detail: "wasm supervisor session is missing trigger definition".to_owned(),
-                    },
-                )
-            })?;
-        let manifest = manifests
-            .iter()
-            .find(|manifest| manifest.plugin_id == plugin_id)
-            .ok_or_else(|| {
-                TriggerPlaneError::Contract(crate::errors::ContractError::UnknownTriggerPlugin {
-                    trigger_id: trigger_id.clone(),
-                    plugin_id: plugin_id.clone(),
-                })
-            })?;
-
-        if manifest
-            .trigger_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.lifecycle)
-            != Some(TriggerRuntimeLifecycle::WasmDaemonPersistentSession)
-        {
-            return Err(TriggerPlaneError::Contract(
-                crate::errors::ContractError::NodePluginInvalidField {
-                    plugin_id: manifest.plugin_id.clone(),
-                    field: "plugin.trigger_runtime.lifecycle",
-                    detail:
-                        "wasm supervisor session requires wasm_daemon_persistent_session lifecycle"
-                            .to_owned(),
-                },
-            ));
-        }
-
-        let outcome =
-            supervisor.stage_wasm_guest_turn(&trigger_id, definition, staged_at_ms, state_store);
-
-        if matches!(
-            outcome,
-            HostPushOutcome::DurableAck | HostPushOutcome::RetryableBackpressure
-        ) {
-            continue;
-        }
-    }
-
-    Ok(())
 }
 
 fn map_trigger_error(error: TriggerPlaneError) -> UserFacingError {
