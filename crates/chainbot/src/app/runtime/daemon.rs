@@ -769,7 +769,8 @@ pub(crate) fn serve_once_with_lease(
         &trigger_manifests,
         &runtime.root_layout.plugins_dir,
         &runtime.root_layout.secrets_dir,
-    );
+    )
+    .map_err(UserFacingError::from_contract)?;
     let desired_external_sessions = build_desired_external_trigger_sessions(
         &trigger_definitions,
         &trigger_manifests,

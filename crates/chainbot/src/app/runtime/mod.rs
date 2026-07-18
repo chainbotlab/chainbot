@@ -23,6 +23,7 @@ use crate::plugin::PluginManifest;
 pub(crate) mod daemon;
 pub(crate) mod execution;
 pub(crate) mod external_triggers;
+pub(crate) mod plugin_activation;
 
 impl TriggerPlane {
     pub fn open(

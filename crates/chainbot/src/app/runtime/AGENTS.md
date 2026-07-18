@@ -13,4 +13,5 @@
 - `mod.rs`: Runtime orchestration exports.
 - `daemon.rs`: Process-lifecycle and daemon orchestration.
 - `execution.rs`: Workflow execution entrypoints.
+- `plugin_activation.rs`: Shared execution-time plugin activation resolution and error redaction.
 - `external_triggers/`: External-trigger host supervision and listener orchestration.
