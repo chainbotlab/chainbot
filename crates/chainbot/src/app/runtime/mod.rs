@@ -101,7 +101,6 @@ impl TriggerPlane {
     ) -> Result<Self, TriggerPlaneError> {
         Self::open_domain_with_store(state_store, definitions, builtin_events)
     }
-
 }
 
 fn validate_external_trigger_manifests(
