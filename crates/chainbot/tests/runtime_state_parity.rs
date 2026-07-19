@@ -18,11 +18,13 @@ use chainbot::domain::state::{
     IngressInboxRecord, LeaseAcquireResult, RunRecordSummary, RunStatus, ServeLeaseState,
     StagedTriggerEventRecord, TriggerCheckpointRecord, TriggerEventRecord, TriggerSnapshotRecord,
 };
+use chainbot::domain::trigger::{TriggerAcceptanceCommand, TriggerAcceptanceOutcome};
 use chainbot::infrastructure::config::{
     RuntimeHistoryRetentionPolicy, RuntimeStorageBackend, RuntimeStorageConfig,
 };
 use chainbot::infrastructure::state::RuntimeStateStore;
 use postgres::{Client, NoTls};
+use rusqlite::Connection;
 
 const TEST_POSTGRES_URL_ENV: &str = "CHAINBOT_TEST_POSTGRES_URL";
 
@@ -788,6 +790,307 @@ fn runtime_state_backends_allow_only_one_serve_lease_winner_under_contention() {
             backend.name,
         );
 
+        backend.reset();
+    }
+}
+
+#[test]
+fn sqlite_trigger_acceptance_rolls_back_when_checkpoint_write_fails() {
+    let database_path = unique_sqlite_path("trigger-acceptance-rollback");
+    let config = RuntimeStorageConfig {
+        backend: RuntimeStorageBackend::Local {
+            database_path: database_path.clone(),
+        },
+        history_retention: None,
+        raw_debug_enabled: false,
+        raw_debug_artifacts_dir: None,
+    };
+    let accepted_at_ms = 1_710_930_050_000;
+    let mut store = RuntimeStateStore::open(&config, accepted_at_ms)
+        .expect("sqlite acceptance rollback store should open");
+    assert!(
+        store
+            .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                staging_id: String::from("staging-checkpoint-failure"),
+                trigger_id: String::from("trigger-checkpoint-failure"),
+                workflow_id: String::from("wf-acceptance"),
+                event_id: String::from("event-checkpoint-failure"),
+                source: String::from("external.plugin"),
+                occurred_at_ms: accepted_at_ms,
+                staged_at_ms: accepted_at_ms,
+                checkpoint: Some(String::from("cp-checkpoint-failure")),
+                payload: serde_json::json!({"kind": "checkpoint-failure"}),
+                dedup_key: None,
+                dedup_window_ms: None,
+                cooldown_key: None,
+                cooldown_ms: None,
+                accepted_at_ms: None,
+                last_error: None,
+            })
+            .expect("rollback staged row should persist")
+    );
+    Connection::open(&database_path)
+        .expect("sqlite rollback database should open for fault injection")
+        .execute_batch(
+            "CREATE TRIGGER fail_trigger_checkpoint_write
+             BEFORE INSERT ON trigger_checkpoints
+             BEGIN
+                 SELECT RAISE(ABORT, 'checkpoint write failed');
+             END;",
+        )
+        .expect("checkpoint failure trigger should install");
+
+    let error = store
+        .accept_trigger_event(TriggerAcceptanceCommand {
+            candidate_record: TriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                run_id: String::from("run-checkpoint-failure"),
+                sequence: 1,
+                trigger_id: String::from("trigger-checkpoint-failure"),
+                workflow_id: String::from("wf-acceptance"),
+                event_id: String::from("event-checkpoint-failure"),
+                checkpoint: Some(String::from("cp-checkpoint-failure")),
+                source: String::from("external.plugin"),
+                accepted_at_ms,
+                payload: serde_json::json!({"kind": "checkpoint-failure"}),
+                dedup_key: None,
+                dedup_expires_at_ms: None,
+                cooldown_key: None,
+                cooldown_expires_at_ms: None,
+            },
+            expected_snapshot_sequence: 0,
+            staged_id: Some(String::from("staging-checkpoint-failure")),
+        })
+        .expect_err("checkpoint failure should roll back acceptance");
+    assert!(error.to_string().contains("checkpoint write failed"));
+    drop(store);
+
+    let connection = Connection::open(&database_path)
+        .expect("sqlite rollback database should reopen for assertions");
+    let (events, snapshots, checkpoints, pending): (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM trigger_event_records),
+                (SELECT COUNT(*) FROM trigger_snapshots),
+                (SELECT COUNT(*) FROM trigger_checkpoints),
+                (SELECT COUNT(*) FROM staged_trigger_event_records WHERE accepted_at_ms IS NULL)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("rolled back acceptance state should query");
+    assert_eq!((events, snapshots, checkpoints, pending), (0, 0, 0, 1));
+
+    drop(connection);
+    let _ = fs::remove_file(database_path);
+}
+
+#[test]
+fn runtime_state_backends_share_atomic_trigger_acceptance_outcomes() {
+    let _guard = backend_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    for backend in available_backends() {
+        backend.ensure_initialized();
+        backend.reset();
+
+        let trigger_id = format!("{}-acceptance", backend.slug);
+        let dedup_key = format!("{}-dedup", backend.slug);
+        let cooldown_key = format!("{}-cooldown", backend.slug);
+        let accepted_at_ms = 1_710_930_100_000;
+        let mut store = RuntimeStateStore::open(&backend.config, accepted_at_ms)
+            .unwrap_or_else(|error| panic!("{} acceptance store should open: {error}", backend.name));
+        let staged_record = |staging_id: &str, event_id: &str| StagedTriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            staging_id: String::from(staging_id),
+            trigger_id: trigger_id.clone(),
+            workflow_id: String::from("wf-acceptance"),
+            event_id: String::from(event_id),
+            source: String::from("external.plugin"),
+            occurred_at_ms: accepted_at_ms,
+            staged_at_ms: accepted_at_ms,
+            checkpoint: Some(format!("cp-{event_id}")),
+            payload: serde_json::json!({"event_id": event_id}),
+            dedup_key: None,
+            dedup_window_ms: None,
+            cooldown_key: None,
+            cooldown_ms: None,
+            accepted_at_ms: None,
+            last_error: None,
+        };
+        let accepted_record = TriggerEventRecord {
+            schema_version: String::from("1.0.0"),
+            run_id: format!("{}-accepted-run", backend.slug),
+            sequence: 1,
+            trigger_id: trigger_id.clone(),
+            workflow_id: String::from("wf-acceptance"),
+            event_id: String::from("event-accepted"),
+            checkpoint: Some(String::from("cp-accepted")),
+            source: String::from("external.plugin"),
+            accepted_at_ms,
+            payload: serde_json::json!({"kind": "accepted"}),
+            dedup_key: Some(dedup_key.clone()),
+            dedup_expires_at_ms: Some(accepted_at_ms + 10_000),
+            cooldown_key: Some(cooldown_key.clone()),
+            cooldown_expires_at_ms: Some(accepted_at_ms + 10_000),
+        };
+
+        store
+            .append_staged_trigger_event_record(&staged_record(
+                "staging-accepted",
+                "event-accepted",
+            ))
+            .expect("accepted staged row should persist");
+        let accepted = store
+            .accept_trigger_event(TriggerAcceptanceCommand {
+                candidate_record: accepted_record.clone(),
+                expected_snapshot_sequence: 0,
+                staged_id: Some(String::from("staging-accepted")),
+            })
+            .expect("acceptance transaction should commit");
+        assert!(matches!(accepted, TriggerAcceptanceOutcome::Accepted { .. }));
+        assert_eq!(
+            store
+                .load_trigger_acceptance_state(&trigger_id)
+                .expect("accepted state should load")
+                .last_sequence,
+            1,
+            "{} accepted snapshot should advance",
+            backend.name
+        );
+
+        let duplicate_record = TriggerEventRecord {
+            run_id: format!("{}-duplicate-source-run", backend.slug),
+            sequence: 2,
+            event_id: String::from("event-duplicate"),
+            checkpoint: Some(String::from("cp-duplicate")),
+            accepted_at_ms: accepted_at_ms + 1,
+            dedup_key: None,
+            dedup_expires_at_ms: None,
+            cooldown_key: None,
+            cooldown_expires_at_ms: None,
+            ..accepted_record.clone()
+        };
+        let duplicate_source = store
+            .accept_trigger_event(TriggerAcceptanceCommand {
+                candidate_record: duplicate_record.clone(),
+                expected_snapshot_sequence: 1,
+                staged_id: None,
+            })
+            .expect("duplicate source event should commit");
+        assert!(matches!(
+            duplicate_source,
+            TriggerAcceptanceOutcome::Accepted { .. }
+        ));
+        assert!(
+            store
+                .append_staged_trigger_event_record(&staged_record(
+                    "staging-duplicate",
+                    "event-duplicate",
+                ))
+                .expect("duplicate staged row should persist")
+        );
+        let duplicate = store
+            .accept_trigger_event(TriggerAcceptanceCommand {
+                candidate_record: TriggerEventRecord {
+                    run_id: format!("{}-duplicate-run", backend.slug),
+                    sequence: 3,
+                    accepted_at_ms: accepted_at_ms + 2,
+                    ..duplicate_record
+                },
+                expected_snapshot_sequence: 2,
+                staged_id: Some(String::from("staging-duplicate")),
+            })
+            .expect("duplicate acceptance should commit repair state");
+        assert_eq!(duplicate, TriggerAcceptanceOutcome::Duplicate);
+
+        store
+            .append_staged_trigger_event_record(&staged_record("staging-dedup", "event-dedup"))
+            .expect("dedup staged row should persist");
+        let dedup = store
+            .accept_trigger_event(TriggerAcceptanceCommand {
+                candidate_record: TriggerEventRecord {
+                    run_id: format!("{}-dedup-run", backend.slug),
+                    sequence: 3,
+                    event_id: String::from("event-dedup"),
+                    checkpoint: Some(String::from("cp-dedup")),
+                    accepted_at_ms: accepted_at_ms + 2,
+                    cooldown_key: None,
+                    cooldown_expires_at_ms: None,
+                    ..accepted_record.clone()
+                },
+                expected_snapshot_sequence: 2,
+                staged_id: Some(String::from("staging-dedup")),
+            })
+            .expect("dedup suppression should commit staged consumption");
+        assert_eq!(dedup, TriggerAcceptanceOutcome::DedupSuppressed);
+
+        store
+            .append_staged_trigger_event_record(&staged_record(
+                "staging-cooldown",
+                "event-cooldown",
+            ))
+            .expect("cooldown staged row should persist");
+        let cooldown = store
+            .accept_trigger_event(TriggerAcceptanceCommand {
+                candidate_record: TriggerEventRecord {
+                    run_id: format!("{}-cooldown-run", backend.slug),
+                    sequence: 3,
+                    event_id: String::from("event-cooldown"),
+                    checkpoint: Some(String::from("cp-cooldown")),
+                    accepted_at_ms: accepted_at_ms + 3,
+                    dedup_key: None,
+                    dedup_expires_at_ms: None,
+                    ..accepted_record.clone()
+                },
+                expected_snapshot_sequence: 2,
+                staged_id: Some(String::from("staging-cooldown")),
+            })
+            .expect("cooldown suppression should commit staged consumption");
+        assert_eq!(cooldown, TriggerAcceptanceOutcome::CooldownSuppressed);
+
+        store
+            .append_staged_trigger_event_record(&staged_record(
+                "staging-conflict",
+                "event-conflict",
+            ))
+            .expect("conflict staged row should persist");
+        let conflict = store
+            .accept_trigger_event(TriggerAcceptanceCommand {
+                candidate_record: TriggerEventRecord {
+                    run_id: format!("{}-conflict-run", backend.slug),
+                    sequence: 3,
+                    event_id: String::from("event-conflict"),
+                    checkpoint: Some(String::from("cp-conflict")),
+                    accepted_at_ms: accepted_at_ms + 4,
+                    dedup_key: None,
+                    dedup_expires_at_ms: None,
+                    cooldown_key: None,
+                    cooldown_expires_at_ms: None,
+                    ..accepted_record
+                },
+                expected_snapshot_sequence: 0,
+                staged_id: Some(String::from("staging-conflict")),
+            })
+            .expect("optimistic conflict should return a typed outcome");
+        assert_eq!(conflict, TriggerAcceptanceOutcome::Conflict);
+
+        let pending = store
+            .list_pending_staged_trigger_event_records(&trigger_id, 10)
+            .expect("post-acceptance staged rows should list");
+        assert_eq!(pending.len(), 1, "{} should keep only conflict pending", backend.name);
+        assert_eq!(pending[0].staging_id, "staging-conflict");
+        assert_eq!(
+            store
+                .read_trigger_checkpoint(&trigger_id)
+                .expect("accepted checkpoint should read")
+                .expect("accepted checkpoint should exist")
+                .checkpoint,
+            "cp-duplicate"
+        );
+
+        drop(store);
         backend.reset();
     }
 }

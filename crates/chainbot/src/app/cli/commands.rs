@@ -33,7 +33,9 @@ use crate::app::definitions::{
 };
 use crate::app::runtime::daemon;
 use crate::app::runtime::execution::ExecutionPlane;
-use crate::app::runtime::execution::PluginActivationRuntime;
+use crate::app::runtime::plugin_activation::{
+    parse_plugin_activation_bindings, parse_trigger_plugin_activation_bindings,
+};
 #[cfg(test)]
 use crate::app::runtime::external_triggers::ExternalTriggerSupervisor;
 use crate::builtins::nodes::script_worker::{WorkerHost, WorkerHostLimits};
@@ -43,7 +45,7 @@ use crate::domain::runtime::{NormalizedRunRequest, WorkflowRunStatus};
 use crate::domain::state::StagedTriggerEventRecord;
 use crate::domain::state::{RunExecutionFence, RunRecordSummary, RunStatus, TriggerEventRecord};
 use crate::domain::trigger::{
-    TriggerDefinition, TriggerPluginActivationBindings, TriggerPluginHostPolicy, TriggerRunRequest,
+    TriggerDefinition, TriggerPluginHostPolicy, TriggerRunRequest,
     REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
 };
 use crate::domain::workflow::WorkflowDefinition;
@@ -62,7 +64,6 @@ use crate::plugin::source::{
     PluginSourceDescriptor,
 };
 use crate::plugin::{HostCancellation, PluginKind, PluginManifest};
-use crate::secrets::SecretReference;
 
 const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
@@ -1056,7 +1057,7 @@ fn build_execution_plane(
         runtime.definitions.root_config.runtime_defaults.clone(),
         registry,
         runtime.definitions.plugins.clone(),
-        plugin_activation_bindings(&runtime.definitions.root_config)
+        parse_plugin_activation_bindings(&runtime.definitions.root_config)
             .map_err(UserFacingError::from_contract)?,
         runtime.root_layout.plugins_dir.clone(),
         runtime.root_layout.secrets_dir.clone(),
@@ -1071,7 +1072,7 @@ pub(crate) fn build_trigger_host_policy(
     manifests: &[PluginManifest],
     plugins_root_dir: &Path,
     secrets_root_dir: &Path,
-) -> TriggerPluginHostPolicy {
+) -> Result<TriggerPluginHostPolicy, ContractError> {
     let allowlisted_plugin_ids = manifests
         .iter()
         .filter_map(|manifest| {
@@ -1083,53 +1084,13 @@ pub(crate) fn build_trigger_host_policy(
         })
         .collect();
 
-    TriggerPluginHostPolicy {
+    Ok(TriggerPluginHostPolicy {
         allowlisted_plugin_ids,
         allowed_capabilities: BTreeSet::from([REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()]),
         plugin_root_dir: plugins_root_dir.to_path_buf(),
-        plugin_activation: trigger_plugin_activation_bindings(root_config).unwrap_or_default(),
+        plugin_activation: parse_trigger_plugin_activation_bindings(root_config)?,
         secrets_root_dir: secrets_root_dir.to_path_buf(),
-    }
-}
-
-fn trigger_plugin_activation_bindings(
-    root_config: &RootConfigDefinition,
-) -> Result<BTreeMap<String, TriggerPluginActivationBindings>, ContractError> {
-    let mut bindings = BTreeMap::new();
-    for (plugin_id, activation) in &root_config.plugin_activation {
-        let mut slots = BTreeMap::new();
-        for (slot, secret_ref) in &activation.secret_bindings {
-            slots.insert(slot.clone(), SecretReference::parse(secret_ref)?);
-        }
-        bindings.insert(
-            plugin_id.clone(),
-            TriggerPluginActivationBindings {
-                secret_bindings: slots,
-                allowed_origins: activation.allowed_origins.clone(),
-            },
-        );
-    }
-    Ok(bindings)
-}
-
-fn plugin_activation_bindings(
-    root_config: &RootConfigDefinition,
-) -> Result<BTreeMap<String, PluginActivationRuntime>, ContractError> {
-    let mut bindings = BTreeMap::new();
-    for (plugin_id, activation) in &root_config.plugin_activation {
-        let mut slots = BTreeMap::new();
-        for (slot, secret_ref) in &activation.secret_bindings {
-            slots.insert(slot.clone(), SecretReference::parse(secret_ref)?);
-        }
-        bindings.insert(
-            plugin_id.clone(),
-            PluginActivationRuntime {
-                secret_bindings: slots,
-                allowed_origins: activation.allowed_origins.clone(),
-            },
-        );
-    }
-    Ok(bindings)
+    })
 }
 
 pub(crate) fn collect_external_trigger_manifests(

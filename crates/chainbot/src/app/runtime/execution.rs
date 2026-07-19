@@ -40,6 +40,9 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::app::runtime::plugin_activation::{
+    PluginActivationResolver, PluginActivationRuntime,
+};
 use crate::builtins::nodes::input_resolver::resolve_node_inputs;
 use crate::builtins::nodes::SecretDecryptMode;
 use crate::builtins::nodes::contract::{BuiltinNodeRequest, BuiltinNodeResult};
@@ -52,23 +55,12 @@ use crate::domain::runtime::{
 use crate::domain::workflow::{DependsMode, RuntimeVariableLayers, RuntimeVariableNamespaces, WorkflowDefinition};
 use crate::errors::ContractError;
 use crate::plugin::{
-    ExternalNodePluginHost, ExternalNodePluginRequest, HostCancellation,
-    PluginActivationEnvelope, PluginHostSecretMode, PluginKind, PluginManifest,
-    NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
-};
-use crate::secrets::{
-    redact_text, GpgSecretDecryptor, PlaintextSecretDecryptor, SecretProvider, SecretReference,
-    SecretValue,
+    ExternalNodePluginHost, ExternalNodePluginRequest, HostCancellation, PluginHostSecretMode,
+    PluginKind, PluginManifest, NODE_PLUGIN_CONTRACT_VERSION, NODE_PLUGIN_EXECUTE_CAPABILITY,
 };
 
 pub const DEFAULT_MAX_SUBFLOW_DEPTH: usize = 32;
 const DEFAULT_MAX_CONCURRENT_NODES: usize = 4;
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PluginActivationRuntime {
-    pub secret_bindings: BTreeMap<String, SecretReference>,
-    pub allowed_origins: Vec<String>,
-}
 
 pub struct ExecutionPlane {
     workflows: BTreeMap<String, WorkflowDefinition>,
@@ -519,7 +511,12 @@ impl ExecutionPlane {
             SecretDecryptMode::Gpg => PluginHostSecretMode::Gpg,
             SecretDecryptMode::Plaintext => PluginHostSecretMode::Plaintext,
         };
-        let (activation, activation_secrets) = self.resolve_plugin_activation(&node.plugin_id)?;
+        let activation = PluginActivationResolver::new(
+            &self.plugin_activation,
+            &self.secrets_dir,
+            self.secret_mode,
+        )
+        .resolve(&node.plugin_id)?;
         let host = ExternalNodePluginHost::with_secret_runtime(
             self.plugins_root.clone(),
             self.secrets_dir.clone(),
@@ -535,10 +532,10 @@ impl ExecutionPlane {
                 operation: node.operation.clone(),
                 requested_capabilities: vec![NODE_PLUGIN_EXECUTE_CAPABILITY.to_owned()],
                 input: resolved.values,
-                activation,
+                activation: activation.envelope(),
             },
         )
-        .map_err(|error| redact_plugin_contract_error(error, &activation_secrets))?;
+        .map_err(|error| activation.redact_error(error))?;
 
         Ok(BuiltinNodeResult {
             outputs: response.output,
@@ -597,73 +594,6 @@ impl ExecutionPlane {
         Ok(())
     }
 
-    fn resolve_plugin_activation(
-        &self,
-        plugin_id: &str,
-    ) -> Result<(Option<PluginActivationEnvelope>, Vec<SecretValue>), ContractError> {
-        let Some(bindings) = self.plugin_activation.get(plugin_id) else {
-            return Ok((None, Vec::new()));
-        };
-        if bindings.secret_bindings.is_empty() && bindings.allowed_origins.is_empty() {
-            return Ok((None, Vec::new()));
-        }
-
-        let mut resolved = BTreeMap::new();
-        let mut secrets = Vec::with_capacity(bindings.secret_bindings.len());
-        match self.secret_mode {
-            SecretDecryptMode::Gpg => {
-                let provider = SecretProvider::new(self.secrets_dir.clone(), GpgSecretDecryptor::new());
-                for (slot, reference) in &bindings.secret_bindings {
-                    let value = provider.resolve_reference(reference)?;
-                    resolved.insert(slot.clone(), value.expose().to_owned());
-                    secrets.push(value);
-                }
-            }
-            SecretDecryptMode::Plaintext => {
-                let provider = SecretProvider::new(self.secrets_dir.clone(), PlaintextSecretDecryptor);
-                for (slot, reference) in &bindings.secret_bindings {
-                    let value = provider.resolve_reference(reference)?;
-                    resolved.insert(slot.clone(), value.expose().to_owned());
-                    secrets.push(value);
-                }
-            }
-        }
-
-        Ok((
-            Some(PluginActivationEnvelope {
-                secrets: resolved,
-                allowed_origins: bindings.allowed_origins.clone(),
-            }),
-            secrets,
-        ))
-    }
-}
-
-fn redact_plugin_contract_error(error: ContractError, secrets: &[SecretValue]) -> ContractError {
-    match error {
-        ContractError::NodePluginProcessFailed {
-            plugin_id,
-            exit_code,
-            stderr,
-        } => ContractError::NodePluginProcessFailed {
-            plugin_id,
-            exit_code,
-            stderr: redact_text(&stderr, secrets),
-        },
-        ContractError::NodePluginReturnedFailure { plugin_id, message } => {
-            ContractError::NodePluginReturnedFailure {
-                plugin_id,
-                message: redact_text(&message, secrets),
-            }
-        }
-        ContractError::NodePluginProtocolContractViolation { plugin_id, detail } => {
-            ContractError::NodePluginProtocolContractViolation {
-                plugin_id,
-                detail: redact_text(&detail, secrets),
-            }
-        }
-        other => other,
-    }
 }
 
 fn evaluate_dependency_decision(

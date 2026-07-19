@@ -967,7 +967,7 @@ fn external_trigger_plugin_rejects_event_before_ready() {
         "plugin-bad-order",
     )];
 
-    let mut plane = TriggerPlane::open_legacy_state_layout_for_tests(
+    let error = TriggerPlane::open_legacy_state_layout_for_tests(
         state_layout,
         definitions,
         manifests,
@@ -979,11 +979,7 @@ fn external_trigger_plugin_rejects_event_before_ready() {
         BTreeMap::new(),
         1_710_100_080_000,
     )
-    .expect("trigger plane should open for protocol-order validation");
-
-    let error = plane
-        .collect_run_requests(1_710_100_080_010)
-        .expect_err("event before ready should fail");
+    .expect_err("event before ready should fail before acceptance");
     assert!(matches!(
         error,
         TriggerPlaneError::Contract(ContractError::TriggerPluginProtocolContractViolation { .. })
@@ -1172,25 +1168,12 @@ fn staged_duplicate_event_does_not_create_second_accepted_record() {
 
 #[test]
 fn disabled_or_removed_trigger_does_not_accept_future_staged_rows_after_restart() {
-    let (state_layout, plugin_root) = unique_layout("staged-events-disable-remove-restart-safe");
+    let (state_layout, _plugin_root) = unique_layout("staged-events-disable-remove-restart-safe");
     let definitions = vec![trigger_definition(
         "external-trigger",
         "external_plugin",
         "plugin-ready-only",
     )];
-    let manifests = vec![plugin_manifest(
-        "plugin-ready-only",
-        "2.0.0",
-        "external_trigger",
-        "plugin-ready-only.sh",
-        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-    )];
-
-    let executable = plugin_root.join("plugin-ready-only.sh");
-    write_protocol_script(
-        &executable,
-        "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
-    );
 
     let mut state_store = open_runtime_store(&state_layout, 1_710_100_093_000);
     state_store
@@ -1216,17 +1199,8 @@ fn disabled_or_removed_trigger_does_not_accept_future_staged_rows_after_restart(
     drop(state_store);
 
     let first_store = open_runtime_store(&state_layout, 1_710_100_093_010);
-    let mut enabled_plane = TriggerPlane::open_with_store_acceptance_only(
-        first_store,
-        definitions.clone(),
-        manifests.clone(),
-        policy(
-            &plugin_root,
-            &["plugin-ready-only"],
-            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-        ),
-        BTreeMap::new(),
-    )
+    let mut enabled_plane =
+        TriggerPlane::open_with_store(first_store, definitions.clone(), BTreeMap::new())
     .expect("acceptance-only trigger plane should open for enabled baseline");
     let first_requests = enabled_plane
         .collect_run_requests(1_710_100_093_020)
@@ -1264,15 +1238,9 @@ fn disabled_or_removed_trigger_does_not_accept_future_staged_rows_after_restart(
         trigger_definition("external-trigger", "external_plugin", "plugin-ready-only");
     disabled_definition.enabled = false;
     let disabled_store = open_runtime_store(&state_layout, 1_710_100_093_040);
-    let mut disabled_plane = TriggerPlane::open_with_store_acceptance_only(
+    let mut disabled_plane = TriggerPlane::open_with_store(
         disabled_store,
         vec![disabled_definition],
-        manifests.clone(),
-        policy(
-            &plugin_root,
-            &["plugin-ready-only"],
-            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-        ),
         BTreeMap::new(),
     )
     .expect("acceptance-only trigger plane should open for disabled trigger state");
@@ -1282,17 +1250,8 @@ fn disabled_or_removed_trigger_does_not_accept_future_staged_rows_after_restart(
     assert!(disabled_requests.is_empty());
 
     let removed_store = open_runtime_store(&state_layout, 1_710_100_093_060);
-    let mut removed_plane = TriggerPlane::open_with_store_acceptance_only(
-        removed_store,
-        Vec::new(),
-        manifests,
-        policy(
-            &plugin_root,
-            &["plugin-ready-only"],
-            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-        ),
-        BTreeMap::new(),
-    )
+    let mut removed_plane =
+        TriggerPlane::open_with_store(removed_store, Vec::new(), BTreeMap::new())
     .expect("acceptance-only trigger plane should open after trigger removal");
     let removed_requests = removed_plane
         .collect_run_requests(1_710_100_093_070)
@@ -1320,24 +1279,11 @@ fn disabled_or_removed_trigger_does_not_accept_future_staged_rows_after_restart(
 
 #[test]
 fn acceptance_only_trigger_plane_accepts_known_staged_rows_and_keeps_unknown_rows_pending() {
-    let (state_layout, plugin_root) = unique_layout("acceptance-only-known-vs-unknown-staged");
-    let executable = plugin_root.join("plugin-ready-only.sh");
-    write_protocol_script(
-        &executable,
-        "printf '%s\n' '{\"type\":\"ready\",\"protocol_version\":\"2.0.0\"}'\n",
-    );
-
+    let (state_layout, _plugin_root) = unique_layout("acceptance-only-known-vs-unknown-staged");
     let definitions = vec![
         trigger_definition("external-trigger-a", "external_plugin", "plugin-ready-only"),
         trigger_definition("external-trigger-b", "external_plugin", "plugin-ready-only"),
     ];
-    let manifests = vec![plugin_manifest(
-        "plugin-ready-only",
-        "2.0.0",
-        "external_trigger",
-        "plugin-ready-only.sh",
-        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-    )];
 
     let mut state_store = open_runtime_store(&state_layout, 1_710_100_094_000);
     for (staging_id, trigger_id, workflow_id, event_id, staged_at_ms) in [
@@ -1387,17 +1333,7 @@ fn acceptance_only_trigger_plane_accepts_known_staged_rows_and_keeps_unknown_row
     drop(state_store);
 
     let first_store = open_runtime_store(&state_layout, 1_710_100_094_010);
-    let mut plane = TriggerPlane::open_with_store_acceptance_only(
-        first_store,
-        definitions,
-        manifests,
-        policy(
-            &plugin_root,
-            &["plugin-ready-only"],
-            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-        ),
-        BTreeMap::new(),
-    )
+    let mut plane = TriggerPlane::open_with_store(first_store, definitions, BTreeMap::new())
     .expect("acceptance-only trigger plane should open for known-vs-unknown staged rows");
 
     let requests = plane
@@ -1432,38 +1368,16 @@ fn acceptance_only_trigger_plane_accepts_known_staged_rows_and_keeps_unknown_row
 
 #[test]
 fn acceptance_only_trigger_plane_consumes_staged_external_rows_without_direct_process_polling() {
-    let (state_layout, plugin_root) = unique_layout("acceptance-only-external-bridge");
-    let external_plugin_path = plugin_root.join("plugin-external.sh");
-    write_executable_script(
-        &external_plugin_path,
-        "{\"type\":\"event\",\"checkpoint\":\"cp-ext\",\"event_key\":\"event/ext\",\"occurred_at_ms\":1710100120000,\"payload\":{\"side\":\"sell\"}}",
-    );
-
+    let (state_layout, _plugin_root) = unique_layout("acceptance-only-external-bridge");
     let definitions = vec![trigger_definition(
         "external-trigger",
         "external_plugin",
         "plugin-external",
     )];
-    let manifests = vec![plugin_manifest(
-        "plugin-external",
-        "2.0.0",
-        "external_trigger",
-        "plugin-external.sh",
-        &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-    )];
 
     let first_store = open_runtime_store(&state_layout, 1_710_100_092_000);
-    let mut acceptance_only_plane = TriggerPlane::open_with_store_acceptance_only(
-        first_store,
-        definitions.clone(),
-        manifests.clone(),
-        policy(
-            &plugin_root,
-            &["plugin-external"],
-            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-        ),
-        BTreeMap::new(),
-    )
+    let mut acceptance_only_plane =
+        TriggerPlane::open_with_store(first_store, definitions.clone(), BTreeMap::new())
     .expect("acceptance-only trigger plane should open");
 
     let no_direct_requests = acceptance_only_plane
@@ -1495,17 +1409,8 @@ fn acceptance_only_trigger_plane_consumes_staged_external_rows_without_direct_pr
     drop(stage_store);
 
     let second_store = open_runtime_store(&state_layout, 1_710_100_092_030);
-    let mut replay_plane = TriggerPlane::open_with_store_acceptance_only(
-        second_store,
-        definitions,
-        manifests,
-        policy(
-            &plugin_root,
-            &["plugin-external"],
-            &[REQUIRED_TRIGGER_PLUGIN_CAPABILITY],
-        ),
-        BTreeMap::new(),
-    )
+    let mut replay_plane =
+        TriggerPlane::open_with_store(second_store, definitions, BTreeMap::new())
     .expect("acceptance-only trigger plane should reopen");
 
     let staged_requests = replay_plane
