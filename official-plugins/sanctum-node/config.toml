@@ -64,5 +64,5 @@ command = ["cargo", "build", "--release", "--bin", "sanctum_node_official_plugin
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/sanctum_node_official_plugin"
+from = "target/release/sanctum_node_official_plugin"
 to = "bin/sanctum-node"

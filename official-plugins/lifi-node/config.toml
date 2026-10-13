@@ -45,5 +45,5 @@ command = ["cargo", "build", "--release", "--bin", "lifi_node_official_plugin"]
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/lifi_node_official_plugin"
+from = "target/release/lifi_node_official_plugin"
 to = "bin/lifi-node"

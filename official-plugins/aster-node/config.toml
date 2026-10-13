@@ -26,5 +26,5 @@ command = ["cargo", "build", "--release", "--bin", "aster_node_official_plugin"]
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/aster_node_official_plugin"
+from = "target/release/aster_node_official_plugin"
 to = "bin/aster-node"

@@ -143,9 +143,42 @@ impl std::fmt::Debug for RuntimeStateStore {
 
 impl RuntimeStateStore {
     pub fn open(config: &RuntimeStorageConfig, now_ms: i64) -> Result<Self, RuntimeStateError> {
+        Self::open_with_creation(config, now_ms, true)
+    }
+
+    /// Open the store for the read-only inspection commands.
+    ///
+    /// `status`, `observe`, and `list-runs` must not create or migrate the
+    /// coordination database, so a missing local database resolves to an
+    /// in-memory store that reads as empty instead of a new file on disk.
+    pub fn open_read_only(
+        config: &RuntimeStorageConfig,
+        now_ms: i64,
+    ) -> Result<Self, RuntimeStateError> {
+        match &config.backend {
+            RuntimeStorageBackend::Local { database_path } if !database_path.exists() => {
+                let ephemeral = RuntimeStorageConfig {
+                    backend: RuntimeStorageBackend::Local {
+                        database_path: PathBuf::from(":memory:"),
+                    },
+                    ..config.clone()
+                };
+                Self::open_with_creation(&ephemeral, now_ms, false)
+            }
+            _ => Self::open(config, now_ms),
+        }
+    }
+
+    fn open_with_creation(
+        config: &RuntimeStorageConfig,
+        now_ms: i64,
+        create_parent: bool,
+    ) -> Result<Self, RuntimeStateError> {
         let connection = match &config.backend {
             RuntimeStorageBackend::Local { database_path } => {
-                if let Some(parent) = database_path.parent() {
+                if create_parent
+                    && let Some(parent) = database_path.parent()
+                {
                     fs::create_dir_all(parent).map_err(|source| RuntimeStateError::Io {
                         path: parent.to_path_buf(),
                         operation: "create sqlite parent directory",
@@ -1002,6 +1035,7 @@ impl RuntimeStateStore {
     pub fn list_recent_run_summaries(
         &mut self,
         limit: usize,
+        run_id: Option<&str>,
     ) -> Result<Vec<RunRecordSummary>, RuntimeStateError> {
         let limit = limit.max(1).min(i64::MAX as usize);
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -1012,8 +1046,9 @@ impl RuntimeStateStore {
                         "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
                                 owner_id, lease_generation
                          FROM run_summaries
+                         WHERE ?1 IS NULL OR run_id = ?1
                          ORDER BY started_at_ms DESC, run_id DESC
-                         LIMIT ?1",
+                         LIMIT ?2",
                     )
                     .map_err(|source| RuntimeStateError::Sqlite {
                         path: path.clone(),
@@ -1021,7 +1056,7 @@ impl RuntimeStateStore {
                         source,
                     })?;
                 let rows = statement
-                    .query_map(params![limit_i64], |row| {
+                    .query_map(params![run_id, limit_i64], |row| {
                         let status = row.get::<_, String>(3)?;
                         Ok(RunRecordSummary {
                             schema_version: row.get(0)?,
@@ -1057,9 +1092,10 @@ impl RuntimeStateStore {
                         "SELECT schema_version, run_id, workflow_id, status, started_at_ms, finished_at_ms,
                                 owner_id, lease_generation
                          FROM run_summaries
+                         WHERE $1::text IS NULL OR run_id = $1
                          ORDER BY started_at_ms DESC, run_id DESC
-                         LIMIT $1",
-                        &[&limit_i64],
+                         LIMIT $2",
+                        &[&run_id, &limit_i64],
                     )
                     .map_err(|source| RuntimeStateError::Postgres {
                         operation: "query postgres recent run summaries",

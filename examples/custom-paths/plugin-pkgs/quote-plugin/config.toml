@@ -9,4 +9,4 @@ executable = "../bin/quote-plugin.sh"
 name = "normalize"
 summary = "Normalize quote payload"
 input_schema = []
-output_schema = []
+output_schema = ["decision"]

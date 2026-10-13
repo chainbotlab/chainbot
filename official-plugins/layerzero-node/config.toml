@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "layerzero_node_official_plug
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/layerzero_node_official_plugin"
+from = "target/release/layerzero_node_official_plugin"
 to = "bin/layerzero-node"

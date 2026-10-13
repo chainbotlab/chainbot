@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "stargate_node_official_plugi
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/stargate_node_official_plugin"
+from = "target/release/stargate_node_official_plugin"
 to = "bin/stargate-node"

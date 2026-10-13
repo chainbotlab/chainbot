@@ -29,5 +29,5 @@ command = ["cargo", "build", "--release", "--bin", "aster_trigger_official_plugi
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/aster_trigger_official_plugin"
+from = "target/release/aster_trigger_official_plugin"
 to = "bin/aster-trigger"

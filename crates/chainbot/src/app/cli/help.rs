@@ -350,7 +350,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
                 "chainbot observe",
                 "chainbot observe --json",
                 "chainbot observe --limit 20 --trigger-id tr-market",
-                "chainbot observe --run-id manual-wf-alpha-1710000000000",
+                "chainbot observe --run-id manual-wf-alpha-1710000000000-12345-1",
             ],
             &[
                 "you need the recent persisted trigger-event stream without opening the database manually",
@@ -367,7 +367,7 @@ pub(super) fn help_text(topic: HelpTopic) -> String {
             &["workflow execution", "trigger collection", "runtime recovery"],
             &[
                 "prints recent runs, workflow logs, trigger events, and archive counts",
-                "supports JSON output for automation and optional trigger/run filters",
+                "supports JSON output for automation; `--run-id` scopes runs and workflow logs, `--trigger-id` scopes trigger events",
             ],
             &[
                 "resolve root config before reading runtime history",

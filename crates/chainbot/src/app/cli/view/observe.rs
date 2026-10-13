@@ -37,7 +37,7 @@ pub(crate) fn build_observe_output(
             requested_limit: limit,
             archived: state_store.archived_history_counts()?,
         },
-        runs: state_store.list_recent_run_summaries(limit)?,
+        runs: state_store.list_recent_run_summaries(limit, run_id)?,
         workflow_logs: state_store.list_recent_workflow_log_entries(limit, run_id)?,
         trigger_events: state_store.list_recent_trigger_records(limit, trigger_id)?,
     })

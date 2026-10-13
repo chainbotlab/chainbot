@@ -13,6 +13,8 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chainbot::plugin::PluginManifest;
+
 fn acquire_fixture_lock() -> MutexGuard<'static, ()> {
     fixture_lock()
         .lock()
@@ -346,6 +348,44 @@ fn plugin_source_list_rejects_mcp_http_missing_anchor_file() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
     assert!(stderr.contains("entry artifact missing"));
+}
+
+#[test]
+fn official_plugin_catalog_manifests_parse_and_validate() {
+    let root = workspace_root();
+    let index_source = fs::read_to_string(root.join("chainbot-plugin-index.toml"))
+        .expect("official plugin index should be readable");
+    let index: toml::Value =
+        toml::from_str(&index_source).expect("official plugin index should parse as TOML");
+    let entries = index["plugins"]
+        .as_array()
+        .expect("official plugin index should declare a plugins array");
+    assert!(
+        !entries.is_empty(),
+        "official plugin index should list at least one package"
+    );
+
+    for entry in entries {
+        let plugin_id = entry["plugin_id"]
+            .as_str()
+            .expect("index entry should declare plugin_id");
+        let relative_path = entry["path"]
+            .as_str()
+            .expect("index entry should declare path");
+        let config_source = fs::read_to_string(root.join(relative_path).join("config.toml"))
+            .unwrap_or_else(|error| {
+                panic!("{plugin_id}: package config should be readable: {error}")
+            });
+        let manifest: PluginManifest = toml::from_str(&config_source)
+            .unwrap_or_else(|error| panic!("{plugin_id}: manifest should parse: {error}"));
+        manifest
+            .validate()
+            .unwrap_or_else(|error| panic!("{plugin_id}: manifest should validate: {error}"));
+        assert_eq!(
+            manifest.plugin_id, plugin_id,
+            "{plugin_id}: index plugin_id must match the package manifest"
+        );
+    }
 }
 
 fn create_multi_plugin_repo(root: &Path) {

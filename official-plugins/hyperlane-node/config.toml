@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "hyperlane_node_official_plug
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/hyperlane_node_official_plugin"
+from = "target/release/hyperlane_node_official_plugin"
 to = "bin/hyperlane-node"

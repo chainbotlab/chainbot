@@ -13,6 +13,8 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use chainbot::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::infrastructure::state::RuntimeStateStore;
 use rusqlite::{params, Connection};
 
 const SECRET_DECRYPT_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
@@ -31,6 +33,22 @@ fn end_to_end_vertical_slice() {
 
     let run_output = run_chainbot(["run"], &root, true);
     assert!(run_output.status.success());
+
+    // The manual run id carries a process id and a process-local sequence so that
+    // concurrent `run` invocations in the same millisecond stay unique.
+    let manual_run_id = String::from_utf8_lossy(&run_output.stdout)
+        .split("run_id=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("run output should report the manual run id")
+        .to_owned();
+    let mut suffix = manual_run_id.rsplit('-');
+    let sequence = suffix.next().unwrap_or_default().to_owned();
+    let process_id = suffix.next().unwrap_or_default().to_owned();
+    assert!(
+        sequence.parse::<u64>().is_ok() && process_id.parse::<u32>().is_ok(),
+        "manual run id must end with a process id and sequence discriminator: {manual_run_id}"
+    );
 
     let serve_output = run_chainbot(["serve"], &root, true);
     assert!(
@@ -827,11 +845,20 @@ fn runtime_db_path(root: &Path) -> PathBuf {
 }
 
 fn ensure_runtime_db_ready(root: &Path) {
-    let output = run_chainbot(["status", "--json"], root, false);
-    assert!(
-        output.status.success(),
-        "status --json should initialize runtime DB before direct sqlite writes"
-    );
+    // `status` is read-only by contract, so tests seed the coordination database
+    // through the store API instead of relying on a CLI side effect.
+    RuntimeStateStore::open(
+        &RuntimeStorageConfig {
+            backend: RuntimeStorageBackend::Local {
+                database_path: runtime_db_path(root),
+            },
+            history_retention: None,
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        },
+        0,
+    )
+    .expect("runtime database should initialize for end-to-end fixtures");
 }
 
 fn open_runtime_db(root: &Path) -> Connection {

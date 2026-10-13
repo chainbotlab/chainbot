@@ -15,6 +15,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chainbot::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig};
+use chainbot::infrastructure::state::RuntimeStateStore;
 use rusqlite::{params, Connection, OptionalExtension};
 
 const SERVE_OWNER_ID_PREFIX: &str = "chainbot-serve-pid-";
@@ -1183,6 +1185,36 @@ fn status_does_not_recover_or_mutate_incomplete_runs() {
 }
 
 #[test]
+fn read_only_commands_do_not_create_the_coordination_database() {
+    let _lock = acquire_fixture_lock();
+    let root = unique_root("read-only-commands");
+    let _ = fs::remove_dir_all(&root);
+
+    let init_output = Command::new(chainbot_bin())
+        .env("CHAINBOT_CONFIG_DIR", &root)
+        .arg("init")
+        .output()
+        .expect("init should execute");
+    assert!(init_output.status.success());
+
+    for command in ["status", "observe", "list-runs"] {
+        let output = Command::new(chainbot_bin())
+            .env("CHAINBOT_CONFIG_DIR", &root)
+            .arg(command)
+            .output()
+            .expect("read-only command should execute");
+        assert!(
+            output.status.success(),
+            "{command} should succeed on a root without runtime history"
+        );
+        assert!(
+            !runtime_db_path(&root).exists(),
+            "{command} must not create the coordination database"
+        );
+    }
+}
+
+#[test]
 fn status_reads_trigger_snapshot_without_record_scan_side_effects() {
     let _lock = acquire_fixture_lock();
     ensure_basic_root_fixture();
@@ -1537,12 +1569,20 @@ fn runtime_db_path(root: &Path) -> PathBuf {
 }
 
 fn ensure_runtime_db_ready(root: &Path) {
-    let output = Command::new(chainbot_bin())
-        .env("CHAINBOT_CONFIG_DIR", root)
-        .args(["status", "--json"])
-        .output()
-        .expect("status --json should execute to prepare runtime DB");
-    assert!(output.status.success());
+    // `status` is read-only by contract, so tests seed the coordination database
+    // through the store API instead of relying on a CLI side effect.
+    RuntimeStateStore::open(
+        &RuntimeStorageConfig {
+            backend: RuntimeStorageBackend::Local {
+                database_path: runtime_db_path(root),
+            },
+            history_retention: None,
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        },
+        0,
+    )
+    .expect("runtime database should initialize for CLI surface fixtures");
 }
 
 fn open_runtime_db(root: &Path) -> Connection {
