@@ -218,7 +218,7 @@ fn repeated_runtime_observation_remains_read_only() {
     for _ in 0..128 {
         assert_eq!(
             store
-                .list_recent_run_summaries(5)
+                .list_recent_run_summaries(5, None)
                 .expect("recent runs should stay readable")
                 .len(),
             1

@@ -502,14 +502,14 @@ fn production_registry_locks_merge_template_math_and_json_semantics() {
             &BuiltinNodeRequest {
                 operation: "run".to_owned(),
                 inputs: BTreeMap::from([
-                    (String::from("value"), json!(3.14159)),
+                    (String::from("value"), json!(12.3456)),
                     (String::from("precision"), json!(2)),
                 ]),
                 ..request.clone()
             },
         )
         .expect("default math operation should round");
-    assert_eq!(round_result.outputs.get("result"), Some(&json!(3.14)));
+    assert_eq!(round_result.outputs.get("result"), Some(&json!(12.35)));
 
     let parse_error = registry
         .dispatch(
