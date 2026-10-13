@@ -41,6 +41,7 @@ pub enum PluginOperationKind {
     Generic,
     Read,
     Write,
+    Swap,
     Transfer,
     RawRead,
     RawWrite,
@@ -70,6 +71,7 @@ impl PluginOperationDescriptor {
         matches!(
             self.kind,
             PluginOperationKind::Write
+                | PluginOperationKind::Swap
                 | PluginOperationKind::Transfer
                 | PluginOperationKind::RawWrite
         )
@@ -1154,7 +1156,7 @@ fn validate_operations(
                     plugin_id: plugin_id.to_owned(),
                     field: "plugin.operations.default_confirmation",
                     detail: format!(
-                        "operation {} can only declare default_confirmation when kind is write, transfer, or raw_write",
+                        "operation {} can only declare default_confirmation when kind is write, swap, transfer, or raw_write",
                         operation.name
                     ),
                 });

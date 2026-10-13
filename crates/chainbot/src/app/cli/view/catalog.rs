@@ -662,6 +662,7 @@ pub fn render_catalog_show(output: &CatalogShowOutput) -> String {
                         crate::plugin::PluginOperationKind::Generic => "generic",
                         crate::plugin::PluginOperationKind::Read => "read",
                         crate::plugin::PluginOperationKind::Write => "write",
+                        crate::plugin::PluginOperationKind::Swap => "swap",
                         crate::plugin::PluginOperationKind::Transfer => "transfer",
                         crate::plugin::PluginOperationKind::RawRead => "raw_read",
                         crate::plugin::PluginOperationKind::RawWrite => "raw_write",
@@ -753,6 +754,7 @@ fn plugin_surface_summary(manifest: &PluginManifest) -> Vec<String> {
                 crate::plugin::PluginOperationKind::Generic => operation.name.clone(),
                 crate::plugin::PluginOperationKind::Read => format!("{}:read", operation.name),
                 crate::plugin::PluginOperationKind::Write => format!("{}:write", operation.name),
+                crate::plugin::PluginOperationKind::Swap => format!("{}:swap", operation.name),
                 crate::plugin::PluginOperationKind::Transfer => {
                     format!("{}:transfer", operation.name)
                 }
