@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -69,6 +70,10 @@ const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
 const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
 const INIT_MANIFEST_VERSION: &str = "2.0.0";
 const CHAINBOT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// Two concurrent `run` invocations can share a millisecond, so the run id also
+// carries the process id and a process-local sequence to stay collision-free.
+static MANUAL_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 struct InitResult {
@@ -145,7 +150,7 @@ impl CliRequest {
             .root_config
             .resolve_runtime_storage(&root_layout.root)
             .map_err(UserFacingError::from_contract)?;
-        let mut state_store = RuntimeStateStore::open(&storage_config, current_time_ms()?)
+        let mut state_store = RuntimeStateStore::open_read_only(&storage_config, current_time_ms()?)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let observed_at_ms = current_time_ms()?;
         let run_summaries = state_store
@@ -187,7 +192,7 @@ impl CliRequest {
             .root_config
             .resolve_runtime_storage(&root_layout.root)
             .map_err(UserFacingError::from_contract)?;
-        let mut state_store = RuntimeStateStore::open(&storage_config, current_time_ms()?)
+        let mut state_store = RuntimeStateStore::open_read_only(&storage_config, current_time_ms()?)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let observe_request = self.observe_request.as_ref().ok_or_else(|| {
             UserFacingError::usage("Missing observe request. Run `chainbot help observe`.")
@@ -455,7 +460,7 @@ impl CliRequest {
             .root_config
             .resolve_runtime_storage(&layout.root)
             .map_err(UserFacingError::from_contract)?;
-        let mut store = RuntimeStateStore::open(&storage_config, current_time_ms()?)
+        let mut store = RuntimeStateStore::open_read_only(&storage_config, current_time_ms()?)
             .map_err(|error| map_runtime_state_error("open runtime state store", error))?;
         let summaries = store
             .list_run_summaries()
@@ -474,9 +479,11 @@ impl CliRequest {
 
         let mut request = NormalizedRunRequest::new(
             format!(
-                "manual-{}-{}",
+                "manual-{}-{}-{}-{}",
                 sanitize_path_component(&workflow.workflow_id),
-                current_time_ms()?
+                current_time_ms()?,
+                std::process::id(),
+                MANUAL_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ),
             workflow.workflow_id.clone(),
         );
@@ -1007,10 +1014,10 @@ pub(crate) fn execute_single_run_with_fence_and_cancellation(
                     "Run {run_id} finished with failed node(s): {}",
                     report
                         .node_failures
-                        .keys()
-                        .cloned()
+                        .iter()
+                        .map(|(node_id, detail)| format!("{node_id}={detail}"))
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join("; ")
                 )));
             }
 
