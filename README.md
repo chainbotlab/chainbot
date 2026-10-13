@@ -81,6 +81,8 @@ The repository root remains a pure Cargo workspace. Frontend tooling is isolated
 | `chainbot init` | Initialize a new workspace |
 | `chainbot status` | Show workspace status (use `--json` for structured output) |
 | `chainbot observe` | Inspect persisted trigger events, workflow logs, and runs |
+| `chainbot catalog` | List builtin capabilities and installed plugin contracts |
+| `chainbot plugin` | Inspect remote plugin sources and install packages |
 | `chainbot stop` | Request graceful shutdown of the background daemon |
 | `chainbot trigger` | Manage triggers: `list`, `enable`, `disable` |
 | `chainbot validate` | Validate workspace configuration |
@@ -100,8 +102,8 @@ Use `chainbot help validate`, `chainbot help trigger`, and `chainbot help run` f
 
 ```toml
 manifest_version = "2.0.0"
-chainbot_version = "2.2.0"
-profile = "basic"
+chainbot_version = "2.4.2"
+profile = "default"
 secret_refs = ["secret://ops/slack/webhook#token"]
 
 [paths]
@@ -113,6 +115,15 @@ state_dir = "state"
 
 [runtime_defaults]
 timezone = "UTC"
+
+[storage]
+mode = "local"
+
+[storage.local]
+database_path = "state/runtime.sqlite3"
+
+[storage.raw_debug]
+enabled = false
 ```
 
 ### Workflow package example
@@ -124,10 +135,10 @@ timezone = "UTC"
 manifest_version = "2.0.0"
 id = "wf-alpha"
 name = "alpha"
-description = "Normalize a quote payload"
 
 [runtime.defaults]
 symbol = "BTCUSDT"
+token = "demo-token"
 
 [[nodes]]
 manifest_version = "2.0.0"
@@ -136,6 +147,14 @@ kind = "plugin"
 plugin = "quote-plugin"
 operation = "normalize"
 depends_on = []
+
+[[nodes.inputs]]
+target = "symbol"
+source = "run.symbol"
+
+[[nodes.inputs]]
+target = "token"
+source = "run.token"
 ```
 
 ### Trigger package example
@@ -167,13 +186,19 @@ manifest_version = "2.0.0"
 plugin_id = "quote-plugin"
 kind = "external_node"
 entrypoint = "node.exec.v2"
-capabilities = ["normalize"]
+capabilities = ["node:execute"]
 executable = "bin/quote-plugin.sh"
+
+[[operations]]
+name = "normalize"
+summary = "Normalize quote payload"
+input_schema = ["symbol", "token"]
+output_schema = ["decision"]
 ```
 
 ## Version
 
-Current version: **2.2.0**
+Current version: **2.4.2**
 
 ## Links
 
