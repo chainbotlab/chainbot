@@ -753,6 +753,11 @@ pub(crate) fn serve_once_with_lease(
         load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
     let trigger_definitions = runtime.definitions.triggers.clone();
     let trigger_manifests = collect_external_trigger_manifests(&runtime.definitions.plugins);
+    let policy = build_trigger_host_policy(
+        &runtime.definitions.root_config,
+        &trigger_manifests,
+        &runtime.root_layout.plugins_dir,
+        &runtime.root_layout.secrets_dir,
     )
     .map_err(UserFacingError::from_contract)?;
     let mut renew_progress = || {
