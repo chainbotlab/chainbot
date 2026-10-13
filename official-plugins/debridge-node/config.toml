@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "debridge_node_official_plugi
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/debridge_node_official_plugin"
+from = "target/release/debridge_node_official_plugin"
 to = "bin/debridge-node"

@@ -156,5 +156,5 @@ command = ["cargo", "build", "--release", "--bin", "binance_node_official_plugin
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/binance_node_official_plugin"
+from = "target/release/binance_node_official_plugin"
 to = "bin/binance-node"

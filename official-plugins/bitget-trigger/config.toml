@@ -33,5 +33,5 @@ command = ["cargo", "build", "--release", "--bin", "bitget_trigger_official_plug
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/bitget_trigger_official_plugin"
+from = "target/release/bitget_trigger_official_plugin"
 to = "bin/bitget-trigger"

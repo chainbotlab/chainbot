@@ -70,5 +70,5 @@ command = ["cargo", "build", "--release", "--bin", "hyperliquid_node_official_pl
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/hyperliquid_node_official_plugin"
+from = "target/release/hyperliquid_node_official_plugin"
 to = "bin/hyperliquid-node"

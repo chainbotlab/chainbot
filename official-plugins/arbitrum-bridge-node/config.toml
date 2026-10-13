@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "arbitrum_bridge_node_officia
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/arbitrum_bridge_node_official_plugin"
+from = "target/release/arbitrum_bridge_node_official_plugin"
 to = "bin/arbitrum-bridge-node"

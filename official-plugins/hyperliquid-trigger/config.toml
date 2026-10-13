@@ -33,5 +33,5 @@ command = ["cargo", "build", "--release", "--bin", "hyperliquid_trigger_official
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/hyperliquid_trigger_official_plugin"
+from = "target/release/hyperliquid_trigger_official_plugin"
 to = "bin/hyperliquid-trigger"

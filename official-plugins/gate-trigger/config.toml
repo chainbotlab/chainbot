@@ -33,5 +33,5 @@ command = ["cargo", "build", "--release", "--bin", "gate_trigger_official_plugin
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/gate_trigger_official_plugin"
+from = "target/release/gate_trigger_official_plugin"
 to = "bin/gate-trigger"

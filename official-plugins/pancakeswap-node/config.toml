@@ -39,5 +39,5 @@ command = ["cargo", "build", "--release", "--bin", "pancakeswap_node_official_pl
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/pancakeswap_node_official_plugin"
+from = "target/release/pancakeswap_node_official_plugin"
 to = "bin/pancakeswap-node"

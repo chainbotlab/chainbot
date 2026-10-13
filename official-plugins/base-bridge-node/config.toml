@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "base_bridge_node_official_pl
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/base_bridge_node_official_plugin"
+from = "target/release/base_bridge_node_official_plugin"
 to = "bin/base-bridge-node"

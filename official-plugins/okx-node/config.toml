@@ -54,5 +54,5 @@ command = ["cargo", "build", "--release", "--bin", "okx_node_official_plugin"]
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/okx_node_official_plugin"
+from = "target/release/okx_node_official_plugin"
 to = "bin/okx-node"

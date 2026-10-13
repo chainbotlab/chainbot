@@ -132,5 +132,5 @@ command = ["cargo", "build", "--release", "--bin", "bybit_node_official_plugin"]
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/bybit_node_official_plugin"
+from = "target/release/bybit_node_official_plugin"
 to = "bin/bybit-node"

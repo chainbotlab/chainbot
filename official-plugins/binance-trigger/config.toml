@@ -33,5 +33,5 @@ command = ["cargo", "build", "--release", "--bin", "binance_trigger_official_plu
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/binance_trigger_official_plugin"
+from = "target/release/binance_trigger_official_plugin"
 to = "bin/binance-trigger"

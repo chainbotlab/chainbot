@@ -37,5 +37,5 @@ command = ["cargo", "build", "--release", "--bin", "wormhole_node_official_plugi
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/wormhole_node_official_plugin"
+from = "target/release/wormhole_node_official_plugin"
 to = "bin/wormhole-node"

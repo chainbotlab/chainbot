@@ -33,5 +33,5 @@ command = ["cargo", "build", "--release", "--bin", "okx_trigger_official_plugin"
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/okx_trigger_official_plugin"
+from = "target/release/okx_trigger_official_plugin"
 to = "bin/okx-trigger"

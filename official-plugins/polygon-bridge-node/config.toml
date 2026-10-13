@@ -45,5 +45,5 @@ command = ["cargo", "build", "--release", "--bin", "polygon_bridge_node_official
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/polygon_bridge_node_official_plugin"
+from = "target/release/polygon_bridge_node_official_plugin"
 to = "bin/polygon-bridge-node"

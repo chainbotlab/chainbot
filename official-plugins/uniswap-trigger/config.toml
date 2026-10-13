@@ -17,7 +17,7 @@ host_error_categories = ["transport", "protocol_contract", "plugin_fatal"]
 [event_schema]
 summary = "Uniswap Router02-compatible price threshold event"
 fields = ["chain", "listener_kind", "router", "path", "amount_in", "amount_out", "threshold_out", "comparison", "triggered"]
-listener_modes = ["price_threshold"]
+listener_modes = ["state_change"]
 
 [source]
 manifest_version = "1.0.0"
@@ -32,5 +32,5 @@ command = ["cargo", "build", "--release", "--bin", "uniswap_trigger_official_plu
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/uniswap_trigger_official_plugin"
+from = "target/release/uniswap_trigger_official_plugin"
 to = "bin/uniswap-trigger"

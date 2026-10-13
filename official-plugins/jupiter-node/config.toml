@@ -50,5 +50,5 @@ command = ["cargo", "build", "--release", "--bin", "jupiter_node_official_plugin
 workdir = "crate"
 
 [[source.build.outputs]]
-from = "crate/target/release/jupiter_node_official_plugin"
+from = "target/release/jupiter_node_official_plugin"
 to = "bin/jupiter-node"
