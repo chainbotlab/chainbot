@@ -1,38 +1,43 @@
 //! [INPUT]
-//! CLI daemon command requests, runtime definition bundles, and state/trigger/ingress supervisors.
+//! Resolved root layouts, daemon owner identifiers, runtime definition bundles, and state/trigger/ingress supervisors.
 //!
 //! [OUTPUT]
-//! Executes serve/stop/internal-daemon lifecycle flows and lease-bound serve-loop orchestration.
+//! Returns daemon lifecycle outcomes and completed trigger requests while coordinating lease-bound serve-loop execution.
 //!
 //! [ROLE]
 //! Owns daemon runtime control paths separate from CLI parse/help and read-model rendering.
 
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
-use crate::app::cli::{
-    build_trigger_host_policy, collect_external_trigger_manifests, current_time_ms,
-    execute_single_run_with_fence_and_cancellation, load_replayable_trigger_requests,
-    map_ingress_error,
-    map_runtime_state_error, merge_trigger_requests, normalized_request_from_trigger, CliOutput,
-    CliRequest, RuntimeContext,
+use super::context::{
+    current_time_ms, map_ingress_error, map_runtime_state_error, resolve_existing_root, RuntimeContext,
 };
-use crate::app::runtime::external_triggers::ExternalTriggerSupervisor;
+use super::external_triggers::ExternalTriggerSupervisor;
+use super::plugin_activation::parse_trigger_plugin_activation_bindings;
+use super::run::execute_single_run_with_fence_and_cancellation;
+use crate::app::definitions::load_root_definition_bundle;
+use crate::domain::runtime::NormalizedRunRequest;
 use crate::domain::state::{
-    LeaseAcquireResult, RunExecutionFence, RunStatus, ServeLeaseGrant, ServeLeaseState,
+    LeaseAcquireResult, RunExecutionFence, ServeLeaseGrant, ServeLeaseState, TriggerEventRecord,
     SERVE_OWNER_ID_PREFIX,
 };
-use crate::domain::trigger::{TriggerPlane, TriggerPlaneError};
-use crate::errors::UserFacingError;
-use crate::infrastructure::config::RuntimeStorageConfig;
+use crate::domain::trigger::{
+    TriggerPlane, TriggerPlaneError, TriggerPluginHostPolicy, TriggerRunRequest,
+    REQUIRED_TRIGGER_PLUGIN_CAPABILITY,
+};
+use crate::errors::{ContractError, UserFacingError};
+use crate::infrastructure::config::{RootConfigDefinition, RootLayout, RuntimeStorageConfig};
 use crate::infrastructure::state::RuntimeStateStore;
 use crate::ingress::{
     build_desired_ingress_state, drain_ingress_emissions, DesiredIngressState,
     TriggerIngressSupervisor,
 };
-use crate::plugin::{HostCancellation, HostCancellationReason};
+use crate::plugin::{HostCancellation, HostCancellationReason, PluginKind, PluginManifest};
 
 const SERVE_LEASE_TTL_MS: i64 = 30_000;
 const SERVE_LEASE_RENEW_INTERVAL_MS: i64 = 10_000;
@@ -334,9 +339,22 @@ fn renew_serve_lease_once(
     Ok(grant)
 }
 
-pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacingError> {
-    let root_layout = request.resolve_existing_root()?;
-    let definitions = request.load_root_definition_bundle()?;
+#[derive(Debug)]
+pub(crate) struct DaemonStart {
+    pub(crate) owner_id: String,
+    pub(crate) pid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    NoActiveDaemon,
+    StaleStateCleaned,
+    ActiveLeaseCleared,
+    ShutdownRequested,
+}
+
+pub(crate) fn execute_serve(root_layout: &RootLayout) -> Result<DaemonStart, UserFacingError> {
+    let definitions = load_root_definition_bundle(root_layout).map_err(UserFacingError::from_contract)?;
     let storage_config = definitions
         .root_config
         .resolve_runtime_storage(&root_layout.root)
@@ -354,7 +372,7 @@ pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacin
             store
                 .register_daemon_start(&owner_id, None, now_ms, now_ms + SERVE_LEASE_TTL_MS)
                 .map_err(|error| map_runtime_state_error("register daemon start", error))?;
-            let mut child = match spawn_serve_daemon_process(&owner_id) {
+            let mut child = match spawn_serve_daemon_process(&owner_id, root_layout) {
                 Ok(child) => child,
                 Err(error) => {
                     let cleanup_at_ms = current_time_ms().unwrap_or(now_ms);
@@ -387,12 +405,7 @@ pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacin
                     error
                 },
             )?;
-            Ok(CliOutput::text(format!(
-                "serve started: owner={} pid={} root={}\nuse `chainbot status --json` for health and `chainbot observe` for persisted runtime output",
-                owner_id,
-                child.id(),
-                root_layout.root.display()
-            )))
+            Ok(DaemonStart { owner_id, pid: child.id() })
         }
         LeaseAcquireResult::Rejected {
             current_owner,
@@ -406,9 +419,8 @@ pub(crate) fn execute_serve(request: &CliRequest) -> Result<CliOutput, UserFacin
     }
 }
 
-pub(crate) fn execute_stop(request: &CliRequest) -> Result<CliOutput, UserFacingError> {
-    let root_layout = request.resolve_existing_root()?;
-    let definitions = request.load_root_definition_bundle()?;
+pub(crate) fn execute_stop(root_layout: &RootLayout) -> Result<StopOutcome, UserFacingError> {
+    let definitions = load_root_definition_bundle(root_layout).map_err(UserFacingError::from_contract)?;
     let storage_config = definitions
         .root_config
         .resolve_runtime_storage(&root_layout.root)
@@ -422,16 +434,14 @@ pub(crate) fn execute_stop(request: &CliRequest) -> Result<CliOutput, UserFacing
 
     match status.state {
         ServeLeaseState::Idle => {
-            return Ok(CliOutput::text("stop completed: no active daemon"));
+            return Ok(StopOutcome::NoActiveDaemon);
         }
         ServeLeaseState::Stale => {
             if let Some(owner_id) = status.owner_id.as_deref() {
                 let _ = store.mark_daemon_stopped(owner_id, now_ms);
                 let _ = store.release_serve_lease(owner_id);
             }
-            return Ok(CliOutput::text(
-                "stop completed: stale daemon state cleaned up",
-            ));
+            return Ok(StopOutcome::StaleStateCleaned);
         }
         ServeLeaseState::Active => {}
     }
@@ -443,27 +453,21 @@ pub(crate) fn execute_stop(request: &CliRequest) -> Result<CliOutput, UserFacing
         if let Some(owner_id) = status.owner_id.as_deref() {
             let _ = store.mark_daemon_stopped(owner_id, now_ms);
             let _ = store.release_serve_lease(owner_id);
-            return Ok(CliOutput::text("stop completed: active lease cleared"));
+            return Ok(StopOutcome::ActiveLeaseCleared);
         }
-        return Ok(CliOutput::text("stop completed: no active daemon"));
+        return Ok(StopOutcome::NoActiveDaemon);
     }
 
     wait_for_daemon_stop(&storage_config)?;
-    Ok(CliOutput::text("stop completed: daemon shutdown requested"))
+    Ok(StopOutcome::ShutdownRequested)
 }
 
 pub(crate) fn execute_internal_serve_daemon(
-    request: &CliRequest,
-) -> Result<CliOutput, UserFacingError> {
-    let owner_id = request.daemon_owner_id.clone().ok_or_else(|| {
-        UserFacingError::state_with_code(
-            "daemon_start_failed",
-            "Internal daemon start is missing the daemon owner identifier.",
-        )
-    })?;
+    root_layout: &RootLayout,
+    owner_id: String,
+) -> Result<(), UserFacingError> {
     let now_ms = current_time_ms()?;
-    let root_layout = request.resolve_existing_root()?;
-    let definitions = request.load_root_definition_bundle()?;
+    let definitions = load_root_definition_bundle(root_layout).map_err(UserFacingError::from_contract)?;
     let storage_config = definitions
         .root_config
         .resolve_runtime_storage(&root_layout.root)
@@ -477,20 +481,20 @@ pub(crate) fn execute_internal_serve_daemon(
             .inspect_daemon_status(now_ms)
             .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
         if status.owner_id.as_deref() != Some(owner_id.as_str()) {
-            return Ok(CliOutput::text(String::new()));
+            return Ok(());
         }
         if status.stop_requested_at_ms.is_some() {
-            return Ok(CliOutput::text(String::new()));
+            return Ok(());
         }
         maybe_delay_daemon_start_for_tests()?;
         let status = store
             .inspect_daemon_status(current_time_ms()?)
             .map_err(|error| map_runtime_state_error("inspect daemon status", error))?;
         if status.owner_id.as_deref() != Some(owner_id.as_str()) {
-            return Ok(CliOutput::text(String::new()));
+            return Ok(());
         }
         if status.stop_requested_at_ms.is_some() {
-            return Ok(CliOutput::text(String::new()));
+            return Ok(());
         }
         let acked_at_ms = status
             .started_at_ms
@@ -505,7 +509,7 @@ pub(crate) fn execute_internal_serve_daemon(
             .map_err(|error| map_runtime_state_error("renew daemon start lease", error))?
         {
             LeaseAcquireResult::Acquired { grant } | LeaseAcquireResult::Renewed { grant } => grant,
-            LeaseAcquireResult::Rejected { .. } => return Ok(CliOutput::text(String::new())),
+            LeaseAcquireResult::Rejected { .. } => return Ok(()),
         };
         store
             .heartbeat_daemon(
@@ -519,13 +523,13 @@ pub(crate) fn execute_internal_serve_daemon(
             .daemon_stop_requested(&owner_id)
             .map_err(|error| map_runtime_state_error("inspect daemon stop request", error))?
         {
-            return Ok(CliOutput::text(String::new()));
+            return Ok(());
         }
         grant
     };
 
     let loop_result = run_internal_serve_daemon_loop(
-        request,
+        root_layout,
         &storage_config,
         &owner_id,
         pid,
@@ -538,10 +542,10 @@ pub(crate) fn execute_internal_serve_daemon(
     }
 
     loop_result?;
-    Ok(CliOutput::text(String::new()))
+    Ok(())
 }
 
-fn spawn_serve_daemon_process(owner_id: &str) -> Result<std::process::Child, UserFacingError> {
+fn spawn_serve_daemon_process(owner_id: &str, root_layout: &RootLayout) -> Result<std::process::Child, UserFacingError> {
     std::process::Command::new(std::env::current_exe().map_err(|source| {
         UserFacingError::state_with_code(
             "daemon_start_failed",
@@ -549,6 +553,7 @@ fn spawn_serve_daemon_process(owner_id: &str) -> Result<std::process::Child, Use
         )
     })?)
     .args(["__serve-daemon", "--owner-id", owner_id])
+    .env(crate::infrastructure::config::CHAINBOT_CONFIG_DIR_ENV, &root_layout.root)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
@@ -616,7 +621,7 @@ fn wait_for_daemon_stop(storage_config: &RuntimeStorageConfig) -> Result<(), Use
 }
 
 pub(crate) fn run_internal_serve_daemon_loop(
-    request: &CliRequest,
+    root_layout: &RootLayout,
     storage_config: &RuntimeStorageConfig,
     owner_id: &str,
     pid: i64,
@@ -659,7 +664,7 @@ pub(crate) fn run_internal_serve_daemon_loop(
 
         lease_supervisor.maybe_renew(observed_at_ms)?;
 
-        let mut runtime = match request.load_runtime_context() {
+        let mut runtime = match resolve_existing_root(root_layout).and_then(RuntimeContext::load) {
             Ok(runtime) => runtime,
             Err(error) => {
                 let _ = ingress_supervisor.reconcile(DesiredIngressState::default());
@@ -747,7 +752,7 @@ pub(crate) fn serve_once_with_lease(
     accepted_at_ms: i64,
     lease_supervisor: &mut ServeLeaseSupervisor,
     external_trigger_supervisor: &mut ExternalTriggerSupervisor,
-) -> Result<CliOutput, UserFacingError> {
+) -> Result<Vec<TriggerRunRequest>, UserFacingError> {
     lease_supervisor.maybe_renew(accepted_at_ms)?;
     let replay_requests =
         load_replayable_trigger_requests(runtime, REPLAYABLE_TRIGGER_BATCH_LIMIT)?;
@@ -821,14 +826,11 @@ pub(crate) fn serve_once_with_lease(
             .map_err(|error| map_runtime_state_error("mark ingress inbox processed", error))?;
     }
     if run_requests.is_empty() && replay_requests.is_empty() {
-        return Ok(CliOutput::text(
-            "serve completed: no accepted trigger events",
-        ));
+        return Ok(Vec::new());
     }
 
     let run_requests = merge_trigger_requests(replay_requests, run_requests);
 
-    let mut completed_runs = Vec::with_capacity(run_requests.len());
     let mut failures = Vec::new();
 
     for trigger_request in &run_requests {
@@ -842,7 +844,7 @@ pub(crate) fn serve_once_with_lease(
             fence.as_ref(),
             &lease_supervisor.cancellation(),
         ) {
-            Ok(run_result) => completed_runs.push((trigger_request, run_result)),
+            Ok(_) => {}
             Err(error) => failures.push(format!(
                 "trigger_id={} event_id={} workflow_id={} error={error}",
                 trigger_request.trigger_id, trigger_request.event_id, trigger_request.workflow_id
@@ -859,23 +861,7 @@ pub(crate) fn serve_once_with_lease(
         )));
     }
 
-    let mut output_lines = Vec::with_capacity(completed_runs.len().saturating_add(1));
-    output_lines.push(format!(
-        "serve completed: executed {} accepted trigger event(s)",
-        completed_runs.len()
-    ));
-    for (trigger_request, run_result) in completed_runs {
-        output_lines.push(format!(
-            "serve run: run_id={} workflow_id={} status={} trigger_id={} event_id={}",
-            run_result.run_id,
-            run_result.workflow_id,
-            render_run_status(run_result.status),
-            trigger_request.trigger_id,
-            trigger_request.event_id
-        ));
-    }
-
-    Ok(CliOutput::text(output_lines.join("\n")))
+    Ok(run_requests)
 }
 
 fn map_trigger_error(error: TriggerPlaneError) -> UserFacingError {
@@ -884,15 +870,6 @@ fn map_trigger_error(error: TriggerPlaneError) -> UserFacingError {
         TriggerPlaneError::RuntimeState(source) => UserFacingError::state(format!(
             "Failed to evaluate trigger-plane runtime state: {source}"
         )),
-    }
-}
-
-fn render_run_status(status: RunStatus) -> &'static str {
-    match status {
-        RunStatus::Pending => "pending",
-        RunStatus::Running => "running",
-        RunStatus::Succeeded => "succeeded",
-        RunStatus::Failed => "failed",
     }
 }
 
@@ -914,6 +891,121 @@ fn serve_start_ack_timeout_ms() -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(SERVE_START_ACK_TIMEOUT_MS)
+}
+
+fn build_trigger_host_policy(
+    root_config: &RootConfigDefinition,
+    manifests: &[PluginManifest],
+    plugins_root_dir: &Path,
+    secrets_root_dir: &Path,
+) -> Result<TriggerPluginHostPolicy, ContractError> {
+    let allowlisted_plugin_ids = manifests
+        .iter()
+        .filter_map(|manifest| {
+            manifest
+                .kind()
+                .ok()
+                .filter(|kind| *kind == PluginKind::ExternalTrigger)
+                .map(|_| manifest.plugin_id.clone())
+        })
+        .collect();
+
+    Ok(TriggerPluginHostPolicy {
+        allowlisted_plugin_ids,
+        allowed_capabilities: BTreeSet::from([REQUIRED_TRIGGER_PLUGIN_CAPABILITY.to_owned()]),
+        plugin_root_dir: plugins_root_dir.to_path_buf(),
+        plugin_activation: parse_trigger_plugin_activation_bindings(root_config)?,
+        secrets_root_dir: secrets_root_dir.to_path_buf(),
+    })
+}
+
+fn collect_external_trigger_manifests(
+    plugin_manifests: &[PluginManifest],
+) -> Vec<PluginManifest> {
+    plugin_manifests
+        .iter()
+        .filter_map(|manifest| {
+            manifest
+                .kind()
+                .ok()
+                .filter(|kind| *kind == PluginKind::ExternalTrigger)
+                .map(|_| manifest.clone())
+        })
+        .collect()
+}
+
+fn normalized_request_from_trigger(
+    trigger_request: &TriggerRunRequest,
+) -> NormalizedRunRequest {
+    let mut request = NormalizedRunRequest::new(
+        trigger_request.run_id.clone(),
+        trigger_request.workflow_id.clone(),
+    );
+
+    match &trigger_request.payload {
+        serde_json::Value::Object(values) => {
+            request.trigger_payload_mapping.extend(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+        }
+        other => {
+            request
+                .trigger_payload_mapping
+                .insert(String::from("payload"), other.clone());
+        }
+    }
+
+    request
+}
+
+fn load_replayable_trigger_requests(
+    runtime: &mut RuntimeContext,
+    limit: usize,
+) -> Result<Vec<TriggerRunRequest>, UserFacingError> {
+    runtime
+        .state_store
+        .list_replayable_trigger_records(limit)
+        .map_err(|error| map_runtime_state_error("list replayable trigger records", error))
+        .map(|records| {
+            records
+                .into_iter()
+                .map(replay_trigger_request_from_record)
+                .collect()
+        })
+}
+
+fn replay_trigger_request_from_record(record: TriggerEventRecord) -> TriggerRunRequest {
+    TriggerRunRequest {
+        run_id: record.run_id,
+        workflow_id: record.workflow_id,
+        trigger_id: record.trigger_id.clone(),
+        event_id: record.event_id,
+        source: record.source,
+        accepted_at_ms: record.accepted_at_ms,
+        payload: record.payload,
+        trigger_record_ref: format!(
+            "db://trigger_event_records/{}/{}",
+            record.trigger_id, record.sequence
+        ),
+    }
+}
+
+fn merge_trigger_requests(
+    replay_requests: Vec<TriggerRunRequest>,
+    new_requests: Vec<TriggerRunRequest>,
+) -> Vec<TriggerRunRequest> {
+    let mut merged = Vec::with_capacity(replay_requests.len().saturating_add(new_requests.len()));
+    let mut seen_run_ids = BTreeSet::new();
+
+    for request in replay_requests.into_iter().chain(new_requests) {
+        if seen_run_ids.insert(request.run_id.clone()) {
+            merged.push(request);
+        }
+    }
+
+    merged
 }
 
 #[cfg(test)]
@@ -991,5 +1083,371 @@ mod tests {
             .expect("system clock should be after UNIX epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("chainbot-{prefix}-{nonce}.sqlite3"))
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use super::super::context::resolve_existing_root;
+    use crate::domain::state::StagedTriggerEventRecord;
+    use crate::infrastructure::config::RuntimeStorageBackend;
+
+    const CHAINBOT_SECRET_DECRYPTOR_ENV: &str = "CHAINBOT_SECRET_DECRYPTOR";
+    const SECRET_DECRYPTOR_PLAINTEXT: &str = "plaintext";
+
+    const TEST_SERVE_LEASE_TTL_MS: i64 = 30_000;
+
+    #[test]
+    fn replay_requests_keep_priority_and_payload_when_new_requests_overlap() {
+        let replay = trigger_request("replayed", serde_json::json!({"value": "persisted"}));
+        let duplicate = trigger_request("replayed", serde_json::json!({"value": "new"}));
+        let fresh = trigger_request("fresh", serde_json::json!({"value": "fresh"}));
+        let merged = merge_trigger_requests(vec![replay.clone()], vec![duplicate, fresh]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].run_id, "replayed");
+        assert_eq!(merged[0].payload, replay.payload);
+        assert_eq!(merged[1].run_id, "fresh");
+    }
+
+    #[test]
+    fn trigger_payload_normalization_preserves_objects_and_wraps_other_values() {
+        for payload in [serde_json::json!({"symbol": "ETH"}), serde_json::json!([1, 2]), serde_json::Value::Null] {
+            let request = normalized_request_from_trigger(&trigger_request("run", payload.clone()));
+            assert_eq!(request.run_id, "run");
+            assert_eq!(request.workflow_id, "workflow");
+            let expected = match payload {
+                serde_json::Value::Object(values) => values.into_iter().collect(),
+                other => BTreeMap::from([(String::from("payload"), other)]),
+            };
+            assert_eq!(request.trigger_payload_mapping, expected);
+        }
+    }
+
+    fn trigger_request(run_id: &str, payload: serde_json::Value) -> TriggerRunRequest {
+        TriggerRunRequest {
+            run_id: run_id.to_owned(),
+            workflow_id: String::from("workflow"),
+            trigger_id: String::from("trigger"),
+            event_id: run_id.to_owned(),
+            source: String::from("test"),
+            accepted_at_ms: 1,
+            payload,
+            trigger_record_ref: String::from("db://trigger_event_records/trigger/1"),
+        }
+    }
+
+    #[test]
+    fn config_reload_requires_restart() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-config-reload-requires-restart");
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let mut runtime = load_test_runtime(&root)
+            .expect("initial runtime load should succeed");
+
+        fs::write(
+            root.join("triggers")
+                .join("external-trigger-e2e")
+                .join("config.toml"),
+            "manifest_version = \"2.0.0\"\ntrigger_id = [\n",
+        )
+        .expect("mutated trigger file should be writable");
+
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            runtime.storage_config.clone(),
+            String::from("test-owner"),
+            i64::from(std::process::id()),
+            1_710_300_000_000,
+        );
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_000_000,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("already loaded runtime should ignore on-disk config mutation");
+        assert_eq!(serve_output.len(), 1);
+
+        let reload_error = load_test_runtime(&root)
+            .expect_err("restarting after config mutation should observe invalid TOML");
+        assert!(matches!(reload_error, UserFacingError::Validation { .. }));
+        assert!(reload_error
+            .to_string()
+            .contains("definition file is invalid TOML"));
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn serve_drains_all_requests_from_snapshot() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-serve-drains-all-requests");
+        fs::create_dir_all(root.join("triggers").join("builtin-trigger-e2e"))
+            .expect("builtin trigger package directory should be creatable");
+        fs::write(
+            root.join("triggers")
+                .join("builtin-trigger-e2e")
+                .join("config.toml"),
+            "manifest_version = \"2.0.0\"\ntrigger_id = \"builtin-trigger-e2e\"\nkind = \"builtin\"\nsource = \"manual\"\nworkflow_id = \"wf-e2e\"\nenabled = true\n",
+        )
+        .expect("builtin trigger fixture should be writable");
+
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let mut runtime = load_test_runtime(&root)
+            .expect("runtime load should succeed with canonical builtin trigger");
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            runtime.storage_config.clone(),
+            String::from("test-owner"),
+            i64::from(std::process::id()),
+            1_710_300_100_000,
+        );
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_100_000,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("serve should execute every accepted request from the snapshot");
+
+        assert_eq!(serve_output.len(), 2);
+        assert!(serve_output.iter().any(|request| request.trigger_id == "builtin-trigger-e2e"));
+        assert!(serve_output.iter().any(|request| request.trigger_id == "external-trigger-e2e"));
+
+        let run_summaries = runtime
+            .state_store
+            .list_run_summaries()
+            .expect("serve snapshot runs should be persisted");
+        assert_eq!(run_summaries.len(), 2);
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn serve_bridges_pending_staged_external_events() {
+        let _guard = fixture_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let root = prepare_fixture_root("success", "cli-serve-bridges-staged-external-events");
+
+        unsafe {
+            std::env::set_var("CHAINBOT_CONFIG_DIR", &root);
+            std::env::set_var(CHAINBOT_SECRET_DECRYPTOR_ENV, SECRET_DECRYPTOR_PLAINTEXT);
+        }
+
+        let mut runtime = load_test_runtime(&root)
+            .expect("runtime load should succeed for staged external bridge coverage");
+        runtime
+            .state_store
+            .append_staged_trigger_event_record(&StagedTriggerEventRecord {
+                schema_version: String::from("1.0.0"),
+                staging_id: String::from("staging-external-bridge-1"),
+                trigger_id: String::from("external-trigger-e2e"),
+                workflow_id: String::from("wf-e2e"),
+                event_id: String::from("external-trigger-e2e:event-staged"),
+                source: String::from("external-trigger-plugin"),
+                occurred_at_ms: 1_710_300_150_000,
+                staged_at_ms: 1_710_300_150_001,
+                checkpoint: Some(String::from("cp-staged-1")),
+                payload: serde_json::json!({"symbol": "ETHUSDT"}),
+                dedup_key: None,
+                dedup_window_ms: None,
+                cooldown_key: None,
+                cooldown_ms: None,
+                accepted_at_ms: None,
+                last_error: None,
+            })
+            .expect("staged external trigger row should persist before serve turn");
+
+        let mut lease_supervisor = ServeLeaseSupervisor::new(
+            runtime.storage_config.clone(),
+            String::from("test-owner"),
+            i64::from(std::process::id()),
+            1_710_300_150_000,
+        );
+        let mut external_trigger_supervisor = ExternalTriggerSupervisor::new("test-owner");
+        let serve_output = serve_once_with_lease(
+            &mut runtime,
+            1_710_300_150_010,
+            &mut lease_supervisor,
+            &mut external_trigger_supervisor,
+        )
+        .expect("serve should bridge staged external rows through trigger acceptance");
+
+        assert_eq!(serve_output.len(), 2);
+        assert!(serve_output.iter().any(|request| request.event_id == "external-trigger-e2e:event-staged"));
+
+        let pending = runtime
+            .state_store
+            .list_pending_staged_trigger_event_records("external-trigger-e2e", 10)
+            .expect("pending staged rows should be queryable after serve bridge");
+        assert!(pending.is_empty());
+
+        unsafe {
+            std::env::remove_var("CHAINBOT_CONFIG_DIR");
+            std::env::remove_var(CHAINBOT_SECRET_DECRYPTOR_ENV);
+        }
+    }
+
+    #[test]
+    fn serve_lease_supervisor_renews_same_owner_lease() {
+        let root = prepare_fixture_root("success", "cli-serve-lease-renewal");
+        let storage_config = RuntimeStorageConfig {
+            backend: RuntimeStorageBackend::Local {
+                database_path: root.join("state").join("runtime.sqlite3"),
+            },
+            history_retention: None,
+            raw_debug_enabled: false,
+            raw_debug_artifacts_dir: None,
+        };
+        let mut state_store = RuntimeStateStore::open(&storage_config, 1_710_300_200_000)
+            .expect("runtime state store should open");
+        assert!(matches!(
+            state_store
+                .try_acquire_serve_lease("owner-renew", 1_710_300_200_000, TEST_SERVE_LEASE_TTL_MS,)
+                .expect("initial lease should acquire"),
+            crate::domain::state::LeaseAcquireResult::Acquired { .. }
+        ));
+
+        let mut supervisor = ServeLeaseSupervisor::new(
+            storage_config,
+            String::from("owner-renew"),
+            i64::from(std::process::id()),
+            1_710_300_200_000,
+        );
+        supervisor
+            .maybe_renew(1_710_300_210_100)
+            .expect("lease renewal should succeed for same owner");
+
+        let snapshot = state_store
+            .inspect_serve_lease(1_710_300_210_100)
+            .expect("lease snapshot should load after renewal");
+        assert!(matches!(
+            snapshot.state,
+            crate::domain::state::ServeLeaseState::Active
+        ));
+        assert_eq!(snapshot.owner_id.as_deref(), Some("owner-renew"));
+        assert_eq!(snapshot.expires_at_ms, Some(1_710_300_240_100));
+    }
+
+    fn load_test_runtime(root: &Path) -> Result<RuntimeContext, UserFacingError> {
+        let layout = resolve_existing_root(&RootLayout::from_root(root.to_path_buf()))?;
+        RuntimeContext::load(layout)
+    }
+
+    fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+        fs::create_dir_all(destination)?;
+        let entries = fs::read_dir(source)?;
+        for entry in entries {
+            let entry = entry?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+
+            if source_path.is_dir() {
+                copy_directory_recursive(&source_path, &destination_path)?;
+            } else {
+                if let Some(parent) = destination_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&source_path, &destination_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn prepare_fixture_root(case_name: &str, root_name: &str) -> PathBuf {
+        let root = workspace_root()
+            .join("target")
+            .join("test-roots")
+            .join(root_name);
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing fixture root should be removable");
+        }
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("e2e")
+            .join(case_name);
+        copy_directory_recursive(&source, &root).expect("fixture root should copy");
+        let root_config_path = root.join("chainbot.toml");
+        let root_config = fs::read_to_string(&root_config_path)
+            .expect("copied fixture root config should be readable");
+        let updated_root_config = root_config
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("chainbot_version = ") {
+                    format!("chainbot_version = \"{}\"", env!("CARGO_PKG_VERSION"))
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&root_config_path, format!("{updated_root_config}\n"))
+            .expect("fixture root config should be rewritten with the running version");
+
+        make_executable(&root.join("plugins").join("bin").join("external_trigger.sh"));
+        make_executable(&root.join("plugins").join("bin").join("external_node.sh"));
+
+        root
+    }
+
+    fn workspace_root() -> PathBuf {
+        let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        crate_root
+            .parent()
+            .expect("crates directory should exist")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path)
+                .expect("fixture script metadata should exist")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("fixture script should be executable");
+        }
+    }
+
+    fn fixture_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 }

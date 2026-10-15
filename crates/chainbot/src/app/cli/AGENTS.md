@@ -11,7 +11,7 @@
 
 ## Members
 - `mod.rs`: CLI boundary root.
-- `commands.rs`: Top-level command intent definitions.
+- `commands.rs`: Command dispatch, root preparation, runtime-entrypoint adaptation, and CLI output rendering.
 - `parse.rs`: CLI argument parsing and normalization.
 - `help.rs`: User-facing help rendering.
 - `view/`: Output shaping for CLI-visible models.

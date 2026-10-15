@@ -1,11 +1,11 @@
 //! [INPUT]
-//! Long-running runtime orchestration dependencies from CLI command handlers and runtime/state subsystems.
+//! Resolved workspace roots, daemon owner identifiers, and workflow/trigger/state runtime contracts.
 //!
 //! [OUTPUT]
-//! App-layer runtime controllers for daemon lifecycle and serve-loop orchestration.
+//! Crate-local manual-run and daemon lifecycle entrypoints, shared runtime utilities, and trigger compatibility constructors.
 //!
 //! [ROLE]
-//! Isolates runtime process orchestration from CLI parsing/help and read-model rendering.
+//! Owns the application runtime boundary independently of CLI request and output types.
 
 use std::collections::BTreeMap;
 
@@ -19,10 +19,16 @@ use crate::infrastructure::config::{RuntimeStorageBackend, RuntimeStorageConfig}
 use crate::infrastructure::state::{RuntimeStateStore, StateLayout};
 use crate::plugin::PluginManifest;
 
-pub(crate) mod daemon;
+mod context;
+mod daemon;
 pub(crate) mod execution;
 pub(crate) mod external_triggers;
 pub(crate) mod plugin_activation;
+mod run;
+
+pub(crate) use context::{current_time_ms, map_runtime_state_error, resolve_existing_root};
+pub(crate) use daemon::{execute_internal_serve_daemon, execute_serve, execute_stop, StopOutcome};
+pub(crate) use run::{render_run_status, run_manual_workflow};
 
 impl TriggerPlane {
     pub fn open(
