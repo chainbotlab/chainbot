@@ -21,6 +21,7 @@ use crate::plugin::PluginManifest;
 
 mod context;
 mod daemon;
+mod lease;
 pub(crate) mod execution;
 pub(crate) mod external_triggers;
 pub(crate) mod plugin_activation;

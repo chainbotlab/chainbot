@@ -15,6 +15,7 @@
 - `context.rs`: Effective root resolution, execution-context loading, recovery, and history retention.
 - `run.rs`: Manual workflow selection, shared run execution, and lease-fenced run persistence.
 - `daemon.rs`: Daemon lifecycle, trigger-request assembly/replay, and lease-bound serve turns.
+- `lease.rs`: Private daemon lease session owning the persistent control store, shared renewal state, execution fence, cancellation, and heartbeat shutdown.
 - `execution.rs`: Workflow scheduling and node/subflow execution.
 - `plugin_activation.rs`: Shared execution-time plugin activation resolution and error redaction.
 - `external_triggers/`: External-trigger host supervision and listener orchestration.
